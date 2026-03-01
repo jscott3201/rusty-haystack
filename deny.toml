@@ -5,8 +5,6 @@ no-default-features = false
 exclude = ["rusty-haystack"]
 
 [advisories]
-db-path = "~/.cargo/advisory-db"
-db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = []
 unmaintained = "workspace"
 
