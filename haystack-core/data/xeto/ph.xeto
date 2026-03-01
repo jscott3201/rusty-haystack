@@ -1,0 +1,4347 @@
+// --- attr.xeto ---
+//
+// Copyright (c) 2024-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   27 Mar 2024  Brian Frank  Creation
+//   20 Nov 2025  Brian Frank  Re-orangize using PhEntity
+//
+
+// Attribute is a single datum of static information on an entity.
+// Attributes often represent nameplate data or design/rated data.
+Attr: PhEntity <abstract> {
+  attr           // Required marker tag for all attributes
+  val: Obj       // Value of the attribute
+}
+
+
+// --- choices.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+// Auto-generated 26-Feb-2025
+//
+
+//////////////////////////////////////////////////////////////////////////
+// AhuZoneDelivery
+//////////////////////////////////////////////////////////////////////////
+
+// AHU delivery method of conditioned air to the zone
+AhuZoneDelivery: Choice
+
+// AHU supplies air to chilled beam terminal units
+ChilledBeamAhuZoneDelivery: AhuZoneDelivery { chilledBeamZone }
+
+// AHU supplies air directly to the zone
+DirectAhuZoneDelivery: AhuZoneDelivery { directZone }
+
+// AHU discharge air is split into a duct per zone
+MultiAhuZoneDelivery: AhuZoneDelivery { multiZone }
+
+// AHU supplies air to VAV terminal units
+VavAhuZoneDelivery: AhuZoneDelivery { vavZone }
+
+//////////////////////////////////////////////////////////////////////////
+// AirVolumeAdjustability
+//////////////////////////////////////////////////////////////////////////
+
+// Ability of air handling equip to adjust volume of air flow
+AirVolumeAdjustability: Choice
+
+// Delivers a constant volume of air flow.  Typically this means
+// equipment with a single speed fan.
+ConstantAirVolumeAdjustability: AirVolumeAdjustability { constantAirVolume }
+
+// Delivers a variable volume of air flow.   Most variable volume systems
+// are powered by a VFD fan. However other techniques such as inlet vanes
+// may be used in older systems.
+VariableAirVolumeAdjustability: AirVolumeAdjustability { variableAirVolume }
+
+//////////////////////////////////////////////////////////////////////////
+// AtesDesign
+//////////////////////////////////////////////////////////////////////////
+
+// Design type of the ATES underground system.
+AtesDesign: Choice
+
+// The ATES uses closed piping to transport a water/glycol mixture
+// through the ground. The system works like a heat exchanger; there
+// is no ground water transported.
+ClosedLoopAtesDesign: AtesDesign { atesClosedLoop }
+
+// The ATES has one or more pairs of a separate warm and cool well.
+DoubletAtesDesign: AtesDesign { atesDoublet }
+
+// The ATES is as a doublet, but with specific warm and cool wells linked together.
+// These linked wells do not exchange water with other wells.
+DoubletPairedAtesDesign: AtesDesign { atesDoubletPaired }
+
+// The ATES has only one physical well.  This well is deep enough
+// to penetrate two layers of groundwater.
+MonoAtesDesign: AtesDesign { atesMono }
+
+// Similar to a doublet, but water always flows in the same direction from
+// the extraction to the infiltration well.
+UnidirectionalAtesDesign: AtesDesign { atesUnidirectional }
+
+//////////////////////////////////////////////////////////////////////////
+// ChillerMechanism
+//////////////////////////////////////////////////////////////////////////
+
+// Primary mechanism of chiller
+ChillerMechanism: Choice
+
+// Cooling process using energy from heat source such as hot water
+AbsorptionChillerMechanism: ChillerMechanism { absorption }
+
+// Compression via a continuous flow of fluid through an impeller
+CentrifugalChillerMechanism: ChillerMechanism { centrifugal }
+
+// Piston compressor driven by a crankshaft
+ReciprocalChillerMechanism: ChillerMechanism { reciprocal }
+
+// Rotary screw compression
+RotaryScrewChillerMechanism: ChillerMechanism { rotaryScrew }
+
+//////////////////////////////////////////////////////////////////////////
+// CondenserLoop
+//////////////////////////////////////////////////////////////////////////
+
+// Open or closed loop for condenser working fluid
+CondenserLoop: Choice
+
+// Working fluid is kept separate from fluid used for heat transfer into the atmosphere
+ClosedCondenserLoop: CondenserLoop { condenserClosedLoop }
+
+// Uses working fluid itself for evaporation into the atmosphere
+OpenCondenserLoop: CondenserLoop { condenserOpenLoop }
+
+//////////////////////////////////////////////////////////////////////////
+// CoolingProcess
+//////////////////////////////////////////////////////////////////////////
+
+// Processed used to cool a substance
+CoolingProcess: Choice
+
+// Cooling by dissipating heat into the surrounding air
+AirCoolingProcess: CoolingProcess { airCooling }
+
+// Cooling using transfer of heat to chilled water
+ChilledWaterCoolingProcess: CoolingProcess { chilledWaterCooling }
+
+// Removal of heat through the process of water condensation
+CondenserCoolingProcess: CoolingProcess { condenserCooling }
+
+// Cooling using direct expansion of a refrigerant vapor.
+// Also see [ph::PhEntity.dxHeating] and [ph::PhEntity.heatPump].
+DxCoolingProcess: CoolingProcess { dxCooling }
+
+// Cooling using transfer of heat to water which is not explicitly chilled
+WaterCoolingProcess: CoolingProcess { waterCooling }
+
+//////////////////////////////////////////////////////////////////////////
+// DuctConfig
+//////////////////////////////////////////////////////////////////////////
+
+// Ductwork configuration
+DuctConfig: Choice
+
+// Two ducts: combination of hotDeck, coldDeck, or neutralDeck
+DualDuctConfig: DuctConfig { dualDuct }
+
+// One single duct
+SingleDuctConfig: DuctConfig { singleDuct }
+
+// Three ducts: hotDeck, coldDeck, or neutralDeck
+TripleDuctConfig: DuctConfig { tripleDuct }
+
+//////////////////////////////////////////////////////////////////////////
+// DuctDeck
+//////////////////////////////////////////////////////////////////////////
+
+// Cold, hot, or neutral deck. Can be applied to `ahu` equip if the AHU
+// is part of a `dualDuct` or `tripleDuct` system but only serves a single
+// deck type.
+DuctDeck: Choice
+
+// Duct carries air for cooling
+ColdDuctDeck: DuctDeck { coldDeck }
+
+// Duct carries air for heating
+HotDuctDeck: DuctDeck { hotDeck }
+
+// Duct carries air which by-passes both heating and cooling coils
+NeutralDuctDeck: DuctDeck { neutralDeck }
+
+//////////////////////////////////////////////////////////////////////////
+// DuctSection
+//////////////////////////////////////////////////////////////////////////
+
+// Equipment section of ductwork
+DuctSection: Choice
+
+// Duct for air leaving an equipment
+DischargeDuctSection: DuctSection { discharge }
+
+// Duct to access fresh outside air only for economizing, not ventilation
+EconomizerDuctSection: DuctSection { economizer }
+
+// Duct used to expel air back outside
+ExhaustDuctSection: DuctSection { exhaust }
+
+// Duct for exhausting combustion
+FlueDuctSection: DuctSection { flue }
+
+// Duct with air entering an equipment
+InletDuctSection: DuctSection { inlet }
+
+// Duct where fresh outside air and return air is mixed together
+MixedDuctSection: DuctSection { mixed }
+
+// Duct to access fresh outside air for both ventilation and economizer.
+OutsideDuctSection: DuctSection { outside }
+
+// Duct returning air back to equipment
+ReturnDuctSection: DuctSection { return }
+
+// Duct to access fresh outside air only for ventilation, not economizing
+VentilationDuctSection: DuctSection { ventilation }
+
+//////////////////////////////////////////////////////////////////////////
+// HeatingProcess
+//////////////////////////////////////////////////////////////////////////
+
+// Processed used to heat a substance
+HeatingProcess: Choice
+
+// Heating by the combustion of biomass
+BiomassHeatingProcess: HeatingProcess { biomassHeating }
+
+// Heating by the combustion of coal
+CoalHeatingProcess: HeatingProcess { coalHeating }
+
+// Heating using direct expansion of a refrigerant vapor.
+// Also see [ph::PhEntity.dxCooling] and [ph::PhEntity.heatPump].
+DxHeatingProcess: HeatingProcess { dxHeating }
+
+// Heating by the conversion of electrical energy
+ElecHeatingProcess: HeatingProcess { elecHeating }
+
+// Heating by the combustion of fuel oil
+FuelOilHeatingProcess: HeatingProcess { fuelOilHeating }
+
+// Heating using energy of hot water
+HotWaterHeatingProcess: HeatingProcess { hotWaterHeating }
+
+// Heating by the combustion of natural gas
+NaturalGasHeatingProcess: HeatingProcess { naturalGasHeating }
+
+// Heating by the combustion of propane
+PropaneHeatingProcess: HeatingProcess { propaneHeating }
+
+// Heating using energy of steam
+SteamHeatingProcess: HeatingProcess { steamHeating }
+
+//////////////////////////////////////////////////////////////////////////
+// MeterScope
+//////////////////////////////////////////////////////////////////////////
+
+// Classifies a meter as a main site meter or submeter
+MeterScope: Choice
+
+// Main meter for the associated site
+SiteMeterScope: MeterScope { siteMeter }
+
+// Submeters measure usage of a sub-system or equipment within a site
+SubmeterMeterScope: MeterScope { submeter }
+
+//////////////////////////////////////////////////////////////////////////
+// PfScope
+//////////////////////////////////////////////////////////////////////////
+
+// Power factor scope
+PfScope: Choice
+
+// Displacement power factor, which accounts for the phase angle between
+// voltage and current but excludes effects of nonlinear waveforms (
+// harmonic distortion).
+DisplacementPfScope: PfScope { pfDisplacement }
+
+// Distortion power factor, which measures the component of power factor
+// attributable to harmonic distortion in voltage and current waveforms.
+DistortionPfScope: PfScope { pfDistortion }
+
+// True power factor, which includes effects of harmonic distortion.
+// Power factor is assumed to be true power factor when [ph::PfScope] is not
+// defined.  However, it is recommended to specify a scope for power
+// factor to help avoid misinterpretation of data.
+TruePfScope: PfScope { pfTrue }
+
+//////////////////////////////////////////////////////////////////////////
+// PfStandard
+//////////////////////////////////////////////////////////////////////////
+
+// Standard for interpreting power factor's positive or negative sign
+PfStandard: Choice
+
+// Power factor according to the IEC convention defines a positive or
+// negative sign based on the direction of active power flow.  Power factor
+// is positive when active power flows into a load.  Power factor is negative
+// when active power flows out of a load.
+IecPfStandard: PfStandard { pfIec }
+
+// Power factor according to the IEEE convention defines a positive or
+// negative sign based on whether the load is capacitive or inductive.  Power
+// factor is positive when the load is capacitive, or when voltage lags behind
+// current.  Power factor is negative when the load is inductive, or when
+// current lags behind voltage.
+IeeePfStandard: PfStandard { pfIeee }
+
+//////////////////////////////////////////////////////////////////////////
+// PhaseCount
+//////////////////////////////////////////////////////////////////////////
+
+// Number of phases for an AC electrical power system or
+// connected equipment: single-phase, split-phase, two-phase, or
+// three-phase.
+PhaseCount: Choice
+
+// Single-phase AC electricity. Power is provided by a
+// single AC voltage source with a 2-wire connection.
+SinglePhaseCount: PhaseCount { singlePhase }
+
+// Split-phase AC electricity. Power is provided by a
+// single AC voltage source with a 3-wire connection, consisting of two hot
+// wires (phases), separated from each other by a 180-degree phase angle,
+// and one neutral wire.  Despite having two labeled phases, split-phase AC
+// electricity is not a true two-phase system.
+SplitPhaseCount: PhaseCount { splitPhase }
+
+// Three-phase AC electricity. Power is provided by three AC voltage
+// sources, each separated from the others by a 120-degree phase angle.
+// May have a 4-wire connection with a neutral (Wye) or a 3-wire connection
+// without a neutral (Delta).
+ThreePhaseCount: PhaseCount { threePhase }
+
+// Two-phase AC electricity. Power is provided by two AC voltage sources,
+// separated from each other by a 90-degree phase angle. Two-phase systems
+// are extremely rare in modern buildings; they have been replaced by
+// modern [ph::PhEntity.threePhase] systems.
+TwoPhaseCount: PhaseCount { twoPhase }
+
+//////////////////////////////////////////////////////////////////////////
+// PipeSection
+//////////////////////////////////////////////////////////////////////////
+
+// Equipment section of piping
+PipeSection: Choice
+
+// Pipe used to bypass an equipment
+BypassPipeSection: PipeSection { bypass }
+
+// Pipe used to circulate fluid through an equipment or system
+CircPipeSection: PipeSection { circ }
+
+// Pipe conveys fluid into an equipment
+EnteringPipeSection: PipeSection { entering }
+
+// Pipe used as central connection or manifold for other piping runs.
+HeaderPipeSection: PipeSection { header }
+
+// Pipe conveys fluid out of an equipment
+LeavingPipeSection: PipeSection { leaving }
+
+//////////////////////////////////////////////////////////////////////////
+// PlantLoop
+//////////////////////////////////////////////////////////////////////////
+
+// Plant piping loop: primary, secondary, or tertiary
+PlantLoop: Choice
+
+// Pipework which circulates closest to the energy source.  In a central
+// plant, the primary loop indicates the pipes and equipment within the
+// central plant.  In context of heat exchangers between the primary
+// and secondary loops, this tag indicates the side closest to the plant.
+PrimaryPlantLoop: PlantLoop { primaryLoop }
+
+// Pipework which circulates closest to the building or end use. In a
+// central plant, the secondary loop indicates the pipes and equipment between
+// the central plant and the building.  In context of heat exchangers between
+// the primary and secondary loops, this tag indicates the side closest to
+// the building.
+SecondaryPlantLoop: PlantLoop { secondaryLoop }
+
+// Pipework which circulates within the building.
+TertiaryPlantLoop: PlantLoop { tertiaryLoop }
+
+//////////////////////////////////////////////////////////////////////////
+// PointFunction
+//////////////////////////////////////////////////////////////////////////
+
+// Classifies the point as a sensor, command, or setpoint.
+// See [ph.doc::Points#point-function] chapter.
+PointFunction: Choice
+
+// Point is a command, actuator, AO/BO.
+// See [ph.doc::Points#point-function] chapter.
+CmdPointFunction: PointFunction { cmd }
+
+// Point is a sensor, input, AI/BI.
+// See [ph.doc::Points#point-function] chapter.
+SensorPointFunction: PointFunction { sensor }
+
+// Point is a setpoint, soft point, internal control variable, schedule.
+// See [ph.doc::Points#point-function] chapter.
+SpPointFunction: PointFunction { sp }
+
+// Synthetic point with computed operational data. The computed data
+// if classified as:
+//   - [ph::PhEntity.ml] for machine learning
+//   - [ph::PhEntity.sim] for simulation
+//   - [ph::PhEntity.computed] as catch all for other computations
+//
+// See [ph.doc::Synthetics] chapter.
+SyntheticPointFunction: PointFunction { synthetic }
+
+// Computed point. See [ph.doc::Synthetics] chapter.
+ComputedSyntheticPointFunction: SyntheticPointFunction { computed }
+
+// Machine learning point. See [ph.doc::Synthetics] chapter.
+MlSyntheticPointFunction: SyntheticPointFunction { ml }
+
+// Simulation point. See [ph.doc::Synthetics] chapter.
+SimSyntheticPointFunction: SyntheticPointFunction { sim }
+
+//////////////////////////////////////////////////////////////////////////
+// SimScenario
+//////////////////////////////////////////////////////////////////////////
+
+// See [ph.doc::Synthetics#simulation-overview] chapter.
+SimScenario: Choice
+
+// See [ph.doc::Synthetics#simulation-overview] chapter.
+BaselineSimScenario: SimScenario { simBaseline }
+
+// See [ph.doc::Synthetics#simulation-overview] chapter.
+OperationSimScenario: SimScenario { simOperation }
+
+// See [ph.doc::Synthetics#simulation-overview] chapter.
+OptimumSimScenario: SimScenario { simOptimum }
+
+//////////////////////////////////////////////////////////////////////////
+// VavAirCircuit
+//////////////////////////////////////////////////////////////////////////
+
+// How does the VAV pull in air
+VavAirCircuit: Choice
+
+// VAV pulls air from outside the primary air flow
+ParallelVavAirCircuit: VavAirCircuit { parallel }
+
+// VAV pulls air from the primary air flow
+SeriesVavAirCircuit: VavAirCircuit { series }
+
+//////////////////////////////////////////////////////////////////////////
+// VavModulation
+//////////////////////////////////////////////////////////////////////////
+
+// How does VAV modulate the temp based on duct pressure
+VavModulation: Choice
+
+// VAV damper modulates to control space temp; dependent on duct pressure
+// being maintained
+PressureDependentVavModulation: VavModulation { pressureDependent }
+
+// VAV damper or a control valve that modulates to maintain desired flow
+// setpoint; independent of the duct pressure
+PressureIndependentVavModulation: VavModulation { pressureIndependent }
+
+
+// --- device.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Re-orangize using PhEntity
+//
+
+// Microprocessor based hardware device.  This is the general term for
+// all computers, mobile phones, controllers, and I/O modules.
+// See [ph.doc::Devices#networks] chapter.
+Device: PhEntity {
+  device
+}
+
+// Logical communications network between two or more devices.
+// See [ph.doc::Devices#networks] chapter.
+Network: PhEntity {
+  network
+}
+
+// General purpose computer.
+Computer: Device {
+  computer
+}
+
+// Microprocessor based device used in a control system.  Controllers
+// interact with the physical world through direct I/O to sensors and
+// actuators or via network [protocols](ph::PhEntity.protocol).
+Controller: Device {
+  controller
+  equipRef: Ref?
+}
+
+// Cellular phone providing telecommunication over radio links.
+MobilePhone: Phone {
+  mobile
+}
+
+// Microprocessor device used to establish networks.
+NetworkingDevice: Device {
+  networking
+}
+
+// Networking device used to route data between different networks.
+NetworkingRouter: NetworkingDevice {
+  router
+}
+
+// Networking device used to connect devices on the same network.
+NetworkingSwitch: NetworkingDevice {
+  switch
+}
+
+// Portable laptop computer.
+Laptop: Computer {
+  laptop
+}
+
+// Telephone used for voice telecommunication.
+Phone: Device {
+  phone
+}
+
+// General purpose computer used as a server.  Typically servers are rack mounted.
+ServerComputer: Computer {
+  server
+}
+
+// Mobile device with touch screen for user input.
+Tablet: Device {
+  tablet
+}
+
+
+// --- entity.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Rework using new globals design
+//
+
+// Project Haystack entity.  This is base class for all entities
+// in the Haystack ontology.  It defines every tag as a global slot
+// to ensure consistent usage of terminology.
+PhEntity: Entity <abstract> {
+
+  // Cooling process using energy from heat source such as hot water
+  *absorption: Marker
+
+  // Relating to alternating current (AC) electricity
+  *ac: Marker
+
+  // Working, operative, effective
+  *active: Marker
+
+  // Equipment to move or control a mechanism.  Actuators may be manually
+  // operated or automated via a control system to convert an energy source
+  // into mechanical energy.  Typically the energy source is electricity,
+  // hydraulics, or pneumatics.
+  *actuator: Marker
+
+  // Air Handling Unit: An enclosure with a fan that delivers air to a space
+  // via ductwork and performs one or more of the functions of cleaning,
+  // heating, cooling, humidifying, dehumidifying, ventilating or circulating
+  // the air.  See [ph.doc::AHUs] chapter.
+  *ahu: Marker
+
+  // The mixture of gases which surrounds the earth
+  *air: Marker
+
+  // Cooling by dissipating heat into the surrounding air
+  *airCooling: Marker
+
+  // Air flows from the referent to this entity
+  *airRef: MultiRef
+
+  // Notification of a condition which requires attention
+  *alarm: Marker
+
+  // Measurement of the relative difference in direction between two vectors or phasors
+  *angle: Marker
+
+  // Perceived quantity
+  *apparent: Marker
+
+  // Area of a shape or floor space
+  *area: Number <quantity:"area">
+
+  // Aquifer Thermal Energy Storage system.
+  // See [ph.doc::ATES] chapter.
+  *ates: Marker
+
+  // The ATES uses closed piping to transport a water/glycol mixture
+  // through the ground. The system works like a heat exchanger; there
+  // is no ground water transported.
+  *atesClosedLoop: Marker
+
+  // The ATES has one or more pairs of a separate warm and cool well.
+  *atesDoublet: Marker
+
+  // The ATES is as a doublet, but with specific warm and cool wells linked together.
+  // These linked wells do not exchange water with other wells.
+  *atesDoubletPaired: Marker
+
+  // The ATES has only one physical well.  This well is deep enough
+  // to penetrate two layers of groundwater.
+  *atesMono: Marker
+
+  // Similar to a doublet, but water always flows in the same direction from
+  // the extraction to the infiltration well.
+  *atesUnidirectional: Marker
+
+  // Attribute is a single datum of static information on an entity.
+  // Attributes often represent nameplate data or design/rated data.
+  *attr: Marker
+
+  // Related to the atmosphere of the earth
+  *atmospheric: Marker
+
+  // Average; central or typical value; median
+  *avg: Marker
+
+  // ASHRAE building automation and control protocol
+  *bacnet: Marker
+
+  // Relating atmospheric pressure
+  *barometric: Marker
+
+  // Base URI for normalizing relative URIs
+  *baseUri: Uri
+
+  // Equipment used to store electric energy
+  *battery: Marker
+
+  // Plant or animal material used as fuel to produce electricity or heat
+  *biomass: Marker
+
+  // Heating by the combustion of biomass
+  *biomassHeating: Marker
+
+  // Removal from container or pipe
+  *blowdown: Marker
+
+  // Blowdown water flows from the referent to this entity
+  *blowdownWaterRef: MultiRef
+
+  // Short range wireless communication protocol
+  *bluetooth: Marker
+
+  // Equipment to generate hot water or steam for heating
+  *boiler: Marker
+
+  // Branch selector used for heat recovery in a VRF system.  These are
+  // control devices directing the liquid refrigerant or gas refrigerant
+  // to zones requiring cooling or heating. See [ph.doc::VRF#branch-selector]
+  // chapter.
+  *branchSelector: Marker
+
+  // Pipe used to bypass an equipment
+  *bypass: Marker
+
+  // An assembly of one or more insulated conductors.
+  *cable: Marker
+
+  // Constant air volume terminal unit.  CAV systems use a constant
+  // air flow rate with a variable air temperature.
+  *cav: Marker
+
+  // Compression via a continuous flow of fluid through an impeller
+  *centrifugal: Marker
+
+  // Formaldehyde (CH₂O)
+  *ch2o: Marker
+
+  // Methane (CH₄)
+  *ch4: Marker
+
+  // Substance is cooled using cooling process
+  *chilled: Marker
+
+  // Conditions a space using a heat exchanger integrated into the ceiling
+  *chilledBeam: Marker
+
+  // AHU supplies air to chilled beam terminal units
+  *chilledBeamZone: Marker
+
+  // Cooling using transfer of heat to chilled water
+  *chilledWaterCooling: Marker
+
+  // Chilled water flows from the referent to this entity
+  *chilledWaterRef: MultiRef
+
+  // Equipment to remove heat from a liquid.  Chillers typically use a vapor
+  // compression or an absorption refrigeration cycle.
+  *chiller: Marker
+
+  // Pipe used to circulate fluid through an equipment or system
+  *circ: Marker
+
+  // Electrical circuit and its associated components such as breakers.
+  // See [ph.doc::ElecPanels#circuit] chapter.
+  *circuit: Marker
+
+  // Percentage of sky obscured by clouds. This is also known as cloudiness, or cloud amount.
+  *cloudage: Marker
+
+  // Point is a command, actuator, AO/BO.
+  // See [ph.doc::Points#point-function] chapter.
+  *cmd: Marker
+
+  // Carbon monoxide (CO)
+  *co: Marker
+
+  // Carbon dioxide (CO₂)
+  *co2: Marker
+
+  // Carbon dioxide equivalent
+  *co2e: Marker
+
+  // Combustible sedimentary rock
+  *coal: Marker
+
+  // Heating by the combustion of coal
+  *coalHeating: Marker
+
+  // Constrained Application Protocol
+  *coap: Marker
+
+  // Having low degree of heat
+  *cold: Marker
+
+  // Duct carries air for cooling
+  *coldDeck: Marker
+
+  // Device for mechanically increasing the pressure of a gas or refrigerant
+  // vapor by reducing its volume.
+  *compressor: Marker
+
+  // Computed point. See [ph.doc::Synthetics] chapter.
+  *computed: Marker
+
+  // Indicates a relationship that is computed from its reciprocal.
+  // Computed defs cannot be used as tags themselves.
+  *computedFromReciprocal: Marker
+
+  // See [ph.doc::Synthetics] chapter.
+  *computedModel: Marker
+
+  // General purpose computer.
+  *computer: Marker
+
+  // Abundance of substance in the total volume of a mixture.
+  *concentration: Marker
+
+  // Liquid phase produced by the condensation of steam or other gas
+  *condensate: Marker
+
+  // Condensate flows from the referent to this entity
+  *condensateRef: MultiRef
+
+  // Device or related to process of condensation
+  *condenser: Marker
+
+  // Working fluid is kept separate from fluid used for heat transfer into the atmosphere
+  *condenserClosedLoop: Marker
+
+  // Removal of heat through the process of water condensation
+  *condenserCooling: Marker
+
+  // Uses working fluid itself for evaporation into the atmosphere
+  *condenserOpenLoop: Marker
+
+  // Condenser water flows from the referent to this entity
+  *condenserWaterRef: MultiRef
+
+  // Related to cleaning, heating, cooling, humidifying, dehumidifying,
+  // ventilating or circulating  air. 
+  *conditioning: Marker
+
+  // Delivers a constant volume of air flow.  Typically this means
+  // equipment with a single speed fan.
+  *constantAirVolume: Marker
+
+  // Microprocessor based device used in a control system.  Controllers
+  // interact with the physical world through direct I/O to sensors and
+  // actuators or via network [protocols](ph::PhEntity.protocol).
+  *controller: Marker
+
+  // Associated with the control system for an industrial process
+  *controls: Marker
+
+  // Associted with low temperature or cooling processes.  When used on a point,
+  // this tag is associated with the control of cooling.  When paired with a
+  // substance, this tag indicates the substance is relatively cool in comparison
+  // to another substance, without being actively cooled by e.g. a chiller.
+  *cool: Marker
+
+  // Cooling mode or process
+  *cooling: Marker
+
+  // Measurement of a chiller ability to remove heat measured
+  *coolingCapacity: Number
+
+  // Coil used to cool air.
+  *coolingCoil: Marker
+
+  // Equipment without heating
+  *coolingOnly: Marker
+
+  // Equipment to transfer waste heat into the atmosphere
+  *coolingTower: Marker
+
+  // Device that joins two components together.
+  *coupler: Marker
+
+  // Computer Room Air Conditioner: An FCU designed to condition a computer
+  // room.  See [ph.doc::AHUs] and [ph.doc::DataCenters] chapters.
+  *crac: Marker
+
+  // Supports current value
+  *cur: Marker
+
+  // Error description when [ph::PhEntity.curStatus] indicates error condition
+  *curErr: Str <transient>
+
+  // Status of point's current value reading.  The [ph::PhEntity.curVal] is only available
+  // when curStatus is "ok" or "stale".  However a "stale" value should
+  // be used with caution since the local system does not have a fresh value.
+  // It is recommended that the [ph::PhEntity.curVal] tag is removed from a point
+  // when the curStatus is not "ok" nor "stale".
+  *curStatus: CurStatus <transient>
+
+  // Current value of a point.  The current value is only available when
+  // the [ph::PhEntity.curStatus] is "ok" or "stale".
+  *curVal: Obj <transient>
+
+  // Movement of fluid or electricity
+  *current: Marker
+
+  // Digital Addressable Lighting Interface protocol for lighting
+  *dali: Marker
+
+  // Damper equipment or control point.
+  *damper: Marker
+
+  // Space used to house computer and networking gear.
+  // See [ph.doc::DataCenters] chapter.
+  *dataCenter: Marker
+
+  // Time between sunrise and sunset
+  *daytime: Marker
+
+  // Relating to direct current (DC) electricity
+  *dc: Marker
+
+  // The range in a process where no changes to output are made.
+  // May also indicate the difference between a base setpoint and effective
+  // setpoint.
+  *deadband: Marker
+
+  // Differential of fluid between entering and leaving sensors.
+  *delta: Marker
+
+  // Rate required for a process.
+  *demand: Marker
+
+  // Obsoleted
+  *deprecated: Marker
+
+  // Data related to intended design and operating conditions.  This
+  // includes sizing and other data specified by design engineers and
+  // engineered drawings.  Also see [ph::PhEntity.rated].
+  *design: Marker
+
+  // Decreases humidity from air using a substance which absorbs moisture.
+  *dessicantDehumidifier: Marker
+
+  // Microprocessor based hardware device.  This is the general term for
+  // all computers, mobile phones, controllers, and I/O modules.
+  // See [ph.doc::Devices#networks] chapter.
+  *device: Marker
+
+  // Device which controls a monitors this entity
+  *deviceRef: Ref <of:Device>
+
+  // Dew point temperature at which water vapor will form dew
+  *dewPoint: Marker
+
+  // Liquid fuel specifically designed for use in diesel engines
+  *diesel: Marker
+
+  // AHU supplies air directly to the zone
+  *directZone: Marker
+
+  // Compass direction measured in degrees: North: 0° = 360°, East: 90°, South: 180°, West: 270°
+  *direction: Marker
+
+  // Display name for an entity.
+  // See [ph.doc::Ontology#entities] chapter.
+  *dis: Str
+
+  // Duct for air leaving an equipment
+  *discharge: Marker
+
+  // Equipment that releases a specific amount of a substance.
+  *dispenser: Marker
+
+  // Three way valve which inputs one pipe and diverts between two output pipes.
+  *diverting: Marker
+
+  // Dedicated Outside Air System: An AHU that brings in 100% outside air and
+  // no recirculated air in order to provide ventilation to spaces.
+  // See [ph.doc::AHUs] chapter.
+  *doas: Marker
+
+  // For human use
+  *domestic: Marker
+
+  // Domestic water flows from the referent to this entity
+  *domesticWaterRef: MultiRef
+
+  // Two ducts: combination of hotDeck, coldDeck, or neutralDeck
+  *dualDuct: Marker
+
+  // Conduit used to convey air for HVAC
+  *duct: Marker
+
+  // Config point on a [ph::PhEntity.vav] for duct area measured in ft² or m²
+  *ductArea: Marker
+
+  // Number with a unit of time
+  *duration: Number
+
+  // Cooling using direct expansion of a refrigerant vapor.
+  // Also see [ph::PhEntity.dxHeating] and [ph::PhEntity.heatPump].
+  *dxCooling: Marker
+
+  // Heating using direct expansion of a refrigerant vapor.
+  // Also see [ph::PhEntity.dxCooling] and [ph::PhEntity.heatPump].
+  *dxHeating: Marker
+
+  // Duct to access fresh outside air only for economizing, not ventilation
+  *economizer: Marker
+
+  // Energy reduction mode which augments heating/cooling with outside air.
+  *economizing: Marker
+
+  // Current control setpoint in effect taking into account other factors
+  *effective: Marker
+
+  // Efficiency point of a chiller measured in "COP" or "kW/ton".
+  *efficiency: Marker
+
+  // Associated with electricity or with electrical force, power, or energy.
+  // This is often opposed to [ph::PhEntity.mech] mechanical energy.
+  *elec: Marker
+
+  // Heating by the conversion of electrical energy
+  *elecHeating: Marker
+
+  // Average of L1, L2, L3 measurements
+  *elecLAvg: Marker
+
+  // Average of L1-L2, L2-L3, L3-L1 measurements
+  *elecLLAvg: Marker
+
+  // Quadrant used to describe the flow of AC electric power
+  *elecQuadrant: ElecAcQuadrant
+
+  // Electricity flows from the referent to this entity
+  *elecRef: MultiRef
+
+  // Enclosure used to move people between floors.
+  *elevator: Marker
+
+  // Amount of a substance discharged into the air
+  *emission: Marker
+
+  // Secondary on/off [ph::PhEntity.point] of an [ph::PhEntity.equip] especially used with a [ph::PhEntity.vfd].
+  // Enable is used with Bool points where true indicates on and false
+  // indicates off.  Equip with an enable should always also define a [ph::PhEntity.run]
+  // point which indicates the primary on/off state of the equipment.
+  *enable: Marker
+
+  // Container or housing that surrounds and protects equipment or components.
+  // Enclosures may be cabinets, sealed boxes, weatherproof housings, or other
+  // protective structures that provide physical protection, environmental
+  // sealing, or safety isolation.
+  *enclosure: Marker
+
+  // Measure of ability to do work
+  *energy: Marker
+
+  // Pipe conveys fluid into an equipment
+  *entering: Marker
+
+  // Total heat content of a system. It is defined as internal energy of the system plus the product of pressure and volume.
+  *enthalpy: Marker
+
+  // Defines an eumeration of string key names.  The range may also be applied
+  // to format a Bool ordered as "false,true".  The value of this tag may be
+  // formatted in one of five ways:
+  //  - dict of dicts keyed by name and Dict values for meta such as `doc` tag
+  //  - comma separated names on one line
+  //  - names separated by a "\n" newline character
+  //  - markdown unordered list formatted as a series of "- name: description\n"
+  //  - ref to a Xeto `sys::Enum` spec
+  //
+  // Enum names *should* follow valid tag naming rules (start with lowercase
+  // ASCII letter and contain only ASCII letters and numbers).  However in
+  // cases where mapping directly to external enumerations enum names can
+  // contain arbitrary characters such as space.
+  *enum: Obj
+
+  // Equipment asset.
+  // See [ph.doc::Equips] chapter.
+  *equip: Marker
+
+  // Reference to equip which contains this entity
+  *equipRef: Ref <of:Equip>
+
+  // Moving staircase used to move people between floors.
+  *escalator: Marker
+
+  // Mechanism used to convert a refrigerant from its liquid to gaseous state.
+  *evaporator: Marker
+
+  // Electric Vehicle Supply Equipment.  See [ph.doc::EVSE] chapter.
+  *evse: Marker
+
+  // Physical type of [ph::EvseCable].
+  *evseCableType: EvseCableType
+
+  // Duct used to expel air back outside
+  *exhaust: Marker
+
+  // Supplied out of a system
+  *export: Marker
+
+  // Taking a substance out of another substance
+  *extraction: Marker
+
+  // Point of an ahu indicating air flow is by-passing the heating/cooling
+  // coils. If a boolean point, then true indicates the unit is in by-pass
+  // mode and false indicates by-pass is disabled. If the point is an analog
+  // point then 100% indicates full by-pass mode and 0% indicates by-pass is
+  // completely disabled.
+  *faceBypass: Marker
+
+  // Fan equipment or control point
+  *fan: Marker
+
+  // Device with a fan
+  *fanPowered: Marker
+
+  // Fan Coil Unit: A unitary, factory-made enclosure with a fan and coil
+  // that recirculates air in a space and performs one or more of the
+  // functions of cleaning, heating, cooling, humidifying, dehumidifying,
+  // or ventilating the air. Unit heaters are examples of FCUs.
+  // See [ph.doc::AHUs] chapter.
+  *fcu: Marker
+
+  // Feature namespace of definitions formatted as `feature:name`
+  *feature: Obj
+
+  // Apparent temperature perceived when considering humidity, wind chill, and heat index
+  *feelsLike: Marker
+
+  // Filename extension such as "csv"
+  *fileExt: Str
+
+  // File format type definition
+  *filetype: Obj
+
+  // Related to an air or fluid filter.
+  *filter: Marker
+
+  // Haystack filter string.  See [ph.doc::Filters]
+  *filterStr: Str
+
+  // Storey of a building.  See [ph.doc::Spaces#floors] chapter.
+  *floor: Marker
+
+  // Unitless integer indicating the floor's distance from ground level.  The
+  // ground floor is always defined as zero.  Additional floors above ground are
+  // numbered 1, 2, 3, etc.  Subterranean floors are numbered -1, -2, -3, etc.
+  // This convention is consistent with how most European buildings number
+  // floors.  In North America its common to label the ground floor
+  // as the first floor; however Haystack requires the ground level to be
+  // assigned a floorNum of 0.
+  *floorNum: Number
+
+  // Measure of volumetric flow of fluid
+  *flow: Marker
+
+  // System to change direction of substance flow
+  *flowInverter: Marker
+
+  // Duct for exhausting combustion
+  *flue: Marker
+
+  // Measurement through a given surface
+  *flux: Marker
+
+  // A boolean point of an ahu indicating a freezing condition.  This
+  // might require a control sequence to protect the equipment. If true
+  // then a freeze condition is detected, or false if not.
+  *freezeStat: Marker
+
+  // Occurrences per unit time
+  *freq: Marker
+
+  // File Transfer Protocol
+  *ftp: Marker
+
+  // Petroleum based oil burned for energy
+  *fuelOil: Marker
+
+  // Heating by the combustion of fuel oil
+  *fuelOilHeating: Marker
+
+  // Fuel oil flows from the referent to this entity
+  *fuelOilRef: MultiRef
+
+  // Ventilation equipment to limit exposure to hazardous fumes.
+  *fumeHood: Marker
+
+  // Petroleum derived liquid used as a fuel source
+  *gasoline: Marker
+
+  // Gasoline flows from the referent to this entity
+  *gasolineRef: MultiRef
+
+  // Free form street address.  Best practice is to follow local
+  // norms for a postal address.  Typically this string includes
+  // the [ph::PhEntity.geoStreet], [ph::PhEntity.geoCity], [ph::PhEntity.geoState] (in US), and [ph::PhEntity.geoPostalCode]:
+  //
+  // Examples:
+  //     "1600 Pennsylvania Avenue NW, Washington, DC 20500"
+  //
+  //     "10 Downing St, Westminster, London SW1A 2AA, United Kingdom"
+  //
+  //     "Champ de Mars, 5 Avenue Anatole France, 75007 Paris, France"
+  *geoAddr: Str
+
+  // Geographic city or locality name
+  *geoCity: Str
+
+  // Geographic coordinate as `C(latitude,longitude)`
+  *geoCoord: Coord
+
+  // Geographic country as [ISO 3166-1](http://en.wikipedia.org/wiki/ISO_3166-1)
+  // two letter code
+  *geoCountry: GeoCountry
+
+  // Geographic subdivision of US state
+  *geoCounty: Str
+
+  // Elevation above sea-level of the location
+  *geoElevation: Number
+
+  // Geographic place
+  *geoPlace: Marker
+
+  // Geographic postal code; for US this is a five digit zip code
+  *geoPostalCode: Str
+
+  // State or province name; for US this is two letter state code. May be
+  // used in other countries to model administrative area between the geoCity
+  // and geoCountry level.
+  *geoState: GeoState
+
+  // Geographic street address and name
+  *geoStreet: Str
+
+  // Related to the surface of the earth.  Used to indicate electrical
+  // current being measured on an electrical ground conductor when applied to
+  // a point entity that has the [ph::PhEntity.elec] and [ph::PhEntity.current] tags.
+  *ground: Marker
+
+  // Haystack HTTP protocol for exchanging tagged data
+  *haystack: Marker
+
+  // Pipe used as central connection or manifold for other piping runs.
+  *header: Marker
+
+  // Associated with a heating process.  When used on a point,
+  // this tag is associated with the control of heating.
+  *heat: Marker
+
+  // Equipment to transfer heat between two working fluids.
+  *heatExchanger: Marker
+
+  // Equipment that employs a vapor compression cycle with a reversing
+  // valve to provide heating or cooling. For vapor compression heating
+  // without a reversing valve, such as for a heat pump water heater,
+  // see [ph::PhEntity.dxHeating] which should be used.
+  *heatPump: Marker
+
+  // Transfer of heat from one substance to another to reduce energy consumption.
+  *heatRecovery: Marker
+
+  // Boolean point indicating command state of AHU's heat wheel.
+  *heatWheel: Marker
+
+  // Heating mode or process
+  *heating: Marker
+
+  // Coil used to heat air.
+  *heatingCoil: Marker
+
+  // Equipment without cooling
+  *heatingOnly: Marker
+
+  // Dimensional height of the asset
+  *height: Marker
+
+  // Hydrofluorocarbons
+  *hfc: Marker
+
+  // Supports historization of data
+  *his: Marker
+
+  // Last historized timestamped sample
+  *hisEnd: DateTime <transient>
+
+  // Error description when [ph::PhEntity.hisStatus] indicates error condition
+  *hisErr: Str <transient>
+
+  // Indicates the way that history data is collected for a point.
+  *hisMode: HisMode
+
+  // Number of historical timestamped samples historized by point
+  *hisSize: Number <transient>
+
+  // First historized timestamped sample
+  *hisStart: DateTime <transient>
+
+  // Status of point's history collection or synchronization
+  *hisStatus: HisStatus <transient>
+
+  // Indicates values which are a continuous stream of totalization. History
+  // data reads and should be normalized by computing the delta.
+  *hisTotalized: Marker
+
+  // Having high degree of heat
+  *hot: Marker
+
+  // Duct carries air for heating
+  *hotDeck: Marker
+
+  // Heating using energy of hot water
+  *hotWaterHeating: Marker
+
+  // Hot water flows from the referent to this entity
+  *hotWaterRef: MultiRef
+
+  // Hypertext Transfer Protocol which is foundation of the web
+  *http: Marker
+
+  // Adding moisture to air
+  *humidifier: Marker
+
+  // Percent relative humidity; measure of moisture in the air
+  *humidity: Marker
+
+  // Heating, ventilation, and air conditioning
+  *hvac: Marker
+
+  // Operational mode for HVAC equipment
+  *hvacMode: Marker
+
+  // Water in its solid form
+  *ice: Marker
+
+  // Luminous flux hitting the inside of the sphere at a specific point.
+  //
+  // Also see [ies.org](https://www.ies.org/definitions/illuminance/)
+  *illuminance: Marker
+
+  // Internet Message Access Protocol for retrieving email
+  *imap: Marker
+
+  // Lacking balance
+  *imbalance: Marker
+
+  // Received into a system
+  *import: Marker
+
+  // Operates inside the conditioned space
+  *indoorUnit: Marker
+
+  // Permeation of a substance into another substance
+  *infiltration: Marker
+
+  // Duct with air entering an equipment
+  *inlet: Marker
+
+  // Entity inputs a substance which flows from another entity
+  *input: Marker
+
+  // Unitless integer number
+  *int: Number
+
+  // Measure of an electromagnetic field
+  *intensity: Marker
+
+  // Energy received at a surface by area
+  *irradiance: Marker
+
+  // Actuator used to isolate an equipment from a pipe or ductwork system
+  *isolation: Marker
+
+  // Kind name used to identity a value data type
+  *kind: Kind
+
+  // KNX protocol commonly used for lighting systems
+  *knx: Marker
+
+  // Portable laptop computer.
+  *laptop: Marker
+
+  // Pipe conveys fluid out of an equipment
+  *leaving: Marker
+
+  // Dimensional length of the asset
+  *length: Marker
+
+  // Range from 0% to 100%.  When paired with a fluid this implies a fill
+  // level where 0% is empty and 100% is full.
+  *level: Marker
+
+  // Electromagnetic radiation in the visible spectrum
+  *light: Marker
+
+  // Systems associated with illumination in the built environment
+  *lighting: Marker
+
+  // Chiller point to command or measure the chiller's load as a percentage
+  // from "0%" to "100%". When paired with cmd this models the chiller's
+  // load limit. When paired with sensor this models the chiller's current
+  // load factor.
+  *load: Marker
+
+  // Light fixture using electricity to provide illumination
+  *luminaire: Marker
+
+  // Energy of light in a given direction.
+  //
+  // Also see [ies.org](https://www.ies.org/definitions/luminance/)
+  *luminance: Marker
+
+  // Relating to light as perceived by the eye
+  *luminous: Marker
+
+  // Size or extent
+  *magnitude: Marker
+
+  // Restore something missed or lost
+  *makeup: Marker
+
+  // Makeup water flows from the referent to this entity
+  *makeupWaterRef: MultiRef
+
+  // Company name that produced the asset.
+  *manufacturer: Marker
+
+  // Date the asset was produced by the manufacturer.
+  *manufactureDate: Marker
+
+  // Makeup Air Unit: A DOAS that provides make-up air for a separate, dedicated
+  // exhaust system. That is, this equip does not contain an exhaust air section.
+  // See [ph.doc::AHUs] chapter.
+  *mau: Marker
+
+  // Maximum
+  *max: Marker
+
+  // Inclusive maximum for a numeric value.
+  *maxVal: Number
+
+  // Associated with a machine or its mechanical force, torque, power, or energy.
+  // This is often opposed to [ph::PhEntity.elec] electrical energy.
+  *mech: Marker
+
+  // Equipment to meter a substance or phenomenon.
+  // See [ph.doc::Meters] chapter.
+  *meter: Marker
+
+  // Mime type formatted as type/subtype
+  *mime: Str
+
+  // Minimum
+  *min: Marker
+
+  // Inclusive minimum for a numeric value.
+  *minVal: Number
+
+  // Duct where fresh outside air and return air is mixed together
+  *mixed: Marker
+
+  // Three way valve which inputs two pipes and outputs a mixture
+  // between the two to a single output pipe.
+  *mixing: Marker
+
+  // Machine learning point. See [ph.doc::Synthetics] chapter.
+  *ml: Marker
+
+  // Training period description, known as the identification period
+  // or baseline, utilized during the model training process.
+  *mlIdentificationPeriod: Span
+
+  // List of independent variables, also known as model inputs or features,
+  // associated with a machine learning model.
+  *mlInputVarRefs: List <of:Ref<of:MlVar>>
+
+  // See [ph.doc::Synthetics] chapter.
+  *mlModel: Marker
+
+  // Goodness-of-fit metrics provided in the form of a simple dictionary.
+  // For example: {r2:0.7889, cvrmse:58}.
+  *mlModelMetrics: Dict
+
+  // Result of model identification, which may appear as a list of
+  // model parameters for simpler models or as a reference to a stored model,
+  // in the form of a file uri. The structure of the dict is user-specific.
+  *mlModelParameters: Dict
+
+  // Dependent variable, also known as the model output or target,
+  // associated, with a machine learning model.
+  // Represents the predicted outcome generated by the model.
+  *mlOutputVarRef: Ref <of:MlVar>
+
+  // Machine learning variable representing both model inputs and outputs.
+  *mlVar: Marker
+
+  // Filter used for querying points by tags, providing more flexibility
+  // than mlVarPoint, although it is not mandatory.
+  *mlVarFilter: Str
+
+  // Reference to a point associated with a machine learning variable,
+  // known as a machine learning variable point.
+  *mlVarPoint: Ref <of:Point>
+
+  // Reference to a machine learning variable.
+  *mlVarRef: Ref <of:MlVar>
+
+  // Relating to mobile phones, hand-held computers, and similar technology
+  *mobile: Marker
+
+  // Register based communication protocol used with industrial devices.
+  *modbus: Marker
+
+  // Manufacturer assigned identifier for a general product line.
+  // For example, modelSeries is "iPhone 12", but modelNumber is "MGF43LL/A".
+  // The modelSeries tends to be a marketing name and not an exact identifier.
+  // Always use modelNumber for the actual model identifier.
+  *modelSeries: Marker
+
+  // Manufacturer assigned alphanumeric identifier for a specific product configuration.
+  // For example, modelSeries is "iPhone 12", but modelNumber is "MGF43LL/A".
+  *modelNumber: Marker
+
+  // Indicates equipment or point with variable output from 0% to 100%,
+  // as opposed to binary on/off or discrete staged control.
+  *modulating: Marker
+
+  // Equipment that converts electrical energy into mechanical energy.
+  // See [ph.doc::Motors] chapter.
+  *motor: Marker
+
+  // Conveyor to move people across a horizontal or inclined plane.
+  *movingWalkway: Marker
+
+  // Message Queuing Telemetry Transport publish/subscribe protocol
+  *mqtt: Marker
+
+  // AHU discharge air is split into a duct per zone
+  *multiZone: Marker
+
+  // Nitrous oxide (N₂O)
+  *n2o: Marker
+
+  // Not available used to indicate invalid or missing data.
+  // See [Kinds chapter](ph.doc::Kinds#na).
+  *na: Obj
+
+  // Fossil fuel energy source consisting largely of methane and other hydrocarbons.
+  //
+  // The energy content of natural gas varies by region within a range determined
+  // on impurities in the gas.  You can find a table of these conversions
+  // [here](https://en.wikipedia.org/wiki/Heat_of_combustion#Higher_heating_values_of_natural_gases_from_various_sources)
+  *naturalGas: Marker
+
+  // Heating by the combustion of natural gas
+  *naturalGasHeating: Marker
+
+  // Natural gas flows from the referent to this entity
+  *naturalGasRef: MultiRef
+
+  // Difference between import and export
+  *net: Marker
+
+  // Logical communications network between two or more devices.
+  // See [ph.doc::Devices#networks] chapter.
+  *network: Marker
+
+  // Associates a device which communicates on specific a network.
+  *networkRef: Ref <of:Network>
+
+  // Related to data communication networks
+  *networking: Marker
+
+  // when applied to a point entity that has the [ph::PhEntity.elec] and [ph::PhEntity.current] tags,
+  // indicates electrical current being measured on an electrical neutral
+  // conductor.
+  *neutral: Marker
+
+  // Duct carries air which by-passes both heating and cooling coils
+  *neutralDeck: Marker
+
+  // Nitrogen trifluoride (NF₃)
+  *nf3: Marker
+
+  // Ammonia (NH₃)
+  *nh3: Marker
+
+  // Nitrogen dioxide (NO₂)
+  *no2: Marker
+
+  // Marks a function or operation as having no side effects.  The function
+  // may or may not be *pure* in that calling it multiple times with the
+  // same arguments always evaluates to the same result.
+  *noSideEffects: Marker
+
+  // Undocumented and not officially supported
+  *nodoc: Marker
+
+  // Do not include source code in documentation
+  *nosrc: Marker
+
+  // Oxygen (O₂) - the common dioxygen allotrope in the air
+  *o2: Marker
+
+  // Ozone (O₃)
+  *o3: Marker
+
+  // XML based Open Building Information eXchange protocol.
+  *obix: Marker
+
+  // Occupied mode of a space.
+  // See [ph.doc::Zones#occupancy] chapter.
+  *occ: Marker
+
+  // Number of occupants in a space.
+  // See [ph.doc::Zones#occupancy] chapter.
+  *occupancy: Marker
+
+  // People who use the built environment.
+  // See [ph.doc::Zones#occupancy] chapter.
+  *occupants: Marker
+
+  // Setpoint or sensor indicating occupancy of a space.
+  // See [ph.doc::Zones#occupancy] chapter.
+  *occupied: Marker
+
+  // Expected value type of a collection, reference, or choice
+  *of: Symbol
+
+  // Operation for HTTP API.
+  // See [ph.doc::Ops] chapter.
+  *op: Obj
+
+  // Apply to str enum tags where the enumeration range is open ended.
+  // User interfaces should support data entry for arbitrary strings, but
+  // also provide a dropdown for the predefined enumeration.
+  *openEnum: Marker
+
+  // operates outside the conditioned space
+  *outdoorUnit: Marker
+
+  // Entity outputs a substance with flows to other entities
+  *output: Marker
+
+  // Duct to access fresh outside air for both ventilation and economizer.
+  *outside: Marker
+
+  // Enclosure for electrical and control equipment.  Panels may be
+  // used to isolate electrical connections and provide environmental
+  // protection.
+  *panel: Marker
+
+  // Circuit with multiple paths of flow
+  *parallel: Marker
+
+  // Auxiliary heating points associated with a [ph::PhEntity.vav]
+  *perimeterHeat: Marker
+
+  // Electric power factor; which is the ratio of active power to apparent
+  // power in an AC electric power system.  Measured with values in the range
+  // of -1.0 to 1.0 or 0.0 to 1.0 without a unit.  When the range of -1.0 to
+  // 1.0 is applied, a negative value for power factor indicates the
+  // electrical current leads the electrical voltage and a positive value
+  // indicates the electrical current lags the electrical voltage.
+  *pf: Marker
+
+  // Displacement power factor, which accounts for the phase angle between
+  // voltage and current but excludes effects of nonlinear waveforms (
+  // harmonic distortion).
+  *pfDisplacement: Marker
+
+  // Distortion power factor, which measures the component of power factor
+  // attributable to harmonic distortion in voltage and current waveforms.
+  *pfDistortion: Marker
+
+  // Power factor according to the IEC convention defines a positive or
+  // negative sign based on the direction of active power flow.  Power factor
+  // is positive when active power flows into a load.  Power factor is negative
+  // when active power flows out of a load.
+  *pfIec: Marker
+
+  // Power factor according to the IEEE convention defines a positive or
+  // negative sign based on whether the load is capacitive or inductive.  Power
+  // factor is positive when the load is capacitive, or when voltage lags behind
+  // current.  Power factor is negative when the load is inductive, or when
+  // current lags behind voltage.
+  *pfIeee: Marker
+
+  // True power factor, which includes effects of harmonic distortion.
+  // Power factor is assumed to be true power factor when [ph::PfScope] is not
+  // defined.  However, it is recommended to specify a scope for power
+  // factor to help avoid misinterpretation of data.
+  *pfTrue: Marker
+
+  // Perfluorocarbons
+  *pfc: Marker
+
+  // Single-phase measurement of an electric quantity in a multi-phase AC electric power system.
+  *phase: Phase
+
+  // Telephone used for voice telecommunication.
+  *phone: Marker
+
+  // Conduit used to convey a fluid
+  *pipe: Marker
+
+  // Central plant used to generate a substance for a process.
+  // See [ph.doc::Plants].
+  *plant: Marker
+
+  // Particulate matter 0.1; atmospheric pollutant of fine particles with an aerodynamic diameter of 0.1 micrometers or less
+  *pm01: Marker
+
+  // Particulate matter 10; atmospheric pollutant of fine particles with an aerodynamic diameter of 10 micrometers or less
+  *pm10: Marker
+
+  // Particulate matter 2.5; atmospheric pollutant of fine particles with an aerodynamic diameter of 2.5 micrometers or less
+  *pm25: Marker
+
+  // Data point such as a sensor or actuator.
+  // See [ph.doc::Points] chapter.
+  *point: Marker
+
+  // See [ph.doc::Synthetics#structure] chapter.
+  *pointRef: Ref <of:Point>
+
+  // Post Office Protocol version 3 for retrieving email
+  *pop3: Marker
+
+  // A gateway or opening used to transfer a substance.
+  *port: Marker
+
+  // Energy consumed per unit time
+  *power: Marker
+
+  // Converts one electrical waveform to another using power electronic
+  // circuitry.  Involves the use of one or more power modules.
+  //
+  // May convert:
+  //  - [ph::PhEntity.ac] to [ph::PhEntity.dc]
+  //  - [ph::PhEntity.ac] to [ph::PhEntity.ac]
+  //  - [ph::PhEntity.dc] to [ph::PhEntity.dc]
+  //  - [ph::PhEntity.dc] to [ph::PhEntity.ac]
+  //
+  // Note:  An AC/AC power converter performs the same task as a power
+  // transformer but using power electronics.  Similarly, a DC/DC power
+  // converter transforms an input DC voltage to an output DC voltage at
+  // another level.
+  *powerConverter: Marker
+
+  // Amount of atmospheric water vapor fallen including rain, sleet, snow, and hail
+  *precipitation: Marker
+
+  // Defines a preferred unit to be used with a quantity
+  *prefUnit: List <of:Str>
+
+  // Measure of force applied
+  *pressure: Marker
+
+  // VAV damper modulates to control space temp; dependent on duct pressure
+  // being maintained
+  *pressureDependent: Marker
+
+  // VAV damper or a control valve that modulates to maintain desired flow
+  // setpoint; independent of the duct pressure
+  *pressureIndependent: Marker
+
+  // Primary function of building as US Energy Star key
+  *primaryFunction: PrimaryFunction
+
+  // Pipework which circulates closest to the energy source.  In a central
+  // plant, the primary loop indicates the pipes and equipment within the
+  // central plant.  In context of heat exchangers between the primary
+  // and secondary loops, this tag indicates the side closest to the plant.
+  *primaryLoop: Marker
+
+  // Industrial or HVAC process
+  *process: Marker
+
+  // By-product of natural gas processing and petroleum refining (C₃H₈)
+  *propane: Marker
+
+  // Heating by the combustion of propane
+  *propaneHeating: Marker
+
+  // Communication protocol used for devices on a network.
+  *protocol: Marker
+
+  // Pump equipment or control point
+  *pump: Marker
+
+  // Associated with a cleaning process to remove contaminants.
+  // Most commonly it indicates purging water or air by using a filter or by
+  // letting out a certain amount of the substance at a high flow rate.
+  *purge: Marker
+
+  // Quantity measured against standard metric
+  *quality: Marker
+
+  // Enclosure or chassis used to mount computer and networking gear.
+  // Devices are mounted to rails of a standard width, typically 19 or 23
+  // inches.  Height is measured in *rack units* where one 1U is 1.75 inches.
+  // A full rack has a height of 42U.
+  // See [ph.doc::DataCenters#racks] chapter.
+  *rack: Marker
+
+  // Heats a space using pipes or cables embedded beneath floor.
+  *radiantFloor: Marker
+
+  // Heats a space using exposed pipes or coils.  Hot water and steam
+  // radiators are often cast iron and installed directly in the space
+  // or along the baseboard.  Electric radiators are typically installed
+  // on the baseboard.
+  *radiator: Marker
+
+  // Data specified by a manufacturer or rating organization.  Typically this
+  // information is from the equipment data plate or cut sheet.  Also see [ph::PhEntity.design].
+  *rated: Marker
+
+  // Relating to reactance
+  *reactive: Marker
+
+  // Piston compressor driven by a crankshaft
+  *reciprocal: Marker
+
+  // Fluid used in refrigeration and heat exchange.  Refrigerants typically
+  // alternate between liquid and gas state.
+  *refrig: Marker
+
+  // Refrigerant flows from the referent to this entity
+  *refrigRef: MultiRef
+
+  // Command point for reheating process
+  *reheat: Marker
+
+  // Duct returning air back to equipment
+  *return: Marker
+
+  // Envelope covering the top of a building
+  *roof: Marker
+
+  // Enclosed room of a building
+  *room: Marker
+
+  // Rotary screw compression
+  *rotaryScrew: Marker
+
+  // Device used to route data packets
+  *router: Marker
+
+  // Roof Top Unit: A unitary AHU that is weatherized for outdoor use.
+  // See [ph.doc::AHUs] chapter.
+  *rtu: Marker
+
+  // Primary on/off [ph::PhEntity.point] of an [ph::PhEntity.equip] especially used with a [ph::PhEntity.vfd].
+  // Run is used with Bool points where true indicates on and false indicates
+  // off. When paired with [ph::PhEntity.cmd] this is the commanded state of the equipment.
+  // When paired with [ph::PhEntity.sensor] this is the actual status of the equip.  If
+  // the equipment also defines an [ph::PhEntity.enable] point then both must be commanded
+  // on in order to run the equipment.
+  *run: Marker
+
+  // Scalar is an atomic value kind
+  *scalar: Obj
+
+  // Pipework which circulates closest to the building or end use. In a
+  // central plant, the secondary loop indicates the pipes and equipment between
+  // the central plant and the building.  In context of heat exchangers between
+  // the primary and secondary loops, this tag indicates the side closest to
+  // the building.
+  *secondaryLoop: Marker
+
+  // Point is a sensor, input, AI/BI.
+  // See [ph.doc::Points#point-function] chapter.
+  *sensor: Marker
+
+  // Manufacturer assigned unique, alphanumeric identifier for a specific asset.
+  *serialNumber: Marker
+
+  // Circuit with single path of flow
+  *series: Marker
+
+  // Hardware or software which provides services for other programs or devices.
+  *server: Marker
+
+  // Ratio of the maximum continuous output capacity at which a machine or
+  // system may operate without damage to the machine or system’s nominal
+  // output capacity.
+  *serviceFactor: Marker
+
+  // Sulphur hexafluoride (SF₆)
+  *sf6: Marker
+
+  // Simulation point. See [ph.doc::Synthetics] chapter.
+  *sim: Marker
+
+  // See [ph.doc::Synthetics#simulation-overview] chapter.
+  *simBaseline: Marker
+
+  // See [ph.doc::Synthetics] chapter.
+  *simModel: Marker
+
+  // See [ph.doc::Synthetics#simulation-overview] chapter.
+  *simOperation: Marker
+
+  // See [ph.doc::Synthetics#simulation-overview] chapter.
+  *simOptimum: Marker
+
+  // One single duct
+  *singleDuct: Marker
+
+  // Single-phase AC electricity. Power is provided by a
+  // single AC voltage source with a 2-wire connection.
+  *singlePhase: Marker
+
+  // Site is a geographic location of the built environment.
+  // Typically site maps to one building with its own unique
+  // street address.  See [ph.doc::Sites] chapter.
+  *site: Marker
+
+  // Main meter for the associated site
+  *siteMeter: Marker
+
+  // Reference to site which contains the entity
+  *siteRef: Ref <of:Site>
+
+  // Simple Mail Transfer Protocol for sending email
+  *smtp: Marker
+
+  // Simple Network Management Protocol for managing IP devices
+  *snmp: Marker
+
+  // Relating to energy from the sun
+  *solar: Marker
+
+  // Substance with definite shape and volume
+  *solid: Marker
+
+  // Sedona Framework UDP based communication protocol
+  *sox: Marker
+
+  // Point is a setpoint, soft point, internal control variable, schedule.
+  // See [ph.doc::Points#point-function] chapter.
+  *sp: Marker
+
+  // Space is a three-dimensional volume in the built environment.
+  // See [ph.doc::Spaces] chapter.
+  *space: Marker
+
+  // Reference to space which contains this entity
+  *spaceRef: Ref <of:Space>
+
+  // Distance per unit time
+  *speed: Marker
+
+  // Split-phase AC electricity. Power is provided by a
+  // single AC voltage source with a 3-wire connection, consisting of two hot
+  // wires (phases), separated from each other by a 180-degree phase angle,
+  // and one neutral wire.  Despite having two labeled phases, split-phase AC
+  // electricity is not a true two-phase system.
+  *splitPhase: Marker
+
+  // Level of capacity for staged equipment.  Stages are numbered
+  // sequentially as integers 1, 2, 3, etc.
+  *stage: Number
+
+  // Readiness mode of a space
+  *standby: Marker
+
+  // State of charge (SoC) of an electric [ph::PhEntity.battery].  Uses a percentage in
+  // the range of 0% to 100%, where no charge is indicated as 0% and full
+  // charge is indicated as 100%.
+  *stateOfCharge: Marker
+
+  // Water in its gas form
+  *steam: Marker
+
+  // Heating using energy of steam
+  *steamHeating: Marker
+
+  // Steam flows from the referent to this entity
+  *steamRef: MultiRef
+
+  // Submeters measure usage of a sub-system or equipment within a site
+  *submeter: Marker
+
+  // Reference to parent meter which is immediately upstream of this meter
+  *submeterOf: Ref <of:Meter>
+
+  // Below the surface of the earth
+  *subterranean: Marker
+
+  // Device for toggling state or routing data
+  *switch: Marker
+
+  // Synthetic point with computed operational data. The computed data
+  // if classified as:
+  //   - [ph::PhEntity.ml] for machine learning
+  //   - [ph::PhEntity.sim] for simulation
+  //   - [ph::PhEntity.computed] as catch all for other computations
+  //
+  // See [ph.doc::Synthetics] chapter.
+  *synthetic: Marker
+
+  // See [ph.doc::Synthetics] chapter.
+  *syntheticModel: Marker
+
+  // See [ph.doc::Synthetics] chapter.
+  *syntheticModelRef: Ref <of:SyntheticModel>
+
+  // Grouping of related equipment dedicated to a single application.
+  // See [ph.doc::Systems] chapter.
+  *system: Marker
+
+  // Reference to system
+  *systemRef: MultiRef <of:System>
+
+  // Mobile device with touch screen for user input.
+  *tablet: Marker
+
+  // Tank used to store a substance for temporary holding
+  *tank: Marker
+
+  // Temperature - measure of hot and cold
+  *temp: Marker
+
+  // Pipework which circulates within the building.
+  *tertiaryLoop: Marker
+
+  // Total harmonic distortion
+  *thd: Marker
+
+  // Related to energy of heat
+  *thermal: Marker
+
+  // Senses and controls temperature of space in HVAC system.  Thermostats
+  // may provide an interface for setpoint control.
+  *thermostat: Marker
+
+  // Three-phase AC electricity. Power is provided by three AC voltage
+  // sources, each separated from the others by a 120-degree phase angle.
+  // May have a 4-wire connection with a neutral (Wye) or a 3-wire connection
+  // without a neutral (Delta).
+  *threePhase: Marker
+
+  // Complete or absolute
+  *total: Marker
+
+  // Three ducts: hotDeck, coldDeck, or neutralDeck
+  *tripleDuct: Marker
+
+  // Total volatile organic compound (TVOC).
+  *tvoc: Marker
+
+  // Two-phase AC electricity. Power is provided by two AC voltage sources,
+  // separated from each other by a 90-degree phase angle. Two-phase systems
+  // are extremely rare in modern buildings; they have been replaced by
+  // modern [ph::PhEntity.threePhase] systems.
+  *twoPhase: Marker
+
+  // Timezone identifier from standard [timezone database](ph.doc::TimeZones)
+  *tz: TimeZone
+
+  // Unit identifier from standard unit database
+  *unit: Unit
+
+  // Unit Ventilator: An FCU that has direct access to outside air to provide
+  // the space with ventilation.  See [ph.doc::AHUs] chapter.
+  *unitVent: Marker
+
+  // Unoccupied mode of a space.
+  // See [ph.doc::Zones#occupancy] chapter.
+  *unocc: Marker
+
+  // Uninterruptible power supply
+  *ups: Marker
+
+  // Data value type
+  *val: Obj
+
+  // Valve equipment or control point
+  *valve: Marker
+
+  // Delivers a variable volume of air flow.   Most variable volume systems
+  // are powered by a VFD fan. However other techniques such as inlet vanes
+  // may be used in older systems.
+  *variableAirVolume: Marker
+
+  // Variable air volume terminal unit.  VAV systems use a constant air
+  // temperature with a variable air flow rate.  See [ph.doc::VAVs] chapter.
+  *vav: Marker
+
+  // AHU supplies air to VAV terminal units
+  *vavZone: Marker
+
+  // Speed in a given direction
+  *velocity: Marker
+
+  // Duct to access fresh outside air only for ventilation, not economizing
+  *ventilation: Marker
+
+  // Version string formatted as decimal integers separated by a dot
+  *version: Version
+
+  // Variable-frequency drive.
+  // See [ph.doc::Motors] chapter.
+  *vfd: Marker
+
+  // Distance at which light can be clearly discerned
+  *visibility: Marker
+
+  // Electrical potential difference or electromotive force.
+  *volt: Marker
+
+  // Three dimensional space occupied by a substance
+  *volume: Marker
+
+  // Variable refigerant flow.  See [ph.doc::VRF] chapter.
+  *vrf: Marker
+
+  // Relatively warm in comparison to another substance, without being
+  // actively heated. The substance can be used as a source of energy for
+  // a heating process, for example a warm water well in an [ph::PhEntity.ates] system.
+  *warm: Marker
+
+  // Water in its liquid form
+  *water: Marker
+
+  // Cooling using transfer of heat to water which is not explicitly chilled
+  *waterCooling: Marker
+
+  // Associated with atmospheric air or phenomenon.
+  // See [ph.doc::Weather] chapter.
+  *weather: Marker
+
+  // Enumeration of weather conditions
+  *weatherCond: Marker
+
+  // Logical weather station and its measurement points.
+  // See [ph.doc::Weather#stations] chapter.
+  *weatherStation: Marker
+
+  // Reference to weather station for to use this entity
+  *weatherStationRef: Ref <of:WeatherStation>
+
+  // Weight of the asset
+  *weight: Marker
+
+  // A well is a source of groundwater and potentially thermal energy.  When
+  // used within an [ATES](ph.doc::ATES) system, the well facilitates thermal
+  // energy exchange with the ground warm and cool water sources. In this case, a
+  // well can be either a closed system that transports water through pipes in the
+  // ground, or an open system that pumps up and returns ground water.
+  *well: Marker
+
+  // Wet bulb air temperature.  Temperature which the air would have if cooled to saturation by the evaporation of water into it.
+  *wetBulb: Marker
+
+  // Dimensional width of the asset
+  *width: Marker
+
+  // Hyperlink to the subject's page on Wikipedia
+  *wikipedia: Uri
+
+  // Flow of air on surface of the Earth
+  *wind: Marker
+
+  // Cabling used to convey electricity or data
+  *wire: Marker
+
+  // Supports writing data
+  *writable: Marker
+
+  // Error description when [ph::PhEntity.writeStatus] indicates error condition
+  *writeErr: Str <transient>
+
+  // Current priority level for [ph::PhEntity.writeVal] as number between 1 and 17.
+  // The value 17 indicates the relinquish default value.
+  *writeLevel: Number <transient>
+
+  // Current status of a writable point output
+  *writeStatus: WriteStatus <transient>
+
+  // Current desired value to write to output.  This is the current "winning"
+  // value of the priority array indicated by [ph::PhEntity.writeLevel].  If this tag
+  // is missing then the winning value is null/auto.
+  *writeVal: Obj <transient>
+
+  // Extended string - type name and string value encoding.
+  // See [Kinds chapter](ph.doc::Kinds#xstr).
+  *xstr: Obj
+
+  // Original year of construction as four digit year such as 1980
+  *yearBuilt: Int
+
+  // Low power wireless communication protocol for home automation
+  *zigbee: Marker
+
+  // Related to spaces from a system perspective
+  *zone: Marker
+
+  // Low power wireless communication protocol for home automation
+  *zwave: Marker
+}
+
+
+// --- enums.xeto ---
+//
+// Copyright (c) 2011-2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+// Auto-generated 17-Jan-2025
+//
+
+// Status of point's current value reading.  The [ph::PhEntity.curVal] is only available
+// when curStatus is "ok" or "stale".  However a "stale" value should
+// be used with caution since the local system does not have a fresh value.
+// It is recommended that the [ph::PhEntity.curVal] tag is removed from a point
+// when the curStatus is not "ok" nor "stale".
+CurStatus: Enum {
+  ok              // all is okay
+  stale           // the point's curVal is not fresh data
+  fault           // a configuration or hardware problem - see [ph::PhEntity.curErr]
+  down            // a communication or network problem - see [ph::PhEntity.curErr]
+  disabled        // manual disable of the point or connector
+  unknown         // we don't know anything (usually boot state)
+  remoteFault     // point in remote system is fault
+  remoteDown      // point in remote system is down
+  remoteDisabled  // point in remote system is disabled
+  remoteUnknown   // point in remote system is unknown
+}
+
+// Quadrant used to describe the flow of AC electric power
+ElecAcQuadrant: Enum {
+  q1 <key:"1">
+  q2 <key:"2">
+  q3 <key:"3">
+  q4 <key:"4">
+}
+
+// Physical type of [ph::EvseCable].
+EvseCableType: Enum {
+  ccs1      // CCS1 charging cable
+  ccs2      // CCS2 charging cable
+  chademo   // CHAdeMO charging cable
+  saeJ3400  // SAE J3400 charging cable
+  saeJ1772  // SAE J1772 charging cable
+  saeJ3068  // SAE J3068 charging cable
+  iecType2  // IEC 62196 Type 2 charging cable
+  mcs       // Megawatt Charging System charging cable
+  gbt       // GB/T charging cable
+}
+
+// Geographic country as [ISO 3166-1](http://en.wikipedia.org/wiki/ISO_3166-1)
+// two letter code
+GeoCountry: Enum {
+  af <key:"AF">  // Afghanistan
+  ax <key:"AX">  // Aland Islands
+  al <key:"AL">  // Albania
+  dz <key:"DZ">  // Algeria
+  as <key:"AS">  // American Samoa
+  ad <key:"AD">  // Andorra
+  ao <key:"AO">  // Angola
+  ai <key:"AI">  // Anguilla
+  aq <key:"AQ">  // Antarctica
+  ag <key:"AG">  // Antigua and Barbuda
+  ar <key:"AR">  // Argentina
+  am <key:"AM">  // Armenia
+  aw <key:"AW">  // Aruba
+  au <key:"AU">  // Australia
+  at <key:"AT">  // Austria
+  az <key:"AZ">  // Azerbaijan
+  bs <key:"BS">  // Bahamas
+  bh <key:"BH">  // Bahrain
+  bd <key:"BD">  // Bangladesh
+  bb <key:"BB">  // Barbados
+  by <key:"BY">  // Belarus
+  be <key:"BE">  // Belgium
+  bz <key:"BZ">  // Belize
+  bj <key:"BJ">  // Benin
+  bm <key:"BM">  // Bermuda
+  bt <key:"BT">  // Bhutan
+  bo <key:"BO">  // Bolivia
+  ba <key:"BA">  // Herzegovina
+  bw <key:"BW">  // Botswana
+  bv <key:"BV">  // Bouvet Island
+  br <key:"BR">  // Brazil
+  io <key:"IO">  // British Indian Ocean Territory
+  bn <key:"BN">  // Brunei Darussalam
+  bg <key:"BG">  // Bulgaria
+  bf <key:"BF">  // Burkina Faso
+  bi <key:"BI">  // Burundi
+  kh <key:"KH">  // Cambodia
+  cm <key:"CM">  // Cameroon
+  ca <key:"CA">  // Canada
+  cv <key:"CV">  // Cape Verde
+  ky <key:"KY">  // Cayman Islands
+  cf <key:"CF">  // Central African Republic
+  td <key:"TD">  // Chad
+  cl <key:"CL">  // Chile
+  cn <key:"CN">  // China
+  cx <key:"CX">  // Christmas Island
+  cc <key:"CC">  // Cocos
+  co <key:"CO">  // Colombia
+  km <key:"KM">  // Comoros
+  cg <key:"CG">  // Congo
+  cd <key:"CD">  // Congo, the Democratic Republic of the
+  ck <key:"CK">  // Cook Islands
+  cr <key:"CR">  // Costa Rica
+  ci <key:"CI">  // Cote D'ivoire
+  hr <key:"HR">  // Croatia
+  cu <key:"CU">  // Cuba
+  cy <key:"CY">  // Cyprus
+  cz <key:"CZ">  // Czech Republic
+  dk <key:"DK">  // Denmark
+  dj <key:"DJ">  // Djibouti
+  dm <key:"DM">  // Dominica
+  do <key:"DO">  // Dominican Republic
+  ec <key:"EC">  // Ecuador
+  eg <key:"EG">  // Egypt
+  sv <key:"SV">  // El Salvador
+  gq <key:"GQ">  // Equatorial Guinea
+  er <key:"ER">  // Eritrea
+  ee <key:"EE">  // Vatican City State See Holy
+  et <key:"ET">  // Ethiopia
+  fk <key:"FK">  // Falkland Islands
+  fo <key:"FO">  // Faroe Islands
+  fj <key:"FJ">  // Fiji
+  fi <key:"FI">  // Finland
+  fr <key:"FR">  // France
+  gf <key:"GF">  // French Guiana
+  pf <key:"PF">  // French Polynesia
+  tf <key:"TF">  // French Southern Territories
+  ga <key:"GA">  // Gabon
+  gm <key:"GM">  // Gambia
+  ge <key:"GE">  // Georgia
+  de <key:"DE">  // Germany
+  gh <key:"GH">  // Ghana
+  gi <key:"GI">  // Gibraltar
+  gr <key:"GR">  // Greece
+  gl <key:"GL">  // Greenland
+  gd <key:"GD">  // Grenada
+  gp <key:"GP">  // Guadeloupe
+  gu <key:"GU">  // Guam
+  gt <key:"GT">  // Guatemala
+  gg <key:"GG">  // Guernsey
+  gn <key:"GN">  // Guinea
+  gw <key:"GW">  // Guinea-bissau
+  gy <key:"GY">  // Guyana
+  ht <key:"HT">  // Haiti
+  hm <key:"HM">  // Heard Island and Mcdonald Islands
+  va <key:"VA">  // Vatican
+  hn <key:"HN">  // Honduras
+  hk <key:"HK">  // Hong Kong
+  hu <key:"HU">  // Hungary
+  is <key:"IS">  // Iceland
+  in <key:"IN">  // India
+  id <key:"ID">  // Indonesia
+  ir <key:"IR">  // Iran
+  iq <key:"IQ">  // Iraq
+  ie <key:"IE">  // Ireland
+  im <key:"IM">  // Isle of Man
+  il <key:"IL">  // Israel
+  it <key:"IT">  // Italy
+  jm <key:"JM">  // Jamaica
+  jp <key:"JP">  // Japan
+  je <key:"JE">  // Jersey
+  jo <key:"JO">  // Jordan
+  kz <key:"KZ">  // Kazakhstan
+  ke <key:"KE">  // Kenya
+  ki <key:"KI">  // Kiribati
+  kp <key:"KP">  // Korea, Democratic People's Republic of
+  kr <key:"KR">  // Korea
+  kw <key:"KW">  // Kuwait
+  kg <key:"KG">  // Kyrgyzstan
+  la <key:"LA">  // Lao
+  lv <key:"LV">  // Latvia
+  lb <key:"LB">  // Lebanon
+  ls <key:"LS">  // Lesotho
+  lr <key:"LR">  // Liberia
+  ly <key:"LY">  // Libyan Arab Jamahiriya
+  li <key:"LI">  // Liechtenstein
+  lt <key:"LT">  // Lithuania
+  lu <key:"LU">  // Luxembourg
+  mo <key:"MO">  // Macao
+  mk <key:"MK">  // Macedonia
+  mg <key:"MG">  // Madagascar
+  mw <key:"MW">  // Malawi
+  my <key:"MY">  // Malaysia
+  mv <key:"MV">  // Maldives
+  ml <key:"ML">  // Mali
+  mt <key:"MT">  // Malta
+  mh <key:"MH">  // Marshall Islands
+  mq <key:"MQ">  // Martinique
+  mr <key:"MR">  // Mauritania
+  mu <key:"MU">  // Mauritius
+  yt <key:"YT">  // Mayotte
+  mx <key:"MX">  // Mexico
+  fm <key:"FM">  // Micronesia
+  md <key:"MD">  // Moldova
+  mc <key:"MC">  // Monaco
+  mn <key:"MN">  // Mongolia
+  me <key:"ME">  // Montenegro
+  ms <key:"MS">  // Montserrat
+  ma <key:"MA">  // Morocco
+  mz <key:"MZ">  // Mozambique
+  mm <key:"MM">  // Myanmar
+  na <key:"NA">  // Namibia
+  nr <key:"NR">  // Nauru
+  np <key:"NP">  // Nepal
+  nl <key:"NL">  // Netherlands
+  an <key:"AN">  // Netherlands Antilles
+  nc <key:"NC">  // New Caledonia
+  nz <key:"NZ">  // New Zealand
+  ni <key:"NI">  // Nicaragua
+  ne <key:"NE">  // Niger
+  ng <key:"NG">  // Nigeria
+  nu <key:"NU">  // Niue
+  nf <key:"NF">  // Norfolk Island
+  mp <key:"MP">  // Northern Mariana Islands
+  no <key:"NO">  // Norway
+  om <key:"OM">  // Oman
+  pk <key:"PK">  // Pakistan
+  pw <key:"PW">  // Palau
+  ps <key:"PS">  // Palestine
+  pa <key:"PA">  // Panama
+  pg <key:"PG">  // Papua New Guinea
+  py <key:"PY">  // Paraguay
+  pe <key:"PE">  // Peru
+  ph <key:"PH">  // Philippines
+  pn <key:"PN">  // Pitcairn
+  pl <key:"PL">  // Poland
+  pt <key:"PT">  // Portugal
+  pr <key:"PR">  // Puerto Rico
+  qa <key:"QA">  // Qatar
+  re <key:"RE">  // Reunion
+  ro <key:"RO">  // Romania
+  ru <key:"RU">  // Russian Federation
+  rw <key:"RW">  // Rwanda
+  bl <key:"BL">  // Saint Barthelemy
+  sh <key:"SH">  // Saint Helena
+  kn <key:"KN">  // Saint Kitts and Nevis
+  lc <key:"LC">  // Saint Lucia
+  mf <key:"MF">  // Saint Martin
+  pm <key:"PM">  // Saint Pierre and Miquelon
+  vc <key:"VC">  // Saint Vincent and the Grenadines
+  ws <key:"WS">  // Samoa
+  sm <key:"SM">  // San Marino
+  st <key:"ST">  // Sao Tome and Principe
+  sa <key:"SA">  // Saudi Arabia
+  sn <key:"SN">  // Senegal
+  rs <key:"RS">  // Serbia
+  sc <key:"SC">  // Seychelles
+  sl <key:"SL">  // Sierra Leone
+  sg <key:"SG">  // Singapore
+  sk <key:"SK">  // Slovakia
+  si <key:"SI">  // Slovenia
+  sb <key:"SB">  // Solomon Islands
+  so <key:"SO">  // Somalia
+  za <key:"ZA">  // South Africa
+  gs <key:"GS">  // South Georgia and the South Sandwich Islands
+  es <key:"ES">  // Spain
+  lk <key:"LK">  // Sri Lanka
+  sd <key:"SD">  // Sudan
+  sr <key:"SR">  // Suriname
+  sj <key:"SJ">  // Svalbard and Jan Mayen
+  sz <key:"SZ">  // Swaziland
+  se <key:"SE">  // Sweden
+  ch <key:"CH">  // Switzerland
+  sy <key:"SY">  // Syrian Arab Republic
+  tw <key:"TW">  // Taiwan
+  tj <key:"TJ">  // Tajikistan
+  tz <key:"TZ">  // Tanzania
+  th <key:"TH">  // Thailand
+  tl <key:"TL">  // Timor-leste
+  tg <key:"TG">  // Togo
+  tk <key:"TK">  // Tokelau
+  to <key:"TO">  // Tonga
+  tt <key:"TT">  // Trinidad and Tobago
+  tn <key:"TN">  // Tunisia
+  tr <key:"TR">  // Turkey
+  tm <key:"TM">  // Turkmenistan
+  tc <key:"TC">  // Turks and Caicos Islands
+  tv <key:"TV">  // Tuvalu
+  ug <key:"UG">  // Uganda
+  ua <key:"UA">  // Ukraine
+  ae <key:"AE">  // United Arab Emirates
+  gb <key:"GB">  // Great Britain
+  us <key:"US">  // USA
+  um <key:"UM">  // United States Minor Outlying Islands
+  uy <key:"UY">  // Uruguay
+  uz <key:"UZ">  // Uzbekistan
+  vu <key:"VU">  // Vanuatu
+  ve <key:"VE">  // Venezuela
+  vn <key:"VN">  // Viet Nam
+  vg <key:"VG">  // Virgin Islands, British
+  vi <key:"VI">  // Virgin Islands, U.S.
+  wf <key:"WF">  // Wallis and Futuna
+  eh <key:"EH">  // Western Sahara
+  ye <key:"YE">  // Yemen
+  zm <key:"ZM">  // Zambia
+  zw <key:"ZW">  // Zimbabwe
+}
+
+// State or province name; for US this is two letter state code. May be
+// used in other countries to model administrative area between the geoCity
+// and geoCountry level.
+GeoState: Enum {
+  al <key:"AL">  // Alabama
+  ak <key:"AK">  // Alaska
+  as <key:"AS">  // American Samoa
+  az <key:"AZ">  // Arizona
+  ar <key:"AR">  // Arkansas
+  ca <key:"CA">  // California
+  co <key:"CO">  // Colorado
+  ct <key:"CT">  // Connecticut
+  de <key:"DE">  // Delaware
+  dc <key:"DC">  // District of Columbia
+  fm <key:"FM">  // Federated States of Micronesia
+  fl <key:"FL">  // Florida
+  ga <key:"GA">  // Georgia
+  gu <key:"GU">  // Guam
+  hi <key:"HI">  // Hawaii
+  id <key:"ID">  // Idaho
+  il <key:"IL">  // Illinois
+  in <key:"IN">  // Indiana
+  ia <key:"IA">  // Iowa
+  ks <key:"KS">  // Kansas
+  ky <key:"KY">  // Kentucky
+  la <key:"LA">  // Louisiana
+  me <key:"ME">  // Maine
+  mh <key:"MH">  // Marshall Islands
+  md <key:"MD">  // Maryland
+  ma <key:"MA">  // Massachusetts
+  mi <key:"MI">  // Michigan
+  mn <key:"MN">  // Minnesota
+  ms <key:"MS">  // Mississippi
+  mo <key:"MO">  // Missouri
+  mt <key:"MT">  // Montana
+  ne <key:"NE">  // Nebraska
+  nv <key:"NV">  // Nevada
+  nh <key:"NH">  // New Hampshire
+  nj <key:"NJ">  // New Jersey
+  nm <key:"NM">  // New Mexico
+  ny <key:"NY">  // New York
+  nc <key:"NC">  // North Carolina
+  nd <key:"ND">  // North Dakota
+  mp <key:"MP">  // Northern Mariana Islands
+  oh <key:"OH">  // Ohio
+  ok <key:"OK">  // Oklahoma
+  or <key:"OR">  // Oregon
+  pw <key:"PW">  // Palau
+  pa <key:"PA">  // Pennsylvania
+  pr <key:"PR">  // Puerto Rico
+  ri <key:"RI">  // Rhode Island
+  sc <key:"SC">  // South Carolina
+  sd <key:"SD">  // South Dakota
+  tn <key:"TN">  // Tennessee
+  tx <key:"TX">  // Texas
+  ut <key:"UT">  // Utah
+  va <key:"VA">  // Virginia
+  vi <key:"VI">  // Virgin Islands
+  vt <key:"VT">  // Vermont
+  wa <key:"WA">  // Washington
+  wv <key:"WV">  // West Virginia
+  wi <key:"WI">  // Wisconsin
+  wy <key:"WY">  // Wyoming
+}
+
+// Indicates the way that history data is collected for a point.
+HisMode: Enum {
+  // Data is sampled on a regular interval. The timestamp
+  // indicates exactly when the sample was taken, and we assume linear
+  // interpolation between samples.
+  sampled
+
+  // Data is logged when it changes. The means the timestamp
+  // indicates exactly when it changed (inclusive) and it remains that
+  // value until the next sample's timestamp (exclusive).
+  cov
+
+  // Integral data is sampled on a regular interval and
+  // logged at the *end* of the interval. The timestamp indicates the
+  // *end* of the interval. Therefore, the raw data is logged as
+  // start *exclusive*, end *inclusive*.  This is mode is typical for
+  // consumption meters.
+  consumption
+}
+
+// Status of point's history collection or synchronization
+HisStatus: Enum {
+  ok        // last sync attempt was successful
+  fault     // a configuration problem - see [ph::PhEntity.hisErr]
+  down      // a communication or network problem - see [ph::PhEntity.hisErr]
+  disabled  // manual disable of the point or parent connector
+  unknown   // we don't know anything (usually boot state)
+  pending   // sync has been scheduled and is waiting to running
+  syncing   // sync is currently running
+}
+
+// Operational mode for HVAC equipment
+HvacMode: Enum {
+  cooling
+  heating
+  reheat
+  warmup        // morning warmup where AHU is supplying warm air
+  purge         // night purge when AHU is supplying 100% fresh air
+  pressurize
+  depressurize
+  manual
+}
+
+// Kind name used to identity a value data type
+Kind: Enum {
+  marker <key:"Marker">      // is-a label
+  bool <key:"Bool">          // true or false
+  na <key:"NA">              // not available
+  number <key:"Number">      // floating point with optional unit
+  str <key:"Str">            // Unicode string
+  uri <key:"Uri">            // Universal resource identifier
+  ref <key:"Ref">            // reference to an entity
+  date <key:"Date">          // an ISO 8601 date as year, month, day: 2011-06-07
+  time <key:"Time">          // an ISO 8601 time as hour, minute, seconds: 09:51:27.354
+  dateTime <key:"DateTime">  // an ISO 8601 timestamp followed by timezone name
+  coord <key:"Coord">        // geographic coordinate in latitude/longitude formatted as C(lat,lng)
+  xstr <key:"XStr">          // extended string with type name
+  list <key:"List">          // ordered sequence
+  dict <key:"Dict">          // key/value map
+  grid <key:"Grid">          // two dimensional tabular data collection
+}
+
+// Single-phase measurement of an electric quantity in a multi-phase AC electric power system.
+Phase: Enum {
+  l1 <key:"L1">
+  l2 <key:"L2">
+  l3 <key:"L3">
+  l1L2 <key:"L1-L2">
+  l2L3 <key:"L2-L3">
+  l3L1 <key:"L3-L1">
+}
+
+// Primary function of building as US Energy Star key
+PrimaryFunction: Enum {
+  adultEducation <key:"Adult Education">
+  ambulatorySurgicalCenter <key:"Ambulatory Surgical Center">
+  aquarium <key:"Aquarium">
+  automobileDealership <key:"Automobile Dealership">
+  bankBranch <key:"Bank Branch">
+  barNightclub <key:"Bar/Nightclub">
+  barracks <key:"Barracks">
+  bowlingAlley <key:"Bowling Alley">
+  casino <key:"Casino">
+  collegeUniversity <key:"College/University">
+  convenienceStoreWithGasStation <key:"Convenience Store with Gas Station">
+  convenienceStoreWithoutGasStation <key:"Convenience Store without Gas Station">
+  conventionCenter <key:"Convention Center">
+  courthouse <key:"Courthouse">
+  dataCenter <key:"Data Center">
+  distributionCenter <key:"Distribution Center">
+  drinkingWaterTreatmentDistribution <key:"Drinking Water Treatment & Distribution">
+  enclosedMall <key:"Enclosed Mall">
+  energyPowerStation <key:"Energy/Power Station">
+  fastFoodRestaurant <key:"Fast Food Restaurant">
+  financialOffice <key:"Financial Office">
+  fireStation <key:"Fire Station">
+  fitnessCenterHealthClubGym <key:"Fitness Center/Health Club/Gym">
+  foodSales <key:"Food Sales">
+  foodService <key:"Food Service">
+  hospitalGeneralMedicalSurgical <key:"Hospital (General Medical & Surgical)">
+  hotel <key:"Hotel">
+  iceCurlingRink <key:"Ice/Curling Rink">
+  indoorArena <key:"Indoor Arena">
+  k12School <key:"K-12 School">
+  laboratory <key:"Laboratory">
+  library <key:"Library">
+  lifestyleCenter <key:"Lifestyle Center">
+  mailingCenterPostOffice <key:"Mailing Center/Post Office">
+  manufacturingIndustrialPlant <key:"Manufacturing/Industrial Plant">
+  medicalOffice <key:"Medical Office">
+  mixedUseProperty <key:"Mixed Use Property">
+  movieTheater <key:"Movie Theater">
+  multifamilyHousing <key:"Multifamily Housing">
+  museum <key:"Museum">
+  nonRefrigeratedWarehouse <key:"Non-Refrigerated Warehouse">
+  office <key:"Office">
+  otherEducation <key:"Other - Education">
+  otherEntertainmentPublicAssembly <key:"Other - Entertainment/Public Assembly">
+  otherLodgingResidential <key:"Other - Lodging/Residential">
+  otherMall <key:"Other - Mall">
+  otherPublicServices <key:"Other - Public Services">
+  otherRecreation <key:"Other - Recreation">
+  otherRestaurantBar <key:"Other - Restaurant/Bar">
+  otherServices <key:"Other - Services">
+  otherStadium <key:"Other - Stadium">
+  otherTechnologyScience <key:"Other - Technology/Science">
+  otherUtility <key:"Other - Utility">
+  other <key:"Other">
+  otherSpecialtyHospital <key:"Other/Specialty Hospital">
+  outpatientRehabilitationPhysicalTherapy <key:"Outpatient Rehabilitation/Physical Therapy">
+  parking <key:"Parking">
+  performingArts <key:"Performing Arts">
+  personalServicesHealthBeautyDryCleaningEtc <key:"Personal Services (Health/Beauty, Dry Cleaning, etc)">
+  policeStation <key:"Police Station">
+  preSchoolDaycare <key:"Pre-school/Daycare">
+  prisonIncarceration <key:"Prison/Incarceration">
+  raceTrack <key:"Race Track">
+  refrigeratedWarehouse <key:"Refrigerated Warehouse">
+  repairServicesVehicleShoeLocksmithEtc <key:"Repair Services (Vehicle, Shoe, Locksmith, etc)">
+  residenceHallDormitory <key:"Residence Hall/Dormitory">
+  restaurant <key:"Restaurant">
+  retailStore <key:"Retail Store">
+  rollerRink <key:"Roller Rink">
+  selfStorageFacility <key:"Self-Storage Facility">
+  seniorCareCommunity <key:"Senior Care Community">
+  singleFamilyHome <key:"Single Family Home">
+  socialMeetingHall <key:"Social/Meeting Hall">
+  stadiumClosed <key:"Stadium (Closed)">
+  stadiumOpen <key:"Stadium (Open)">
+  stripMall <key:"Strip Mall">
+  supermarketGroceryStore <key:"Supermarket/Grocery Store">
+  swimmingPool <key:"Swimming Pool">
+  transportationTerminalStation <key:"Transportation Terminal/Station">
+  urgentCareClinicOtherOutpatient <key:"Urgent Care/Clinic/Other Outpatient">
+  veterinaryOffice <key:"Veterinary Office">
+  vocationalSchool <key:"Vocational School">
+  wastewaterTreatmentPlant <key:"Wastewater Treatment Plant">
+  wholesaleClubSupercenter <key:"Wholesale Club/Supercenter">
+  worshipFacility <key:"Worship Facility">
+  zoo <key:"Zoo">
+}
+
+// Enumeration of weather conditions
+WeatherCondEnum: Enum {
+  unknown
+  clear
+  partlyCloudy
+  cloudy
+  showers
+  rain
+  thunderstorms
+  ice
+  flurries
+  snow
+}
+
+// Time between sunrise and sunset
+WeatherDaytimeEnum: Enum {
+  nighttime  // false indicates sun is below horizon
+  daytime    // true indicates sun is above horizon
+}
+
+// Current status of a writable point output
+WriteStatus: Enum {
+  unbound   // writable point is not bound to any output
+  ok        // last write was successful
+  down      // connectivity/networking problem - see [ph::PhEntity.writeErr]
+  fault     // configuration or hardware error  - see [ph::PhEntity.writeErr]
+  disabled  // manual disable of the point or connector
+  unknown   // we don't know anything (typically boot state)
+}
+
+
+// --- equip.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Re-orangize using PhEntity
+//
+
+// Equipment asset.
+// See [ph.doc::Equips] chapter.
+Equip: PhEntity <abstract> {
+  equip
+  equipRef:     Ref?
+  siteRef:      Ref
+  spaceRef:     Ref?
+  systemRef:    MultiRef?
+  parentEquips: Query<of:Equip, via:"equipRef+">                  // Parent Equips that contain this Equip
+  childEquips:  Query<of:Equip, inverse:"ph::Equip.parentEquips"> // Child Equips contained by this Equip
+  points:       Query<of:Point, inverse:"ph::Point.equips">       // Child Points contained by this Equip
+}
+
+// AC Electricity meter.
+// See [ph.doc::Meters] chapter.
+AcElecMeter: ElecMeter {
+  ac
+  phaseCount: PhaseCount?
+}
+
+// An AC EVSE port delivers [ph::PhEntity.ac] electricity to a single EV charging inlet
+// at a time.  See [ph.doc::EVSE#evse-port] chapter.
+//
+// Typically a max current or max power setpoint should reference an AC
+// EVSE port, but not both.  Usually it is preferred to control an AC EVSE
+// port using a max current setpoint.
+//
+// It is recommended to include electrical location related tags on
+// electrical points that reference an AC EVSE port.  See
+// [ph.doc::Meters#electric-meters] chapter for more details.
+AcEvsePort: EvsePort {
+  ac
+}
+
+// Equipment to move or control a mechanism.  Actuators may be manually
+// operated or automated via a control system to convert an energy source
+// into mechanical energy.  Typically the energy source is electricity,
+// hydraulics, or pneumatics.
+Actuator: Equip {
+  actuator
+}
+
+// Air Handling Unit: An enclosure with a fan that delivers air to a space
+// via ductwork and performs one or more of the functions of cleaning,
+// heating, cooling, humidifying, dehumidifying, ventilating or circulating
+// the air.  See [ph.doc::AHUs] chapter.
+Ahu: AirHandlingEquip {
+  ahu
+}
+
+// HVAC equipment that conditions and delivers air via one or more fans.
+// Conditioning of air includes heating, cooling, humidification,
+// dehumidification, and ventilation. See [ph.doc::AHUs] chapter.
+AirHandlingEquip: Equip <abstract> {
+  ahuZoneDelivery:        AhuZoneDelivery?
+  airVolumeAdjustability: AirVolumeAdjustability?
+  coolingProcess:         CoolingProcess? <multiChoice>
+  ductConfig:             DuctConfig?
+  ductDeck:               DuctDeck?
+  heatingProcess:         HeatingProcess? <multiChoice>
+}
+
+// Equipment in air distribution systems which terminate at the space.
+// Terminal units receive air from [ph::AirHandlingEquip] which have the
+// primarily responsibility to condition air.  Terminal units are primarily
+// responsible for delivery of air to the space and tempering the temperature.
+AirTerminalUnit: Equip <abstract> {
+  ductConfig: DuctConfig?
+}
+
+// Aquifer Thermal Energy Storage system.
+// See [ph.doc::ATES] chapter.
+Ates: Equip {
+  ates
+  atesDesign: AtesDesign?
+}
+
+// Equipment used to store electric energy
+Battery: Equip {
+  battery
+}
+
+// Equipment to generate hot water or steam for heating
+Boiler: Equip {
+  boiler
+  heatingProcess: HeatingProcess?
+}
+
+// Branch selector used for heat recovery in a VRF system.  These are
+// control devices directing the liquid refrigerant or gas refrigerant
+// to zones requiring cooling or heating. See [ph.doc::VRF#branch-selector]
+// chapter.
+BranchSelector: VrfEquip {
+  branchSelector
+}
+
+// An assembly of one or more insulated conductors.
+Cable: Equip {
+  cable
+}
+
+// Constant air volume terminal unit.  CAV systems use a constant
+// air flow rate with a variable air temperature.
+Cav: AirTerminalUnit {
+  cav
+}
+
+// Plant used to generate chilled water for cooling.
+// See [ph.doc::Plants].
+ChilledWaterPlant: Plant {
+  chilled
+  water
+  condenserLoop: CondenserLoop?
+}
+
+// Conditions a space using a heat exchanger integrated into the ceiling
+ChilledBeam: RadiantEquip {
+  chilledBeam
+  coolingProcess: CoolingProcess?
+  heatingProcess: HeatingProcess?
+}
+
+// Equipment to remove heat from a liquid.  Chillers typically use a vapor
+// compression or an absorption refrigeration cycle.
+Chiller: Equip {
+  chiller
+  chillerMechanism: ChillerMechanism?
+  coolingCapacity:  Number?
+}
+
+// Electrical circuit and its associated components such as breakers.
+// See [ph.doc::ElecPanels#circuit] chapter.
+Circuit: Equip {
+  circuit
+}
+
+// Heat exchanger used to heat or cool air.  Coils are sub-components
+// of HVAC equipment such as [ph::AirHandlingEquip].
+Coil: HeatExchanger <abstract> {
+}
+
+// Duct, pipe, or cable to convey a substance or phenomenon
+Conduit: Equip <abstract> {
+}
+
+// Panel housing controllers and networking gear
+ControlsPanel: Panel {
+  controls
+}
+
+// Coil used to cool air.
+CoolingCoil: Coil {
+  coolingCoil
+  coolingProcess: CoolingProcess?
+}
+
+// Equipment to transfer waste heat into the atmosphere
+CoolingTower: Equip {
+  coolingTower
+}
+
+// Computer Room Air Conditioner: An FCU designed to condition a computer
+// room.  See [ph.doc::AHUs] and [ph.doc::DataCenters] chapters.
+Crac: Fcu {
+  crac
+}
+
+// Actuator to regulate the flow of air.
+DamperActuator: Actuator {
+  damper
+  ductSection: DuctSection?
+}
+
+// DC Electricity meter.
+// See [ph.doc::Meters] chapter.
+DcElecMeter: ElecMeter {
+  dc
+}
+
+// A DC EVSE port delivers [ph::PhEntity.dc] electricity to a single EV charging inlet
+// at a time.  See [ph.doc::EVSE#evse-port] chapter.
+//
+// Typically a max current or max power setpoint should reference a DC
+// EVSE port, but not both.  Usually it is preferred to control a DC EVSE
+// port using a max power setpoint.
+DcEvsePort: EvsePort {
+  dc
+}
+
+// Dedicated Outside Air System: An AHU that brings in 100% outside air and
+// no recirculated air in order to provide ventilation to spaces.
+// See [ph.doc::AHUs] chapter.
+Doas: Ahu {
+  doas
+}
+
+// Conduit used to convey air for HVAC
+Duct: Conduit {
+  duct
+  ductDeck:    DuctDeck?
+  ductSection: DuctSection?
+}
+
+// Electricity meter
+ElecMeter: Meter {
+  elec
+}
+
+// Physical housing for electrical circuits, fuses, and breakers.
+// See [ph.doc::ElecPanels#elec-panel] chapter.
+ElecPanel: Panel {
+  elec
+}
+
+// Enclosure used to move people between floors.
+Elevator: VerticalTransport {
+  elevator
+}
+
+// Moving staircase used to move people between floors.
+Escalator: VerticalTransport {
+  escalator
+}
+
+// Tethered cable with connector, socket/receptacle, or wireless inductive charging pad on an EVSE.
+// Interfaces with the vehicle directly or via an EV driver supplied charging cable.
+EvseCoupler: EvseEquip <abstract> {
+  coupler
+}
+
+// The electrical cable between an [ph::EvsePort] and an EV charging inlet
+// on a vehicle. The [ph::PhEntity.evseCableType] tag distinguishes the type of cable.
+// See [ph.doc::EVSE#evse-cable] chapter.
+EvseCable: EvseCoupler {
+  cable
+  evseCableType: EvseCableType?
+}
+
+// Equipment that dispenses electricity to an EV.  It consists of a
+// physical EVSE enclosure and its contents to which an [ph::EvseCable]
+// attaches.  An [ph::EvseDispenser] can contain zero or more [ph::EvsePort].
+//
+// Children points are used to describe or control one or more [ph::EvsePort]
+// within the EVSE manufacturer's package.
+//
+// See [ph.doc::EVSE#evse-dispenser] chapter.
+EvseDispenser: EvseEquip {
+  dispenser
+}
+
+// Equipment that supports the delivery of electricity to charging inlets
+// located on EVs.  See [ph.doc::EVSE] chapter.
+EvseEquip: Equip {
+  evse
+}
+
+// An EVSE port delivers electricity to a single EV charging inlet at a
+// time.  Comprised of a software-controlled electrical contactor or
+// circuit breaker.  Typically contained within an [ph::EvseDispenser], but
+// may be contained within an [ph::EvsePowerConverter].  More than one
+// [ph::EvseCable] may be connected to a single [ph::EvsePort], however, only one
+// may be energized at any given time.
+//
+// Note:  In the future we might add an entity that describes [ph::EvsePort]
+// contained in an AC distribution panel.  This scenario is not common.
+//
+// See [ph.doc::EVSE#evse-port] chapter.
+EvsePort: EvseEquip {
+  port
+}
+
+// A power converter that has a [ph::PhEntity.dc] electrical output applied to a
+// [ph::DcEvsePort].  May be contained within an [ph::EvseDispenser] or in a
+// separate dedicated equipment enclosure.
+//
+// Children points are used to describe or control one or more [ph::EvsePort]
+// within the EVSE manufacturer's package.
+//
+// See [ph.doc::EVSE#evse-power-converter] chapter.
+EvsePowerConverter: EvseEquip {
+  powerConverter
+}
+
+// Motor used with a fan to create air flow.
+// See [ph.doc::Motors] chapter.
+FanMotor: Motor {
+  fan
+  ductSection: DuctSection?
+}
+
+// Fan Coil Unit: A unitary, factory-made enclosure with a fan and coil
+// that recirculates air in a space and performs one or more of the
+// functions of cleaning, heating, cooling, humidifying, dehumidifying,
+// or ventilating the air. Unit heaters are examples of FCUs.
+// See [ph.doc::AHUs] chapter.
+Fcu: AirHandlingEquip {
+  fcu
+}
+
+// Meter to measure flow rate and total volume of fluid.
+// See [ph.doc::Meters] chapter.
+FlowMeter: Meter {
+  flow
+}
+
+// System to change direction of substance flow
+FlowInverter: Equip {
+  flowInverter
+}
+
+// Ventilation equipment to limit exposure to hazardous fumes.
+FumeHood: Equip {
+  fumeHood
+}
+
+// Equipment to transfer heat between two working fluids.
+HeatExchanger: Equip {
+  heatExchanger
+}
+
+// Coil used to heat air.
+HeatingCoil: Coil {
+  heatingCoil
+  heatingProcess: HeatingProcess?
+}
+
+// Boiler which outputs hot water
+HotWaterBoiler: Boiler {
+  hot
+  water
+}
+
+// Plant used to generate hot water for heating.
+// See [ph.doc::Plants].
+HotWaterPlant: Plant {
+  hot
+  water
+}
+
+// Equipment which adds moisture to air to increase humidity
+HumidifierEquip: Equip {
+  humidifier
+}
+
+// Light fixture using electricity to provide illumination
+Luminaire: Equip {
+  luminaire
+}
+
+// Makeup Air Unit: A DOAS that provides make-up air for a separate, dedicated
+// exhaust system. That is, this equip does not contain an exhaust air section.
+// See [ph.doc::AHUs] chapter.
+Mau: Doas {
+  mau
+}
+
+// Equipment to meter a substance or phenomenon.
+// See [ph.doc::Meters] chapter.
+Meter: Equip {
+  meter
+  meterScope: MeterScope?
+  submeterOf: Ref?
+}
+
+// Equipment that converts electrical energy into mechanical energy.
+// See [ph.doc::Motors] chapter.
+Motor: Equip {
+  motor
+  phaseCount: PhaseCount?
+  vfd:        Marker?
+}
+
+// Conveyor to move people across a horizontal or inclined plane.
+MovingWalkway: VerticalTransport {
+  movingWalkway
+}
+
+// Enclosure for electrical and control equipment.  Panels may be
+// used to isolate electrical connections and provide environmental
+// protection.
+Panel: Equip {
+  panel
+}
+
+// Conduit used to convey a fluid
+Pipe: Conduit {
+  pipe
+  pipeFluid:   Fluid?
+  pipeSection: PipeSection?
+  plantLoop:   PlantLoop?
+}
+
+// Central plant used to generate a substance for a process.
+// See [ph.doc::Plants].
+Plant: Equip {
+  plant
+}
+
+// Motor used with a pump to move fluid.
+// See [ph.doc::Motors] chapter.
+PumpMotor: Motor {
+  pump
+  pipeFluid:   Fluid?
+  pipeSection: PipeSection?
+}
+
+// Enclosure or chassis used to mount computer and networking gear.
+// Devices are mounted to rails of a standard width, typically 19 or 23
+// inches.  Height is measured in *rack units* where one 1U is 1.75 inches.
+// A full rack has a height of 42U.
+// See [ph.doc::DataCenters#racks] chapter.
+Rack: Equip {
+  rack
+}
+
+// HVAC equipment that conditions a space without forced air.
+RadiantEquip: Equip <abstract> {
+}
+
+// Heats a space using pipes or cables embedded beneath floor.
+RadiantFloor: RadiantEquip {
+  radiantFloor
+  heatingProcess: HeatingProcess?
+}
+
+// Heats a space using exposed pipes or coils.  Hot water and steam
+// radiators are often cast iron and installed directly in the space
+// or along the baseboard.  Electric radiators are typically installed
+// on the baseboard.
+Radiator: RadiantEquip {
+  radiator
+  heatingProcess: HeatingProcess?
+}
+
+// Roof Top Unit: A unitary AHU that is weatherized for outdoor use.
+// See [ph.doc::AHUs] chapter.
+Rtu: Ahu {
+  rtu
+}
+
+// Boiler which outputs steam
+SteamBoiler: Boiler {
+  steam
+}
+
+// Plant used to generate steam for heating.
+// See [ph.doc::Plants].
+SteamPlant: Plant {
+  steam
+}
+
+// Tank used to store a substance for temporary holding
+Tank: Equip {
+  tank
+  tankSubstance: Substance?
+}
+
+// Senses and controls temperature of space in HVAC system.  Thermostats
+// may provide an interface for setpoint control.
+Thermostat: Equip {
+  thermostat
+}
+
+// Unit Ventilator: An FCU that has direct access to outside air to provide
+// the space with ventilation.  See [ph.doc::AHUs] chapter.
+UnitVent: Fcu {
+  unitVent
+}
+
+// Uninterruptible power supply
+Ups: Equip {
+  ups
+}
+
+// Actuator to regulate the flow of fluid.
+ValveActuator: Actuator {
+  valve
+  pipeFluid:   Fluid?
+  pipeSection: PipeSection?
+}
+
+// Variable air volume terminal unit.  VAV systems use a constant air
+// temperature with a variable air flow rate.  See [ph.doc::VAVs] chapter.
+Vav: AirTerminalUnit {
+  vav
+  heatingProcess: HeatingProcess?
+  vavAirCircuit:  VavAirCircuit?
+  vavModulation:  VavModulation?
+}
+
+// Equipment to move humans and materials
+VerticalTransport: Equip <abstract> {
+}
+
+// Equipment used in VRF systems.  See [ph.doc::VRF#vrf-equipment] chapter.
+VrfEquip: Equip {
+  vrf
+}
+
+// Indoor unit in a VRF system.  Indoor units operate to satisfy a heating
+// or cooling load. See [ph.doc::VRF#indoor-units] chapter.
+VrfIndoorUnit: VrfEquip {
+  indoorUnit
+}
+
+// Indoor unit fan coil unit in a VRF system.  This includes but is not
+// limited to: ducted-type and non-ducted types such as wall-mount,
+// floor-mount, ceiling-mount and cassettes.  Indoor unit fan coils operate
+// to satisfy a heating  or cooling load in a zone based on a zone thermostat
+// temperature set point.
+VrfIndoorUnitFcu: VrfIndoorUnit {
+}
+
+// Outdoor unit with one or more compressors in a VRF system. As each indoor
+// unit sends a demand to the outdoor unit, outdoor unit delivers the amount
+// of refrigerant needed to meet the individual requirements of each indoor
+// unit.  See [ph.doc::VRF#outdoor-units] chapter.
+VrfOutdoorUnit: VrfEquip {
+  outdoorUnit
+}
+
+// Group of outdoor units in a VRF system.  See [ph.doc::VRF#refrigerant-plant].
+VrfRefrigPlant: Plant {
+  vrf
+  refrig
+}
+
+// A well is a source of groundwater and potentially thermal energy.  When
+// used within an [ATES](ph.doc::ATES) system, the well facilitates thermal
+// energy exchange with the ground warm and cool water sources. In this case, a
+// well can be either a closed system that transports water through pipes in the
+// ground, or an open system that pumps up and returns ground water.
+Well: Equip {
+  well
+}
+
+// Cabling used to convey electricity or data
+Wire: Conduit {
+  wire
+}
+
+
+// --- filetypes.xeto ---
+//
+// Copyright (c) 2011-2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+// Auto-generated 29-Nov-2024
+//
+
+/* TODO
+// File format type definition
+Filetype: Feature {
+  filetype         // Filetype marker
+  fileExt:   Str?  // Filename extension such as "csv"
+  mime:      Str?  // Mime type formatted as "type/subtype"
+  wikipedia: Uri?  // Wikipedia link
+}
+
+// Comma Separated Values - see [ph.doc::Csv]
+@filetype:csv : Filetype {
+  dis: "CSV"
+  fileExt: "csv"
+  mime: "text/csv"
+  wikipedia: "https://wikipedia.org/wiki/Comma-separated_values"
+}
+
+// Haystack JavaScript Object Notation format - see [ph.doc::Json]
+@filetype:json : Filetype {
+  dis: "JSON"
+  fileExt: "json"
+  mime: "application/json"
+  wikipedia: "https://wikipedia.org/wiki/JSON"
+}
+
+// JavaScript Object Notation for Linked Data - see [ph.doc::Rdf]
+@filetype:jsonld : Filetype {
+  dis: "JSON-LD"
+  fileExt: "jsonld"
+  mime: "application/ld+json"
+  wikipedia: "https://wikipedia.org/wiki/JSON-LD"
+}
+
+// Haystack Tag Record Input Output - see [ph.doc::Trio]
+@filetype:trio : Filetype {
+  dis: "Trio"
+  fileExt: "trio"
+  mime: "text/trio"
+}
+
+// RDF Turtle - see [ph.doc::Rdf]
+@filetype:turtle : Filetype {
+  dis: "Turtle"
+  fileExt: "ttl"
+  mime: "text/turtle"
+  wikipedia: "https://wikipedia.org/wiki/Turtle_(syntax)"
+}
+
+// Haystack typed CSV format - see [ph.doc::Zinc]
+@filetype:zinc : Filetype {
+  dis: "Zinc"
+  fileExt: "zinc"
+  mime: "text/zinc"
+}
+*/
+
+
+// --- kinds.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   20 Jul 2022  Brian Frank  Creation
+//
+
+// Geographic coordinate in latitude/longitude in decimal degrees.
+Coord: Scalar <sealed> "C(0,0)"
+
+// Symbol to a def. Symbol values are ASCII strings limited to the
+// following chars: a-z, A-Z, 0-9, underbar, colon, dash, dot.
+// TODO: this is just a temp shim for backward compatibility with Haystack 4.
+Symbol: Scalar <sealed> "x"
+
+// Extended string - type name and string value encoding.
+// TODO: this is just a temp shim for backward compatibility with Haystack 4.
+XStr: Scalar <sealed>
+
+// Feature namespace of definitions identified as `lib::feature:name`
+Feature: Dict <abstract>
+
+
+// --- ops.xeto ---
+//
+// Copyright (c) 2011-2023, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+// Auto-generated 11-Dec-2023
+//
+
+/* TODO
+// Operation for HTTP API.  See [ph.doc::Ops] chapter.
+Op: Feature {
+  // Op marker
+  op
+
+  // Marks a function or operation as having no side effects.  The function
+  // may or may not be *pure* in that calling it multiple times with the
+  // same arguments always evaluates to the same result.
+  noSideEffects: Marker?
+}
+
+// Query basic information about the server.
+// See [ph.doc::Ops#about] chapter.
+@op:about : Op {
+  noSideEffects
+}
+
+// Close the current session and cancel the auth bearer token.
+// See [ph.doc::Ops#close] chapter.
+@op:close : Op {
+}
+
+// Query the definitions in the current namespace.
+// See [ph.doc::Ops#defs] chapter.
+@op:defs : Op {
+  noSideEffects
+}
+
+// Query the filetype defs in the current namespace.
+// See [ph.doc::Ops#filetypes] chapter.
+@op:filetypes : Op {
+  noSideEffects
+}
+
+// Read historized time series data from a [ph::HisPoint].
+// See [ph.doc::Ops#hisread] chapter.
+@op:hisRead : Op {
+  noSideEffects
+}
+
+// Write historized time series data from a [ph::HisPoint].
+// See [ph.doc::Ops#hiswrite] chapter.
+@op:hisWrite : Op {
+}
+
+// Invoke a user action on a target entity.
+// See [ph.doc::Ops#invoke-action] chapter.
+@op:invokeAction : Op {
+}
+
+// Query the lib defs in the current namespace.
+// See [ph.doc::Ops#libs] chapter.
+@op:libs : Op {
+  noSideEffects
+}
+
+// Query the navigation tree for discovery.
+// See [ph.doc::Ops#nav] chapter.
+@op:nav : Op {
+  noSideEffects
+}
+
+// Query the op defs in the current namespace.
+// See [ph.doc::Ops#ops] chapter.
+@op:ops : Op {
+  noSideEffects
+}
+
+// Read or command a [ph::WritablePoint].
+// See [ph.doc::Ops#pointwrite] chapter.
+@op:pointWrite : Op {
+}
+
+// Query the a set of entity records by id or by filter.
+// See [ph.doc::Ops#read] chapter.
+@op:read : Op {
+  noSideEffects
+}
+
+// Poll a watch subscription.
+// See [ph.doc::Ops#watchpoll] chapter.
+@op:watchPoll : Op {
+}
+
+// Subscribe to entity data.
+// See [ph.doc::Ops#watchsub] chapter.
+@op:watchSub : Op {
+}
+
+// Unsubscribe to entity data.
+// See [ph.doc::Ops#watchunsub] chapter.
+@op:watchUnsub : Op {
+}
+*/
+
+
+// --- phenomenon.xeto ---
+//
+// Copyright (c) 2011-2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+// Auto-generated 27-Jun-2024
+//
+
+// Aspect of scientific interest with measurable quantities
+Phenomenon: Choice
+
+// Associated with electricity or with electrical force, power, or energy.
+// This is often opposed to [ph::PhEntity.mech] mechanical energy.
+Elec: Phenomenon { elec }
+
+// Alternating current electricity
+AcElec: Elec { ac }
+
+// Direct current electricity
+DcElec: Elec { dc }
+
+// Electromagnetic radiation in the visible spectrum
+Light: Phenomenon { light }
+
+// Relating to energy from the sun
+Solar: Phenomenon { solar }
+
+// Matter in one the three states solid, liquid, or gas
+Substance: Phenomenon
+
+// Plant or animal material used as fuel to produce electricity or heat
+Biomass: Substance { biomass }
+
+// Liquid or gas
+Fluid: Substance
+
+// Substance with neither definite volume nor shape
+Gas: Fluid
+
+// The mixture of gases which surrounds the earth
+Air: Gas { air }
+
+// Formaldehyde (CH₂O)
+Ch2o: Gas { ch2o }
+
+// Methane (CH₄)
+Ch4: Gas { ch4 }
+
+// Carbon monoxide (CO)
+Co: Gas { co }
+
+// Carbon dioxide (CO₂)
+Co2: Gas { co2 }
+
+// Hydrofluorocarbons
+Hfc: Gas { hfc }
+
+// Nitrous oxide (N₂O)
+N2o: Gas { n2o }
+
+// Fossil fuel energy source consisting largely of methane and other hydrocarbons.
+//
+// The energy content of natural gas varies by region within a range determined
+// on impurities in the gas.  You can find a table of these conversions
+// [here](https://en.wikipedia.org/wiki/Heat_of_combustion#Higher_heating_values_of_natural_gases_from_various_sources)
+NaturalGas: Gas { naturalGas }
+
+// Nitrogen trifluoride (NF₃)
+Nf3: Gas { nf3 }
+
+// Ammonia (NH₃)
+Nh3: Gas { nh3 }
+
+// Nitrogen dioxide (NO₂)
+No2: Gas { no2 }
+
+// Oxygen (O₂) - the common dioxygen allotrope in the air
+O2: Gas { o2 }
+
+// Ozone (O₃)
+O3: Gas { o3 }
+
+// Perfluorocarbons
+Pfc: Gas { pfc }
+
+// By-product of natural gas processing and petroleum refining (C₃H₈)
+Propane: Gas { propane }
+
+// Sulphur hexafluoride (SF₆)
+Sf6: Gas { sf6 }
+
+// Water in its gas form
+Steam: Gas { steam }
+
+// Total volatile organic compound (TVOC).
+Tvoc: Gas { tvoc }
+
+// Substance with definite volume but takes the shape of its container
+Liquid: Fluid
+
+// Liquid phase produced by the condensation of steam or other gas
+Condensate: Liquid { condensate }
+
+// Liquid fuel specifically designed for use in diesel engines
+Diesel: Liquid { diesel }
+
+// Petroleum based oil burned for energy
+FuelOil: Liquid { fuelOil }
+
+// Petroleum derived liquid used as a fuel source
+Gasoline: Liquid { gasoline }
+
+// Water in its liquid form
+Water: Liquid { water }
+
+// Water expelled from a system to remove mineral build up
+BlowdownWater: Water { blowdown }
+
+// Water cooled for use in HVAC and industrial processes
+ChilledWater: Water { chilled }
+
+// Water supplied to cold taps
+ColdWater: Water { cold }
+
+// Water used used to remove heat through condensation
+CondenserWater: Water { condenser }
+
+// Relatively cool water without active chilling
+CoolWater: Water { cool }
+
+// Tap water for drinking, washing, cooking, and flushing of toilets
+DomesticWater: Water { domestic }
+
+// Water present under the ground or from a well
+GroundWater: Water { ground }
+
+// Hot water used for HVAC heating or supplied to hot taps
+HotWater: Water { hot }
+
+// Water used used to makeup water loss through leaks, evaporation, or blowdown
+MakeupWater: Water { makeup }
+
+// Water expelled from a system to remove contaminants.
+PurgeWater: Water { purge }
+
+// Relatively warm water without active heating
+WarmWater: Water { warm }
+
+// Fluid used in refrigeration and heat exchange.  Refrigerants typically
+// alternate between liquid and gas state.
+Refrig: Fluid { refrig }
+
+// Substance with definite shape and volume
+Solid: Substance { solid }
+
+// Combustible sedimentary rock
+Coal: Solid { coal }
+
+// Water in its solid form
+Ice: Solid { ice }
+
+// Particulate matter 0.1; atmospheric pollutant of fine particles with an aerodynamic diameter of 0.1 micrometers or less
+Pm01: Solid { pm01 }
+
+// Particulate matter 10; atmospheric pollutant of fine particles with an aerodynamic diameter of 10 micrometers or less
+Pm10: Solid { pm10 }
+
+// Particulate matter 2.5; atmospheric pollutant of fine particles with an aerodynamic diameter of 2.5 micrometers or less
+Pm25: Solid { pm25 }
+
+// Associated with atmospheric air or phenomenon.
+// See [ph.doc::Weather] chapter.
+Weather: Phenomenon { weather }
+
+// Flow of air on surface of the Earth
+Wind: Phenomenon { wind }
+
+
+// --- point.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Re-orangize using PhEntity
+//
+
+// Data point such as a sensor or actuator.
+// See [ph.doc::Points] chapter.
+Point: PhEntity <abstract> {
+  point
+  cur:           Marker?
+  enum:          Obj?
+  equipRef:      Ref?
+  his:           Marker?
+  kind:          Kind
+  maxVal:        Number?
+  minVal:        Number?
+  pointFunction: PointFunction?
+  pointQuantity: Quantity?
+  pointSubject:  Phenomenon?
+  siteRef:       Ref?
+  spaceRef:      Ref?
+  systemRef:     MultiRef?
+  tz:            TimeZone?
+  unit:          Unit?
+  writable:      Marker?
+  equips:        Query<of:Equip, via:"equipRef+">  // Parent Equips that contain this Point
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Cur/His/Writable
+//////////////////////////////////////////////////////////////////////////
+
+// Point with support to report a "real-time" current value.  By real-time
+// we typically mean freshness within the order of a few seconds or at
+// most a few minutes.  For systems with direct I/O the current value is
+// typically driven by the I/O scan rate. For overlay systems which acquire
+// data via a protocol such as BACnet or Modbus then the current value
+// is typically refreshed using polling or subscription over a network.
+// Also see [ph.doc::Points#cur-points] chapter.
+CurPoint: Point <abstract> {
+  cur
+  curErr:    Str?
+  curStatus: CurStatus?
+  curVal:    Obj?
+}
+
+// Historized point with a history log of timestamp/value pairs.  Points
+// marked as historized indicate the system can response to queries via
+// the `hisRead` operation to return a trend log of timestamp/value pairs.
+//
+// There are typically two mechanisms for historization:
+//   - the local system performs the historization by logging the
+//     point's `curVal` to local storage
+//   - in overlay systems a downstream device performs the historization
+//     and the local system synchronizes the history data in batch on
+//     a periodic basis
+//
+// Also see [ph.doc::Points#historized-points] chapter.
+HisPoint: Point <abstract> {
+  his
+  hisErr:       Str?
+  hisMode:      HisMode?
+  hisStatus:    HisStatus?
+  hisTotalized: Marker?
+}
+
+// Point with writable output using 16-level priority array.  Writable
+// points typically are a setpoint or actuator command.  Haystack writable
+// points are modeled on the BACnet 16-level priority array with a
+// relinquish default which effectively acts as level 17.
+//
+// The following levels have special behavior:
+//  - **Level 1**: highest priority reserved for emergency overrides
+//  - **Level 8**: manual override with ability to set timer to expire back to auto
+//  - **Default**: implicitly acts as level 17 for relinquish default
+//
+// The priority array provides for contention resolution when many different
+// control applications may be vying for control of a given point. Low level
+// applications like scheduling typically control levels 14, 15, or 16. Then
+// users can override at level 8. But a higher levels like 2 to 7 can be used
+// to trump a user override (for example a demand response energy routine
+// that requires higher priority).
+//
+// The actual value to write is resolved by starting at level 1 and working down
+// to relinquish default to find the first non-null value. It is possible for
+// all levels to be null, in which case the overall write output is null (which
+// in turn may be auto/null to another system). Anytime a null value is written
+// to a priority level, we say that level has been set to auto or released (this
+// allows the next highest level to take command of the output).
+//
+// Also see [ph.doc::Points#writable-points] chapter.
+WritablePoint: Point <abstract> {
+  writable
+  writeErr:    Str?
+  writeLevel:  Number?
+  writeStatus: WriteStatus?
+  writeVal:    Obj?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Synthetic
+//////////////////////////////////////////////////////////////////////////
+
+// See [ph.doc::Synthetics] chapter.
+SyntheticPoint: Point <abstract> {
+  synthetic
+  syntheticModelRef: Ref?
+}
+
+// See [ph.doc::Synthetics] chapter.
+SyntheticModel: PhEntity {
+  syntheticModel
+}
+
+// See [ph.doc::Synthetics] chapter.
+ComputedPoint: SyntheticPoint <abstract> {
+  computed
+}
+
+// See [ph.doc::Synthetics] chapter.
+ComputedModel: SyntheticModel {
+  computedModel
+}
+
+// See [ph.doc::Synthetics] chapter.
+MlPoint: SyntheticPoint <abstract> {
+  ml
+}
+
+// See [ph.doc::Synthetics] chapter.
+MlModel: SyntheticModel {
+  mlModel
+  mlIdentificationPeriod: Span?
+  mlInputVarRefs:         List?
+  mlModelMetrics:         Dict?
+  mlModelParameters:      Dict?
+  mlOutputVarRef:         Ref?
+}
+
+// Machine learning variable representing both model inputs and outputs.
+MlVar: PhEntity {
+  mlVar
+  mlVarFilter: Str?
+  mlVarPoint:  Ref?
+}
+
+// See [ph.doc::Synthetics] chapter.
+SimPoint: SyntheticPoint <abstract> {
+  sim
+  pointRef:    Ref?
+  simScenario: SimScenario?
+}
+
+// See [ph.doc::Synthetics] chapter.
+SimModel: SyntheticModel {
+  simModel
+}
+
+
+// --- quantity.xeto ---
+//
+// Copyright (c) 2011-2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+// Auto-generated 24-Jan-2025
+//
+
+// Measurable property of a substance or phenomenon
+Quantity: Choice
+
+// Rate of air movement as distance over time
+AirVelocity: Quantity { air, velocity }
+
+// Apparent energy in an AC eletrical power system. Integral of
+// [ph::ApparentPower] over time.
+ApparentEnergy: Quantity { apparent, energy }
+
+// Apparent power; the perceived magnitude of electric power transfer in an
+// AC electric system due to the combination of active and reactive power.
+ApparentPower: Quantity { apparent, power }
+
+// Percentage of sky obscured by clouds. This is also known as cloudiness, or cloud amount.
+Cloudage: Quantity { cloudage }
+
+// Abundance of substance in the total volume of a mixture.
+Concentration: Quantity { concentration }
+
+// Concentration of contaminants in the air
+AirQuality: Concentration
+
+// Concentration of formaldehyde (CH₂O) in the air.
+Ch2oConcentration: AirQuality { ch2o }
+
+// Concentration of carbon monoxide (CO) in the air.
+CoConcentration: AirQuality { co }
+
+// Concentration of carbon dioxide (CO₂) in the air.
+Co2Concentration: AirQuality { co2 }
+
+// Concentration of ammonia (NH₃) in the air
+Nh3Concentration: AirQuality { nh3 }
+
+// Concentration of nitrogen dioxide (NO₂) in the air
+No2Concentration: AirQuality { no2 }
+
+// Concentration of ozone (O₃) in the air
+O3Concentration: AirQuality { o3 }
+
+// Concentration of particulate matter 0.1 in the air.
+Pm01Concentration: AirQuality { pm01 }
+
+// Concentration of particulate matter 10 in the air
+Pm10Concentration: AirQuality { pm10 }
+
+// Concentration of particulate matter 2.5 in the air.
+Pm25Concentration: AirQuality { pm25 }
+
+// Concentration of total volatile organic compounds (TVOC) in the air
+TvocConcentration: AirQuality { tvoc }
+
+// AC current phase angle
+CurrentAngle: Quantity { current, angle }
+
+// AC current phase imbalance. Also referred to as current unbalance.
+CurrentImbalance: Quantity { current, imbalance }
+
+// Total harmonic distortion (THD) of AC current
+CurrentThd: Quantity { current, thd }
+
+// Time between sunrise and sunset
+Daytime: Quantity { daytime }
+
+// Dew point temperature at which water vapor will form dew
+DewPoint: Quantity { dewPoint }
+
+// Compass direction measured in degrees: North: 0° = 360°, East: 90°, South: 180°, West: 270°
+Direction: Quantity { direction }
+
+// Compass direction from which wind originates
+WindDirection: Direction { wind }
+
+// Electrical current
+ElecCurrent: Quantity { elec, current }
+
+// Root-mean-square (RMS) magnitude of AC electrical current
+CurrentMagnitude: ElecCurrent { current, magnitude }
+
+// Electrical voltage, potential difference
+ElecVolt: Quantity { elec, volt }
+
+// Root-mean-square (RMS) magnitude of AC electrical voltage
+VoltMagnitude: ElecVolt { volt, magnitude }
+
+// Amount of a substance discharged into the air
+Emission: Quantity { emission }
+
+// Greenhouse gas emission of methane (CH₄) into the air.
+Ch4Emission: Emission { ch4 }
+
+// Greenhouse gas emission of carbon dioxide (CO₂) into the air.
+Co2Emission: Emission { co2 }
+
+// Greenhouse gas emission of hydrofluorocarbons into the air.
+HfcEmission: Emission { hfc }
+
+// Greenhouse gas emission of nitrous oxide (N₂O) into the air.
+N2oEmission: Emission { n2o }
+
+// Greenhouse gas emission of nitrogen trifluoride (NF₃) into the air.
+Nf3Emission: Emission { nf3 }
+
+// Greenhouse gas emission of perfluorocarbons into the air.
+PfcEmission: Emission { pfc }
+
+// Greenhouse gas emission of sulphur hexafluoride (SF₆) into the air.
+Sf6Emission: Emission { sf6 }
+
+// Measure of ability to do work
+Energy: Quantity { energy }
+
+// Electrical energy; integral of electric power
+ElecEnergy: Energy { elec }
+
+// Active energy in an AC eletrical power system. Integral of
+// [ph::ActivePower] over time.
+ActiveEnergy: ElecEnergy { active }
+
+// Total heat content of a system. It is defined as internal energy of the system plus the product of pressure and volume.
+Enthalpy: Quantity { enthalpy }
+
+// Apparent temperature perceived when considering humidity, wind chill, and heat index
+FeelsLike: Quantity { feelsLike }
+
+// Measure of volumetric flow of fluid
+Flow: Quantity { flow }
+
+// Occurrences per unit time
+Freq: Quantity { freq }
+
+// Frequency of an alternating current waveform
+AcFreq: Freq { ac }
+
+// Percent relative humidity; measure of moisture in the air
+Humidity: Quantity { humidity }
+
+// Luminous flux hitting the inside of the sphere at a specific point.
+//
+// Also see [ies.org](https://www.ies.org/definitions/illuminance/)
+Illuminance: Quantity { illuminance }
+
+// Energy received at a surface by area
+Irradiance: Quantity { irradiance }
+
+// Energy received on surface of the earth from the sun
+SolarIrradiance: Irradiance { solar }
+
+// Range from 0% to 100%.  When paired with a fluid this implies a fill
+// level where 0% is empty and 100% is full.
+Level: Quantity { level }
+
+// Sensed or controlled dimming level of electrical lighting.
+// Level is measured as a percentage where 0% is off and 100%
+// is full brightness.
+LightLevel: Level { light }
+
+// Energy of light in a given direction.
+//
+// Also see [ies.org](https://www.ies.org/definitions/luminance/)
+Luminance: Quantity { luminance }
+
+// Total perceived light in all directions.
+//
+// Also see [ies.org](https://www.ies.org/definitions/luminous-flux/)
+LuminousFlux: Quantity { luminous, flux }
+
+// Perceived light in a particular direction per unit solid angle.
+//
+// Also see [ies.org](https://www.ies.org/definitions/luminous-intensity/)
+LuminousIntensity: Quantity { luminous, intensity }
+
+// Electric power factor; which is the ratio of active power to apparent
+// power in an AC electric power system.  Measured with values in the range
+// of -1.0 to 1.0 or 0.0 to 1.0 without a unit.  When the range of -1.0 to
+// 1.0 is applied, a negative value for power factor indicates the
+// electrical current leads the electrical voltage and a positive value
+// indicates the electrical current lags the electrical voltage.
+Pf: Quantity { pf }
+
+// Energy consumed per unit time
+Power: Quantity { power }
+
+// Rate of electrical energy transfer; energy transfer per unit time
+ElecPower: Power { elec }
+
+// Active power or real power; represents energy transfer that contributes
+// useful work.
+ActivePower: ElecPower { active }
+
+// Active power averaged over a regular interval.  For utility meters
+// the demand interval is based on the billing period.
+ElecDemand: ActivePower { elec, demand }
+
+// Amount of atmospheric water vapor fallen including rain, sleet, snow, and hail
+Precipitation: Quantity { precipitation }
+
+// Measure of force applied
+Pressure: Quantity { pressure }
+
+// Barometric pressure exerted by the weight of the atmosphere
+AtmosphericPressure: Pressure { atmospheric }
+
+// Reactive energy in an AC eletrical power system. Integral of
+// [ph::ReactivePower] over time.
+ReactiveEnergy: Quantity { reactive, energy }
+
+// Reactive power or imaginary power; represents energy that recirculates
+// within an AC power system but does not contribute useful work.
+ReactivePower: Quantity { reactive, power }
+
+// Distance per unit time
+Speed: Quantity { speed }
+
+// Wind flow speed
+WindSpeed: Speed { wind }
+
+// State of charge (SoC) of an electric [ph::PhEntity.battery].  Uses a percentage in
+// the range of 0% to 100%, where no charge is indicated as 0% and full
+// charge is indicated as 100%.
+StateOfCharge: Quantity { stateOfCharge }
+
+// Temperature - measure of hot and cold
+Temp: Quantity { temp }
+
+// Dry bulb temperature
+AirTemp: Temp { air }
+
+// VFD frequency measured in "Hz".
+VfdFreq: Quantity { vfd, freq }
+
+// VFD speed measured in "%"; 0% is off and 100% is the fastest speed.
+VfdSpeed: Quantity { vfd, speed }
+
+// Distance at which light can be clearly discerned
+Visibility: Quantity { visibility }
+
+// AC voltage phase angle
+VoltAngle: Quantity { volt, angle }
+
+// AC voltage phase imbalance. Also referred to as voltage unbalance.
+VoltImbalance: Quantity { volt, imbalance }
+
+// Total harmonic distortion (THD) of AC voltage
+VoltThd: Quantity { volt, thd }
+
+// Three dimensional space occupied by a substance
+Volume: Quantity { volume }
+
+// Enumeration of weather conditions
+WeatherCond: Quantity { weatherCond }
+
+// Wet bulb air temperature.  Temperature which the air would have if cooled to saturation by the evaporation of water into it.
+WetBulb: Quantity { wetBulb }
+
+
+// --- site.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Re-orangize using PhEntity
+//
+
+// Site is a geographic location of the built environment.
+// Typically site maps to one building with its own unique
+// street address.  See [ph.doc::Sites] chapter.
+Site: GeoPlace {
+  site
+  area:              Number?
+  primaryFunction:   PrimaryFunction?
+  tz:                TimeZone?
+  weatherStationRef: Ref?
+  yearBuilt:         Int?
+}
+
+// Geographic place
+GeoPlace: PhEntity <abstract> {
+  geoAddr:       Str?
+  geoCity:       Str?
+  geoCoord:      Coord?
+  geoCountry:    GeoCountry?
+  geoCounty:     Str?
+  geoElevation:  Number?
+  geoPostalCode: Str?
+  geoState:      GeoState?
+  geoStreet:     Str?
+}
+
+
+// --- space.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Re-orangize using PhEntity
+//
+
+// Space is a three-dimensional volume in the built environment.
+// See [ph.doc::Spaces] chapter.
+Space: PhEntity <abstract> {
+  space
+  area:     Number?
+  siteRef:  Ref
+  spaceRef: Ref?
+}
+
+// Space used to house computer and networking gear.
+// See [ph.doc::DataCenters] chapter.
+DataCenter: Space {
+  dataCenter
+}
+
+// Storey of a building.  See [ph.doc::Spaces#floors] chapter.
+Floor: Space {
+  floor
+  floorNum: Number?
+}
+
+// Floor at ground level.  In North America this is typically called
+// the first floor, but in Europe its often labeled as floor zero.
+// If [ph::PhEntity.floorNum] is defined, then it must be set to zero.
+GroundFloor: Floor {
+  ground
+}
+
+// Zone related to conditioning of a space's air temperature and quality.
+// See [ph.doc::Spaces#zones] and [ph.doc::Zones#hvac] chapters.
+HvacZoneSpace: ZoneSpace {
+  hvac
+}
+
+// Zone related to lighting system.
+// See [ph.doc::Spaces#zones] and [ph.doc::Zones#lighting] chapters.
+LightingZoneSpace: ZoneSpace {
+  lighting
+}
+
+// The roof floor is the topmost level of a building.  It is often
+// where HVAC equipment is located such as rooftop AHUs.
+RoofFloor: Floor {
+  roof
+}
+
+// Enclosed room of a building
+Room: Space {
+  room
+}
+
+// Floor below ground level.  Subterranean floors are also known as
+// basements, lower levels, or cellars.
+SubterraneanFloor: Floor {
+  subterranean
+}
+
+// Space associated with a specific system.
+// See [ph.doc::Spaces#zones] and [ph.doc::Zones] chapters.
+ZoneSpace: Space {
+  zone
+}
+
+
+// --- system.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Re-orangize using PhEntity
+//
+
+// Grouping of related equipment dedicated to a single application.
+// See [ph.doc::Systems] chapter.
+System: PhEntity {
+  system
+  siteRef:   Ref
+  systemRef: MultiRef?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Air Systems
+//////////////////////////////////////////////////////////////////////////
+
+// System for moving air to maintain indoor thermal comfort and/or air quality.
+AirSystem: System {
+  air
+}
+
+// System for air treatment to control its temperature, humidity, cleanliness,
+// and distribution to meet the requirements of a conditioned space.
+AirConditioningSystem: AirSystem {
+  conditioning
+}
+
+// System consisting of one or more fans that remove air from the building.
+// Exhaust systems allow outdoor air to enter by ventilation inlets or normal
+// leakage paths sthrough the building envelope.
+AirExhaustSystem: AirSystem {
+  exhaust
+}
+
+// System that supplies or removes air by natural or mechanical means to or
+// from any space in order to provide outdoor air to the space. Such air may or
+// may not have been conditioned.
+AirVentilationSystem: AirSystem {
+  ventilation
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Water Systems
+//////////////////////////////////////////////////////////////////////////
+
+// System that supplies or collects potable or non-potable water in any state.
+WaterSystem: System {
+  water
+}
+
+// System that circulates water in its liquid state below ambient temperature
+// for cooling a space or process.
+ChilledWaterSystem: WaterSystem {
+  chilled
+}
+
+// System that circulates water in its liquid state for rejecting heat
+// from a space or process.
+CondenserWaterSystem: WaterSystem {
+  condenser
+}
+
+// System that circulates potable cold water in its liquid state for purposes
+// other than space cooling and process requirements.
+DomesticColdWaterSystem: DomesticWaterSystem {
+  cold
+}
+
+// System that circulates potable hot water in its liquid state for purposes
+// other than space heating and process requirements.
+DomesticHotWaterSystem: DomesticWaterSystem {
+  hot
+}
+
+// System that circulates potable water in its liquid state for purposes
+// other than space conditioning and process requirements.
+DomesticWaterSystem: WaterSystem {
+  domestic
+}
+
+// System that circulates water in its liquid state for heating
+// a space or process.
+HotWaterSystem: WaterSystem {
+  hot
+}
+
+// System that circulates water in its vapor state for heating
+// a space or process.
+SteamSystem: WaterSystem {
+  steam
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Elec Systems
+//////////////////////////////////////////////////////////////////////////
+
+// System that generates, converts, distributes, and/or stores electricity.
+ElecSystem: System {
+  elec
+}
+
+// A system that supplies electricity to EVSE assembly equipment and its
+// auxiliary loads.
+EvseSystem: ElecSystem {
+  evse
+}
+
+// System designed to provide lighting.
+LightingSystem: ElecSystem {
+  lighting
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Refrig Systems
+//////////////////////////////////////////////////////////////////////////
+
+// Refrigerant distribution to fulfill all or parts of a refrigeration cycle.
+RefrigSystem: System {
+  refrig
+}
+
+// Variable refigerant flow system.  The system contains the indoor
+// units, outdoor units, and branch selectors.  See [ph.doc::VRF#types-of-vrf-systems]
+// chapter.
+VrfSystem: RefrigSystem {
+  vrf
+}
+
+// Cooling only VRF system can only cool; heating is not available.
+// See [ph.doc::VRF#types-of-vrf-systems] chapter.
+VrfCoolingOnlySystem: VrfSystem {
+  coolingOnly
+}
+
+// Heat pump VRF system can either heat, or cool, but not at the same time.
+// See [ph.doc::VRF#types-of-vrf-systems] chapter.
+VrfHeatPumpSystem: VrfSystem {
+  heatPump
+}
+
+// Heat recovery VRF system can operate cooling and heating by each indoor unit
+// independently, at the same time. Heat recovery VRF systems have branch selectors
+// to control how much, and which (hot gas or subcooled liquid) refrigerant
+// goes to each indoor unit.  See [ph.doc::VRF#types-of-vrf-systems] chapter.
+VrfHeatRecoverySystem: VrfSystem {
+  heatRecovery
+}
+
+
+// --- weather.xeto ---
+//
+// Copyright (c) 2011-2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   15 Mar 2025  Auto-generate
+//   20 Nov 2025  Brian Frank    Re-orangize using PhEntity
+//
+
+// Logical weather station and its measurement points.
+// See [ph.doc::Weather#stations] chapter.
+WeatherStation: GeoPlace {
+  weatherStation
+  tz: TimeZone?
+}
+
+// Weather station observation point.
+// See [ph.doc::Weather#points] chapter.
+WeatherPoint: Point <abstract> {
+  weather
+  weatherStationRef: Ref?
+}
+
+

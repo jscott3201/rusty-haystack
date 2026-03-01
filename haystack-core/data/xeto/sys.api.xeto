@@ -1,0 +1,125 @@
+// --- api.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   14 Feb 2025  Brian Frank  Creation
+//
+
+// Network API endpoint
+Api: Func
+
+// Envelope to package API response of data, meta, and error
+ApiEnvelope: Dict {
+  status: ApiStatus   // Result status - ok or error
+  meta: Dict?         // Result meta data if status ok
+  data: Obj?          // Result data if status ok
+  warn: ApiWarn?      // Warning infomation if status is ok
+  error: ApiError?    // Error information if status is error
+}
+
+// API request status
+ApiStatus: Enum {
+  ok                  // Success - result in `data` field
+  error               // Failure - details in `error` field
+}
+
+// Additional information when API returns ok, but with a warning message
+ApiWarn: Dict {
+  message: Str        // Reason message to display to user
+  limit: Int?         // Integer if incomplete due to threshold limit
+  timeout: Duration?  // Duration if incomplete due to timeout
+}
+
+// Additional information when an API request returns error status
+ApiError: Dict {
+  message: Str        // Reason message to display to user
+  trace: Str?         // Stack trace for debugging if available
+}
+
+
+// --- misc.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   14 Feb 2025  Brian Frank  Creation
+//
+
+//////////////////////////////////////////////////////////////////////////
+// Ping
+//////////////////////////////////////////////////////////////////////////
+
+// Health check for a server
+/*
+ping: Api {
+  returns: PingRes  // Ping response
+}
+
+// Ping response
+PingRes: Dict {
+  time: DateTime    // Current timestamp of the server's clock
+}
+*/
+
+//////////////////////////////////////////////////////////////////////////
+// About
+//////////////////////////////////////////////////////////////////////////
+
+// Return summary information about the server
+/*
+about: Api {
+  returns: AboutRes     // About response
+}
+
+// About response
+AboutRes: Dict {
+  // API information
+  api: Dict {
+    version: Version    // System API version supported
+  }
+  // Server information
+  server: Dict {
+    name: Str           // Name of the server or project database
+    time: DateTime      // Current timestamp of the server's clock
+    tz: TimeZone        // Default timezone of the server
+    boot: DateTime?     // Timestamp the server was booted
+  }
+}
+*/
+
+
+// --- reads.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   14 Feb 2025  Brian Frank  Creation
+//
+
+/* TODO
+// Return an database record by its id
+readById: Api {
+  id: Ref                   // Database id to read
+  returns: Entity?          // Database record or null if not found
+}
+
+// Return a list of database records by their id
+readByIds: Api {
+  ids: List<of:Ref>          // List of database ids to read
+  returns: List<of:Entity?>  // Database records in order of ids
+}
+
+// Return a list of database records that match a filter query.
+// If limit is reached, include limit warning in envelope.
+readByFilter: Api {
+  filter: Filter            // Filter query to read
+  limit: Int?               // Max number of entities to read
+  returns: List<of:Entity>  // Database records matched
+}
+*/
+
+

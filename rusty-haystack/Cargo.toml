@@ -1,0 +1,13 @@
+[package]
+name = "rusty-haystack"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "rusty_haystack"
+crate-type = ["cdylib"]
+
+[dependencies]
+haystack-core = { path = "../haystack-core" }
+pyo3 = { version = "0.24", features = ["extension-module"] }
+chrono = "0.4"

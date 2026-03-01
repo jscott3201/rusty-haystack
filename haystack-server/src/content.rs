@@ -1,0 +1,206 @@
+//! Content negotiation — parse Accept header to pick codec, decode request body.
+
+use haystack_core::codecs::{codec_for, CodecError};
+use haystack_core::data::HGrid;
+
+/// Default MIME type when no Accept header is provided or no supported type is found.
+const DEFAULT_MIME: &str = "text/zinc";
+
+/// Supported MIME types in preference order.
+const SUPPORTED: &[&str] = &[
+    "text/zinc",
+    "application/json",
+    "text/trio",
+    "application/json;v=3",
+];
+
+/// Parse an Accept header and return the best supported MIME type.
+///
+/// Returns `"text/zinc"` when the header is empty, `*/*`, or contains
+/// no recognized MIME type.
+pub fn parse_accept(accept_header: &str) -> &'static str {
+    let accept = accept_header.trim();
+    if accept.is_empty() || accept == "*/*" {
+        return DEFAULT_MIME;
+    }
+
+    // Parse weighted entries: "text/zinc;q=0.9, application/json;q=1.0"
+    let mut candidates: Vec<(&str, f32)> = Vec::new();
+
+    for part in accept.split(',') {
+        let part = part.trim();
+        let mut segments = part.splitn(2, ';');
+        let mime = segments.next().unwrap_or("").trim();
+
+        // Check for q= parameter
+        let quality = segments
+            .next()
+            .and_then(|params| {
+                for param in params.split(';') {
+                    let param = param.trim();
+                    if let Some(q_val) = param.strip_prefix("q=") {
+                        return q_val.trim().parse::<f32>().ok();
+                    }
+                }
+                None
+            })
+            .unwrap_or(1.0);
+
+        // Handle application/json;v=3 specially: need to check the original part
+        if mime == "application/json" && part.contains("v=3") {
+            candidates.push(("application/json;v=3", quality));
+        } else if mime == "*/*" {
+            candidates.push((DEFAULT_MIME, quality));
+        } else {
+            candidates.push((mime, quality));
+        }
+    }
+
+    // Sort by quality descending, then pick the first supported
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (mime, _) in &candidates {
+        for supported in SUPPORTED {
+            if mime == supported {
+                return supported;
+            }
+        }
+    }
+
+    DEFAULT_MIME
+}
+
+/// Decode a request body into an HGrid using the given Content-Type.
+///
+/// Falls back to `"text/zinc"` if the content type is not recognized.
+pub fn decode_request_grid(body: &str, content_type: &str) -> Result<HGrid, CodecError> {
+    let mime = normalize_content_type(content_type);
+    let codec = codec_for(mime).unwrap_or_else(|| {
+        codec_for(DEFAULT_MIME).expect("default codec must exist")
+    });
+    codec.decode_grid(body)
+}
+
+/// Encode an HGrid for the response using the best Accept type.
+///
+/// Returns `(body, content_type)`.
+pub fn encode_response_grid(grid: &HGrid, accept: &str) -> Result<(String, &'static str), CodecError> {
+    let mime = parse_accept(accept);
+    let codec = codec_for(mime).unwrap_or_else(|| {
+        codec_for(DEFAULT_MIME).expect("default codec must exist")
+    });
+    let body = codec.encode_grid(grid)?;
+    // Return the static mime type string that matches what we used
+    for supported in SUPPORTED {
+        if *supported == mime {
+            return Ok((body, supported));
+        }
+    }
+    Ok((body, DEFAULT_MIME))
+}
+
+/// Normalize a Content-Type header to a bare MIME type for codec lookup.
+fn normalize_content_type(content_type: &str) -> &str {
+    let ct = content_type.trim();
+    if ct.is_empty() {
+        return DEFAULT_MIME;
+    }
+    // Handle "application/json; v=3" or "application/json;v=3"
+    if ct.starts_with("application/json") && ct.contains("v=3") {
+        return "application/json;v=3";
+    }
+    // Strip any parameters like charset
+    let base = ct.split(';').next().unwrap_or(ct).trim();
+    // Verify it is a supported type
+    for supported in SUPPORTED {
+        if base == *supported {
+            return supported;
+        }
+    }
+    DEFAULT_MIME
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_accept_empty() {
+        assert_eq!(parse_accept(""), "text/zinc");
+    }
+
+    #[test]
+    fn parse_accept_wildcard() {
+        assert_eq!(parse_accept("*/*"), "text/zinc");
+    }
+
+    #[test]
+    fn parse_accept_json() {
+        assert_eq!(parse_accept("application/json"), "application/json");
+    }
+
+    #[test]
+    fn parse_accept_zinc() {
+        assert_eq!(parse_accept("text/zinc"), "text/zinc");
+    }
+
+    #[test]
+    fn parse_accept_trio() {
+        assert_eq!(parse_accept("text/trio"), "text/trio");
+    }
+
+    #[test]
+    fn parse_accept_json_v3() {
+        assert_eq!(parse_accept("application/json;v=3"), "application/json;v=3");
+    }
+
+    #[test]
+    fn parse_accept_unsupported_falls_back() {
+        assert_eq!(parse_accept("text/html"), "text/zinc");
+    }
+
+    #[test]
+    fn parse_accept_multiple_with_quality() {
+        assert_eq!(
+            parse_accept("text/zinc;q=0.5, application/json;q=1.0"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn normalize_content_type_empty() {
+        assert_eq!(normalize_content_type(""), "text/zinc");
+    }
+
+    #[test]
+    fn normalize_content_type_json_v3() {
+        assert_eq!(
+            normalize_content_type("application/json; v=3"),
+            "application/json;v=3"
+        );
+    }
+
+    #[test]
+    fn normalize_content_type_with_charset() {
+        assert_eq!(
+            normalize_content_type("text/zinc; charset=utf-8"),
+            "text/zinc"
+        );
+    }
+
+    #[test]
+    fn decode_request_grid_empty_zinc() {
+        // Empty zinc grid: "ver:\"3.0\"\nempty\n"
+        let result = decode_request_grid("ver:\"3.0\"\nempty\n", "text/zinc");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn encode_response_grid_default() {
+        let grid = HGrid::new();
+        let result = encode_response_grid(&grid, "");
+        assert!(result.is_ok());
+        let (_, content_type) = result.unwrap();
+        assert_eq!(content_type, "text/zinc");
+    }
+}

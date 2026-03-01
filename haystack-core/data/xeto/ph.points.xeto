@@ -1,0 +1,1491 @@
+// --- air-flow.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with volumetric flow of air
+AirFlowPoint : NumberPoint <abstract> {
+  air
+  flow
+  unit: Unit <quantity:"volumetricFlow"> "cfm"
+}
+
+// Sensor for volumetric air flow
+AirFlowSensor : AirFlowPoint & SensorPoint <abstract>
+
+// Setpoint for volumetric air flow
+AirFlowSp : AirFlowPoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in discharge duct
+DischargeAirFlowSensor : AirFlowSensor { discharge }
+
+// Setpoint for volumetric air flow in discharge duct
+DischargeAirFlowSp : AirFlowSp { discharge }
+
+//////////////////////////////////////////////////////////////////////////
+// ColdDeck Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in cold deck discharge duct
+ColdDeckDischargeAirFlowSensor : DischargeAirFlowSensor { coldDeck }
+
+// Setpoint for volumetric air flow in cold deck discharge duct
+ColdDeckDischargeAirFlowSp : DischargeAirFlowSp { coldDeck }
+
+//////////////////////////////////////////////////////////////////////////
+// HotDeck Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in hot deck discharge duct
+HotDeckDischargeAirFlowSensor : DischargeAirFlowSensor { hotDeck }
+
+// Setpoint for volumetric air flow in hot deck discharge duct
+HotDeckDischargeAirFlowSp : DischargeAirFlowSp { hotDeck }
+
+//////////////////////////////////////////////////////////////////////////
+// Economizing
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in economizing duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+EconomizingAirFlowSensor : AirFlowSensor { economizing }
+
+// Setpoint for volumetric air flow in economizing duct.
+EconomizingAirFlowSp : AirFlowSp { economizing }
+
+//////////////////////////////////////////////////////////////////////////
+// Exhaust
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in exhaust duct
+ExhaustAirFlowSensor : AirFlowSensor { exhaust }
+
+// Setpoint for volumetric air flow in exhaust duct
+ExhaustAirFlowSp : AirFlowSp { exhaust }
+
+//////////////////////////////////////////////////////////////////////////
+// Inlet
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in inlet duct
+InletAirFlowSensor : AirFlowSensor { inlet }
+
+// Setpoint for volumetric air flow in inlet duct
+InletAirFlowSp : AirFlowSp { inlet }
+
+//////////////////////////////////////////////////////////////////////////
+// Outside
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in outside duct.
+// Used when there one duct for both minimum fresh air and economizing.
+OutsideAirFlowSensor : AirFlowSensor { outside }
+
+// Setpoint for volumetric air flow in outside duct.
+// Used when there one duct for both minimum fresh air and economizing.
+OutsideAirFlowSp : AirFlowSp { outside }
+
+//////////////////////////////////////////////////////////////////////////
+// Return
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in return duct
+ReturnAirFlowSensor : AirFlowSensor { return }
+
+// Setpoint for volumetric air flow in return duct
+ReturnAirFlowSp : AirFlowSp { return }
+
+//////////////////////////////////////////////////////////////////////////
+// Ventilation
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric air flow in ventilation or minimum fresh air duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+VentilationAirFlowSensor : AirFlowSensor { ventilation }
+
+// Setpoint for volumetric air flow in ventilation or minimum fresh air duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+VentilationAirFlowSp : AirFlowSp { ventilation }
+
+
+// --- air-humidity.xeto ---
+//
+// Copyright (c) 2023, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   5 Apr 2023  Brian Frank  Creation
+//
+
+// Point associated with relative humidity; measure of moisture in the air
+AirHumidityPoint : NumberPoint <abstract> {
+  air
+  humidity
+  unit: Unit <fixed> "%RH"
+}
+
+// Sensor for relative humidity
+AirHumiditySensor : AirHumidityPoint & SensorPoint <abstract>
+
+// Setpoint for relative humidity
+AirHumiditySp : AirHumidityPoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for relative humidity in discharge duct
+DischargeAirHumiditySensor : AirHumiditySensor { discharge }
+
+// Setpoint for relative humidity in discharge duct
+DischargeAirHumiditySp : AirHumiditySp { discharge }
+
+//////////////////////////////////////////////////////////////////////////
+// Outdoor
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for relative humidity in outside duct
+OutsideAirHumiditySensor : AirHumiditySensor { outside }
+
+// Setpoint for relative humidity in outside duct
+OutsideAirHumiditySp : AirHumiditySp { outside }
+
+//////////////////////////////////////////////////////////////////////////
+// Zone
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for relative humidity in the zone
+ZoneAirHumiditySensor : AirHumiditySensor { zone }
+
+// Setpoint for relative humidity in the zone
+ZoneAirHumiditySp : AirHumiditySp { zone }
+
+
+// --- air-pressure.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with static air pressure
+AirPressurePoint : NumberPoint <abstract> {
+  air
+  pressure
+  unit: Unit <quantity:"pressure"> "inH₂O"
+}
+
+// Sensor for static air pressure
+AirPressureSensor : AirPressurePoint & SensorPoint <abstract>
+
+// Setpoint for static air pressure
+AirPressureSp : AirPressurePoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for static air pressure in discharge duct
+DischargeAirPressureSensor : AirPressureSensor { discharge }
+
+// Setpoint for static air pressure in discharge duct
+DischargeAirPressureSp : AirPressureSp { discharge }
+
+//////////////////////////////////////////////////////////////////////////
+// Return
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for static air pressure in return duct
+ReturnAirPressureSensor : AirPressureSensor { return }
+
+// Setpoint for static air pressure in return duct
+ReturnAirPressureSp : AirPressureSp { return }
+
+
+// --- air-temp.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with drybulb air temperature
+AirTempPoint : NumberPoint <abstract> {
+  air
+  temp
+  unit: Unit <quantity:"temperature"> "°F"
+}
+
+// Sensor for drybulb air temperature
+AirTempSensor : AirTempPoint & SensorPoint <abstract>
+
+// Setpoint for drybulb air temperature
+AirTempSp : AirTempPoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for drybulb air temperature of discharge duct
+DischargeAirTempSensor : AirTempSensor { discharge }
+
+// Setpoint for drybulb air temperature of discharge duct
+DischargeAirTempSp : AirTempSp { discharge }
+
+//////////////////////////////////////////////////////////////////////////
+// Economizing
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for drybulb air temperature of economizing duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+EconomizingAirTempSensor : AirTempSensor { economizing  }
+
+//////////////////////////////////////////////////////////////////////////
+// Inlet
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for drybulb air temperature of inlet duct
+InletAirTempSensor : AirTempSensor { inlet }
+
+// Setpoint for drybulb air temperature of inlet duct
+InletAirTempSp : AirTempSp { inlet }
+
+//////////////////////////////////////////////////////////////////////////
+// Mixed
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for drybulb air temperature of mixed duct
+MixedAirTempSensor : AirTempSensor { mixed }
+
+// Setpoint for drybulb air temperature of mixed duct
+MixedAirTempSp : AirTempSp { mixed }
+
+//////////////////////////////////////////////////////////////////////////
+// Outside
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for drybulb air temperature of outside duct.
+// Used when there one duct for both minimum fresh air and economizing.
+OutsideAirTempSensor : AirTempSensor { outside  }
+
+//////////////////////////////////////////////////////////////////////////
+// Return
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for drybulb air temperature of return duct
+ReturnAirTempSensor : AirTempSensor { return }
+
+// Setpoint for drybulb air temperature of return duct
+ReturnAirTempSp : AirTempSp { return }
+
+//////////////////////////////////////////////////////////////////////////
+// Ventilation
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for drybulb air temperature of ventilation or minimum fresh  duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+VentilationAirTempSensor : AirTempSensor { ventilation  }
+
+//////////////////////////////////////////////////////////////////////////
+// Zone
+//////////////////////////////////////////////////////////////////////////
+
+// Drybulb air temperature sensor for zone
+ZoneAirTempSensor : AirTempSensor { zone }
+
+// Setpoint for drybulb air temperature zone
+ZoneAirTempSp : AirTempSp <abstract> { zone }
+
+// Effective setpoint for drybulb air temperature a zone
+ZoneAirTempEffectiveSp : ZoneAirTempSp { effective }
+
+// Cooling mode temperature setpoint for zone
+ZoneAirTempCoolingSp : ZoneAirTempSp { cooling }
+
+// Cooling mode temperature setpoint for zone when occupied
+ZoneAirTempOccCoolingSp : ZoneAirTempCoolingSp { occ }
+
+// Cooling mode temperature setpoint for zone when unoccupied
+ZoneAirTempUnoccCoolingSp : ZoneAirTempCoolingSp { unocc }
+
+// Cooling mode temperature setpoint for zone when in standby mode
+ZoneAirTempStandbyCoolingSp : ZoneAirTempCoolingSp { standby }
+
+// Heating mode temperature setpoint for zone
+ZoneAirTempHeatingSp : ZoneAirTempSp { heating }
+
+// Heating mode temperature setpoint for zone when occupied
+ZoneAirTempOccHeatingSp : ZoneAirTempHeatingSp { occ }
+
+// Heating mode temperature setpoint for zone when unoccupied
+ZoneAirTempUnoccHeatingSp : ZoneAirTempHeatingSp { unocc }
+
+// Heating mode temperature setpoint for zone when in standby mode
+ZoneAirTempStandbyHeatingSp : ZoneAirTempHeatingSp { standby }
+
+//////////////////////////////////////////////////////////////////////////
+// Other
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for air temperature inside an enclosure
+EnclosureAirTempSensor : AirTempSensor { enclosure }
+
+// --- base.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+//////////////////////////////////////////////////////////////////////////
+// Point Kinds
+//////////////////////////////////////////////////////////////////////////
+
+// Boolean or digital point with an true/false state
+BoolPoint : Point <abstract> {
+  kind: "Bool"
+}
+
+// Numeric or analog point with floating point value
+NumberPoint : Point <abstract> {
+  kind: "Number"
+  unit: Unit
+}
+
+// Enumerated or multi-state point with string value
+EnumPoint : Point <abstract> {
+  kind: "Str"
+  enum: Obj
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Point Functions
+//////////////////////////////////////////////////////////////////////////
+
+// Point is a command, actuator, AO/BO.
+CmdPoint: Point <abstract> { cmd }
+
+// Point is a sensor, input, AI/BI.
+SensorPoint: Point <abstract> { sensor }
+
+// Point is a setpoint, soft point, internal control variable, schedule.
+SpPoint: Point <abstract> { sp }
+
+
+// --- co2.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with the concentration of carbon dioxide (CO₂)
+Co2Point : NumberPoint <abstract> {
+  air
+  co2
+  concentration
+  unit: Unit <fixed> "ppm"
+}
+
+// Sensor for concentration of carbon dioxide (CO₂)
+Co2Sensor : Co2Point & SensorPoint <abstract>
+
+// Setpoint for concentration of carbon dioxide (CO₂)
+Co2Sp : Co2Point & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Zone
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for concentration of carbon dioxide (CO₂) in zone space.
+ZoneCo2Sensor : Co2Sensor { zone }
+
+// Setpoint for concentration of carbon dioxide (CO₂) in zone space.
+ZoneCo2Sp : Co2Sp { zone }
+
+
+// --- damper.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with damper position; 0% is fully closed, 100% is fully open
+DamperPoint : NumberPoint <abstract> {
+  air
+  damper
+  unit: Unit <fixed> "%"
+}
+
+// Damper position sensor; 0% is fully closed, 100% is fully open
+DamperSensor : DamperPoint & SensorPoint <abstract>
+
+// Damper position command; 0% is fully closed, 100% is fully open
+DamperCmd : DamperPoint & CmdPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in dischage duct
+DischargeDamperSensor : DamperSensor { discharge }
+
+// Damper position command in dischage duct
+DischargeDamperCmd : DamperCmd { discharge }
+
+//////////////////////////////////////////////////////////////////////////
+// ColdDeck Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in cold deck dischage duct
+ColdDeckDischargeDamperSensor : DischargeDamperSensor { coldDeck }
+
+// Damper position command in cold deck dischage duct
+ColdDeckDischargeDamperCmd : DischargeDamperCmd { coldDeck }
+
+//////////////////////////////////////////////////////////////////////////
+// HotDeck Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in hot deck dischage duct
+HotDeckDischargeDamperSensor : DischargeDamperSensor { hotDeck }
+
+// Damper position command in hot deck dischage duct
+HotDeckDischargeDamperCmd : DischargeDamperCmd { hotDeck }
+
+//////////////////////////////////////////////////////////////////////////
+// Economizing
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in economizing duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+EconomizingDamperSensor : DamperSensor { economizing }
+
+// Damper position command in economizing duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+EconomizingDamperCmd : DamperCmd { economizing }
+
+//////////////////////////////////////////////////////////////////////////
+// Exhaust
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in exhaust duct
+ExhaustDamperSensor : DamperSensor { exhaust }
+
+// Damper position command in exhaust duct
+ExhaustDamperCmd : DamperCmd { exhaust }
+
+//////////////////////////////////////////////////////////////////////////
+// Mixed
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in mixed air duct
+MixedDamperSensor : DamperSensor { mixed }
+
+// Damper position command in mixed duct
+MixedDamperCmd : DamperCmd { mixed }
+
+//////////////////////////////////////////////////////////////////////////
+// Outside
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in outside duct.
+// Used when there one duct for both minimum fresh air and economizing.
+OutsideDamperSensor : DamperSensor { outside }
+
+// Damper position command in outside duct.
+// Used when there one duct for both minimum fresh air and economizing.
+OutsideDamperCmd : DamperCmd { outside }
+
+//////////////////////////////////////////////////////////////////////////
+// Return
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in return duct
+ReturnDamperSensor : DamperSensor { return }
+
+// Damper position command in return duct
+ReturnDamperCmd : DamperCmd { return }
+
+//////////////////////////////////////////////////////////////////////////
+// Ventilation
+//////////////////////////////////////////////////////////////////////////
+
+// Damper position sensor in ventilation or minimum fresh air duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+VentilationDamperSensor : DamperSensor { ventilation }
+
+// Damper position command in ventilation or minimum fresh air duct.
+// Used when there are separate ducts for minimum fresh air vs economizing.
+VentilationDamperCmd : DamperCmd { ventilation }
+
+
+// --- elec.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   9 Apr 2025  Rick Jennings  Creation
+//
+
+ElecDirection: Choice
+ElecImportDirection: ElecDirection { import }
+ElecExportDirection: ElecDirection { export }
+ElecNetDirection: ElecDirection { net }
+ElecAbsoluteDirection: ElecDirection { absolute }
+
+ElecAcPowerSubtype: Choice
+ElecAcActivePower: ElecAcPowerSubtype { active }
+ElecAcReactivePower: ElecAcPowerSubtype { reactive }
+ElecAcApparentPower: ElecAcPowerSubtype { apparent }
+
+// Sensor for electricity
+ElecSensor : NumberPoint & SensorPoint <abstract> { elec }
+
+// Sensor for electric demand
+ElecDemandSensor : ElecSensor <abstract> {
+  demand
+  elecDirection: ElecDirection
+}
+
+// Sensor for electric energy
+ElecEnergySensor : ElecSensor <abstract> {
+  energy
+  elecDirection: ElecDirection
+}
+
+// Sensor for AC electric power factor
+ElecAcPfSensor : ElecSensor <abstract> {
+  pf
+  unit: Unit <fixed> "pf"
+  ac
+  pfScope: PfScope?
+  pfStandard: PfStandard?
+}
+
+// Sensor for AC electric energy
+ElecAcEnergySensor : ElecEnergySensor <abstract> {
+  ac
+  elecAcPowerSubtype: ElecAcPowerSubtype
+}
+
+// Sensor for AC electric active energy
+ElecAcActiveEnergySensor : ElecAcEnergySensor <abstract> {
+  active
+  unit: Unit <quantity:"energy"> "kWh"
+}
+
+// Sensor for AC electric reactive energy
+ElecAcReactiveEnergySensor : ElecAcEnergySensor <abstract> {
+  reactive
+  unit: Unit <quantity:"reactiveEnergy"> "kVARh"
+}
+
+// Sensor for AC electric apparent energy
+ElecAcApparentEnergySensor : ElecAcEnergySensor <abstract> {
+  apparent
+  unit: Unit <quantity:"apparentEnergy"> "kVAh"
+}
+
+// Sensor for AC electric demand
+ElecAcDemandSensor : ElecDemandSensor <abstract> { ac }
+
+// Sensor for AC electric power demand
+ElecAcPowerDemandSensor : ElecAcDemandSensor <abstract> {
+  power
+  elecAcPowerSubtype: ElecAcPowerSubtype
+}
+
+// Sensor for AC electric active power demand
+ElecAcActiveDemandSensor : ElecAcPowerDemandSensor <abstract> {
+  active
+  unit: Unit <quantity:"power"> "kW"
+}
+
+// Sensor for AC electric reactive power demand
+ElecAcReactiveDemandSensor : ElecAcPowerDemandSensor <abstract> {
+  reactive
+  unit: Unit <quantity:"reactivePower"> "kVAR"
+}
+
+// Sensor for AC electric apparent power demand
+ElecAcApparentDemandSensor : ElecAcPowerDemandSensor <abstract> {
+  apparent
+  unit: Unit <quantity:"apparentPower"> "kVA"
+}
+
+// Sensor for import of AC electric active energy
+ElecAcImportActiveEnergySensor : ElecAcActiveEnergySensor { import }
+
+// Sensor for export of AC electric active energy
+ElecAcExportActiveEnergySensor : ElecAcActiveEnergySensor { export }
+
+// Sensor for net of AC electric active energy
+ElecAcNetActiveEnergySensor : ElecAcActiveEnergySensor { net }
+
+// Sensor for import of AC electric reactive energy
+ElecAcImportReactiveEnergySensor : ElecAcReactiveEnergySensor { import }
+
+// Sensor for export of AC electric reactive energy
+ElecAcExportReactiveEnergySensor : ElecAcReactiveEnergySensor { export }
+
+// Sensor for net of AC electric reactive energy
+ElecAcNetReactiveEnergySensor : ElecAcReactiveEnergySensor { net }
+
+// Sensor for import of AC electric apparent energy
+ElecAcImportApparentEnergySensor : ElecAcApparentEnergySensor { import }
+
+// Sensor for export of AC electric apparent energy
+ElecAcExportApparentEnergySensor : ElecAcApparentEnergySensor { export }
+
+// Sensor for net of AC electric apparent energy
+ElecAcNetApparentEnergySensor : ElecAcApparentEnergySensor { net }
+
+// Sensor for import of AC electric active power demand
+ElecAcImportActiveDemandSensor : ElecAcActiveDemandSensor { import }
+
+// Sensor for export of AC electric active power demand
+ElecAcExportActiveDemandSensor : ElecAcActiveDemandSensor { export }
+
+// Sensor for net of AC electric active power demand
+ElecAcNetActiveDemandSensor : ElecAcActiveDemandSensor { net }
+
+// Sensor for import of AC electric reactive power demand
+ElecAcImportReactiveDemandSensor : ElecAcReactiveDemandSensor { import }
+
+// Sensor for export of AC electric reactive power demand
+ElecAcExportReactiveDemandSensor : ElecAcReactiveDemandSensor { export }
+
+// Sensor for net of AC electric reactive power demand
+ElecAcNetReactiveDemandSensor : ElecAcReactiveDemandSensor { net }
+
+// Sensor for import of AC electric apparent power demand
+ElecAcImportApparentDemandSensor : ElecAcApparentDemandSensor { import }
+
+// Sensor for export of AC electric apparent power demand
+ElecAcExportApparentDemandSensor : ElecAcApparentDemandSensor { export }
+
+// Sensor for net of AC electric apparent power demand
+ElecAcNetApparentDemandSensor : ElecAcApparentDemandSensor { net }
+
+// Sensor for total import of AC electric active energy
+ElecAcTotalImportActiveEnergySensor : ElecAcImportActiveEnergySensor { total }
+
+// Sensor for total export of AC electric active energy
+ElecAcTotalExportActiveEnergySensor : ElecAcExportActiveEnergySensor { total }
+
+// Sensor for total net of AC electric active energy
+ElecAcTotalNetActiveEnergySensor : ElecAcNetActiveEnergySensor { total }
+
+// Sensor for total import of AC electric reactive energy
+ElecAcTotalImportReactiveEnergySensor : ElecAcImportReactiveEnergySensor { total }
+
+// Sensor for total export of AC electric reactive energy
+ElecAcTotalExportReactiveEnergySensor : ElecAcExportReactiveEnergySensor { total }
+
+// Sensor for total net of AC electric reactive energy
+ElecAcTotalNetReactiveEnergySensor : ElecAcNetReactiveEnergySensor { total }
+
+// Sensor for total import of AC electric apparent energy
+ElecAcTotalImportApparentEnergySensor : ElecAcImportApparentEnergySensor { total }
+
+// Sensor for total export of AC electric apparent energy
+ElecAcTotalExportApparentEnergySensor : ElecAcExportApparentEnergySensor { total }
+
+// Sensor for total net of AC electric apparent energy
+ElecAcTotalNetApparentEnergySensor : ElecAcNetApparentEnergySensor { total }
+
+// Sensor for total AC electric power factor
+ElecAcTotalPfSensor : ElecAcPfSensor { total }
+
+// Sensor for total import of AC electric active power demand
+ElecAcTotalImportActiveDemandSensor : ElecAcImportActiveDemandSensor { total }
+
+// Sensor for total export of AC electric active power demand
+ElecAcTotalExportActiveDemandSensor : ElecAcExportActiveDemandSensor { total }
+
+// Sensor for total net of AC electric active power demand
+ElecAcTotalNetActiveDemandSensor : ElecAcNetActiveDemandSensor { total }
+
+// Sensor for total import of AC electric reactive power demand
+ElecAcTotalImportReactiveDemandSensor : ElecAcImportReactiveDemandSensor { total }
+
+// Sensor for total export of AC electric reactive power demand
+ElecAcTotalExportReactiveDemandSensor : ElecAcExportReactiveDemandSensor { total }
+
+// Sensor for total net of AC electric reactive power demand
+ElecAcTotalNetReactiveDemandSensor : ElecAcNetReactiveDemandSensor { total }
+
+// Sensor for total import of AC electric apparent power demand
+ElecAcTotalImportApparentDemandSensor : ElecAcImportApparentDemandSensor { total }
+
+// Sensor for total export of AC electric apparent power demand
+ElecAcTotalExportApparentDemandSensor : ElecAcExportApparentDemandSensor { total }
+
+// Sensor for total net of AC electric apparent power demand
+ElecAcTotalNetApparentDemandSensor : ElecAcNetApparentDemandSensor { total }
+
+
+// --- fan.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with a fan
+FanPoint : Point <abstract> {
+  air
+  fan
+}
+
+// Sensor for on/off state of a fan
+FanRunSensor : FanPoint & RunSensor <abstract>
+
+// On/off command to run a fan
+FanRunCmd : FanPoint & RunCmd <abstract>
+
+// Command to permit/prohibit a fan to run.
+// Used as an interlock with a run command.
+FanEnableCmd : FanPoint & EnableCmd <abstract>
+
+// Sensor for speed of a fan as percentage 0% off and 100% full speed
+FanSpeedSensor : FanPoint & VfdSpeedSensor <abstract>
+
+// Command for speed of a fan as percentage 0% off and 100% full speed
+FanSpeedCmd : FanPoint & VfdSpeedCmd <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Discharge
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for on/off state of a fan in a discharge duct
+DischargeFanRunSensor : FanRunSensor { discharge }
+
+// On/off command to run a fan in a discharge duct
+DischargeFanRunCmd : FanRunCmd { discharge }
+
+// Command to permit/prohibit a fan in a discharge duct to run.
+// Used as an interlock with a run command.
+DischargeFanEnableCmd : FanEnableCmd { discharge }
+
+// Sensor for fan speed as percentage in discharge duct.
+// Percentage is 0% for off and 100% for full speed.
+DischargeFanSpeedSensor : FanSpeedSensor { discharge }
+
+// Command for fan speed as percentage in discharge duct.
+// Percentage is 0% for off and 100% for full speed.
+DischargeFanSpeedCmd : FanSpeedCmd { discharge }
+
+//////////////////////////////////////////////////////////////////////////
+// Return
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for on/off state of a fan in a return duct
+ReturnFanRunSensor : FanRunSensor { return }
+
+// On/off command to run a fan in a return duct
+ReturnFanRunCmd : FanRunCmd { return }
+
+// Command to permit/prohibit a fan in a return duct to run.
+// Used as an interlock with a run command.
+ReturnFanEnableCmd : FanEnableCmd { return }
+
+// Sensor for fan speed as percentage in return duct.
+// Percentage is 0% for off and 100% for full speed.
+ReturnFanSpeedSensor : FanSpeedSensor { return }
+
+// Command for fan speed as percentage in return duct.
+// Percentage is 0% for off and 100% for full speed.
+ReturnFanSpeedCmd : FanSpeedCmd { return }
+
+
+// --- misc.xeto ---
+//
+// Copyright (c) 2023, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   5 Apr 2023  Brian Frank  Creation
+//
+
+// Dessicant dehumidifier enable command
+DessicantDehumidifierCmd : BoolPoint { dessicantDehumidifier }
+
+// Temperature conditioning mode for a zone in an HVAC system
+ZoneAirHvacModeSp : EnumPoint & SpPoint { zone, air, hvacMode }
+
+// Point associated with the on/off state of equipment
+RunPoint : BoolPoint <abstract> {
+  run
+  enum: Obj <val:RunEnum>
+}
+
+// On and off enumeration
+RunEnum: Enum { off, on }
+
+// Sensor for on/off state of equipment
+RunSensor : RunPoint & SensorPoint
+
+// Sensor for on/off state of cooling equipment
+CoolRunSensor : RunSensor {
+  cool
+  stage: Int? <minVal: 1>
+}
+
+// Sensor for on/off state of heating equipment
+HeatRunSensor : RunSensor {
+  heat
+  stage: Int? <minVal: 1>
+}
+
+// On/off command to run equipment
+RunCmd : RunPoint & CmdPoint
+
+// On/off command to run cooling equipment
+CoolRunCmd : RunCmd {
+  cool
+  stage: Int? <minVal: 1>
+}
+
+// On/off command to run heating equipment
+HeatRunCmd : RunCmd {
+  heat
+  stage: Int? <minVal: 1>
+}
+
+// Point that enables or disables equipment
+EnablePoint : BoolPoint <abstract> {
+  enable
+  enum: Obj <val:RunEnum>
+}
+
+// Command to permit/prohibit equipment to run.
+// Used as an interlock with a run command.
+EnableCmd : EnablePoint & CmdPoint <abstract>
+
+// Command to permit/prohibit cooling equipment to run.
+// Used as an interlock with a run command.
+CoolEnableCmd : EnableCmd <abstract> { cool }
+
+// Command to permit/prohibit heating equipment to run.
+// Used as an interlock with a run command.
+HeatEnableCmd : EnableCmd <abstract> { heat }
+
+// Boolean alarm condition
+AlarmSensor : BoolPoint & SensorPoint <abstract> { alarm }
+
+// Point for modulating control of equipment such as
+// valves, dampers, and motors as a percentage from 0% to 100%.
+ModulatingPoint : NumberPoint <abstract> {
+  modulating
+  unit: Unit <fixed> "%"
+}
+
+// Point for modulating cooling capacity as a percentage from 0% to 100%.
+CoolModulatingPoint : ModulatingPoint <abstract> {
+  cool
+  stage: Int? <minVal: 1>
+}
+
+// Sensor for modulating cooling capacity as a percentage from 0% to 100%.
+CoolModulatingSensor : CoolModulatingPoint & SensorPoint
+
+// Command for modulating cooling capacity as a percentage from 0% to 100%.
+CoolModulatingCmd : CoolModulatingPoint & CmdPoint
+
+// Point for modulating heating capacity as a percentage from 0% to 100%.
+HeatModulatingPoint : ModulatingPoint <abstract> {
+  heat
+  stage: Int? <minVal: 1>
+}
+
+// Sensor for modulating heating capacity as a percentage from 0% to 100%.
+HeatModulatingSensor : HeatModulatingPoint & SensorPoint
+
+// Command for modulating heating capacity as a percentage from 0% to 100%.
+HeatModulatingCmd : HeatModulatingPoint & CmdPoint
+
+// --- motor.xeto ---
+//
+// Copyright (c) 2026, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   11 Feb 2026  Rick Jennings  Creation
+//
+
+// Point for modulating motor speed.  Speed is measured as a
+// percentage where 0% is off and 100% is full speed.
+MotorSpeedModulatingPoint : ModulatingPoint <abstract> {
+  motor
+  speed
+}
+
+// Sensor for modulating motor speed.  Speed is measured as a
+// percentage where 0% is off and 100% is full speed.
+MotorSpeedModulatingSensor : MotorSpeedModulatingPoint & SensorPoint
+
+// Command for modulating motor speed.  Speed is measured as a
+// percentage where 0% is off and 100% is full speed.
+MotorSpeedModulatingCmd : MotorSpeedModulatingPoint & CmdPoint
+
+// --- naturalGas.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   21 Mar 2024  Brian Frank  Creation
+//
+
+//////////////////////////////////////////////////////////////////////////
+// Flow
+//////////////////////////////////////////////////////////////////////////
+
+// Point associated with rate of volumetric flow of natural gas
+NaturalGasFlowPoint : NumberPoint <abstract> {
+  naturalGas
+  flow
+  unit: Unit <quantity:"volumetricFlow"> "cfm"
+}
+
+// Sensor for volumetric flow of natural gas
+NaturalGasFlowSensor : NaturalGasFlowPoint & SensorPoint
+
+// Setpoint for volumetric flow of natural gas
+NaturalGasFlowSp : NaturalGasFlowPoint & SpPoint
+
+//////////////////////////////////////////////////////////////////////////
+// Volume
+//////////////////////////////////////////////////////////////////////////
+
+// Point associated with volumetric consumption of natural gas
+NaturalGasVolumePoint : NumberPoint <abstract> {
+  naturalGas
+  volume
+  unit: Unit <quantity:"volume"> "Ccf"
+}
+
+// Sensor for volumetric consumption of natural gas
+NaturalGasVolumeSensor : NaturalGasVolumePoint & SensorPoint
+
+// Setpoint for volumetric consumption of natural gas
+NaturalGasVolumeSp : NaturalGasVolumePoint & SpPoint
+
+//////////////////////////////////////////////////////////////////////////
+// Volume
+//////////////////////////////////////////////////////////////////////////
+
+// Point associated with energy consumption of natural gas
+NaturalGasEnergyPoint : NumberPoint <abstract> {
+  naturalGas
+  energy
+  unit: Unit <quantity:"energy"> "Ccf_natural_gas"
+}
+
+// Sensor for energy consumption of natural gas
+NaturalGasEnergySensor : NaturalGasEnergyPoint & SensorPoint
+
+// Setpoint for energy consumption of natural gas
+NaturalGasEnergySp : NaturalGasEnergyPoint & SpPoint
+
+
+// --- occupied.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with the occupied state.  This is a boolean
+// state where false means unoccupied and true means occupied.
+OccupiedPoint : BoolPoint <abstract> {
+  occupied
+  enum: Obj <val:OccupiedEnum>
+}
+
+// Unoccupied/occupied enumeration
+OccupiedEnum : Enum { unoccupied, occupied }
+
+// Occupancy sensor
+OccupiedSensor : OccupiedPoint & SensorPoint <abstract>
+
+// Occupancy setpoint
+OccupiedSp : OccupiedPoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Zone
+//////////////////////////////////////////////////////////////////////////
+
+// Occupancy sensor for zone space
+ZoneOccupiedSensor : OccupiedSensor { zone }
+
+// Occupancy setpoint for zone space
+ZoneOccupiedSp : OccupiedSp { zone }
+
+
+// --- surface-temp.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   10 Dec 2025  Rick Jennings  Creation
+//
+
+// Point associated with surface temperature
+SurfaceTempPoint : NumberPoint <abstract> {
+  surface
+  temp
+  unit: Unit <quantity:"temperature"> "°F"
+}
+
+// Sensor that measures surface temperature
+SurfaceTempSensor : SurfaceTempPoint & SensorPoint <abstract>
+
+// Sensor that measures temperature of a heatsink
+HeatsinkSurfaceTempSensor : SurfaceTempSensor { heatsink }
+
+// Sensor that measures temperature of an electric cable
+CableSurfaceTempSensor : SurfaceTempSensor { cable }
+
+// Sensor that measures temperature of an electric coupler
+CouplerSurfaceTempSensor : SurfaceTempSensor { coupler }
+
+//////////////////////////////////////////////////////////////////////////
+// EVSE
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor that measures temperature of an EVSE cable
+EvseCableSurfaceTempSensor : CableSurfaceTempSensor { evse }
+
+// Sensor that measures temperature of an EVSE coupler
+EvseCouplerSurfaceTempSensor : CouplerSurfaceTempSensor { evse }
+
+// --- valve.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with a valve; 0% is fully closed and 100% is fully open.
+ValvePoint : NumberPoint <abstract> {
+  valve
+  unit: Unit <fixed> "%"
+}
+
+// Valve position sensor; 0% is fully closed and 100% is fully open.
+ValveSensor : ValvePoint & SensorPoint <abstract>
+
+// Valve position command; 0% is fully closed and 100% is fully open.
+ValveCmd : ValvePoint & CmdPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Chilled Water
+//////////////////////////////////////////////////////////////////////////
+
+// Valve sensor for chilled water
+ChilledWaterValveSensor : ValveSensor { chilled, water }
+
+// Valve commad for hot water
+ChilledWaterValveCmd : ValveCmd { chilled, water }
+
+//////////////////////////////////////////////////////////////////////////
+// Hot Water
+//////////////////////////////////////////////////////////////////////////
+
+// Valve sensor for hot water
+HotWaterValveSensor : ValveSensor { hot, water }
+
+// Valve commad for hot water
+HotWaterValveCmd : ValveCmd { hot, water }
+
+
+// --- vfd.xeto ---
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2022  Brian Frank  Creation
+//
+
+// Point associated with VFD frequency measured in Hertz
+VfdFreqPoint : NumberPoint <abstract> {
+  vfd
+  freq
+  unit: "Hz"
+}
+
+// Sensor for VFD frequency in Hertz
+VfdFreqSensor : VfdFreqPoint & SensorPoint <abstract>
+
+// Command for VFD frequency in Hertz
+VfdFreqCmd : VfdFreqPoint & CmdPoint <abstract>
+
+// Point associated with VFD speed.  Speed is measured as
+// percentage where 0% is off and 100% if full speed
+VfdSpeedPoint : NumberPoint <abstract> {
+  vfd
+  speed
+  unit: "%"
+}
+
+// VFD speed sensor as percentage where 0% is off, 100% if full speed
+VfdSpeedSensor : VfdSpeedPoint & SensorPoint <abstract>
+
+// VFD speed command as percentage where 0% is off, 100% if full speed
+VfdSpeedCmd : VfdSpeedPoint & CmdPoint <abstract>
+
+
+// --- water-flow.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   21 Mar 2024  Brian Frank  Creation
+//
+
+// Point associated with rate of volumetric flow of water
+WaterFlowPoint : NumberPoint <abstract> {
+  water
+  flow
+  unit: Unit <quantity:"volumetricFlow"> "gal/min"
+}
+
+// Sensor for volumetric flow of water
+WaterFlowSensor : WaterFlowPoint & SensorPoint <abstract>
+
+// Setpoint for volumetric flow of water
+WaterFlowSp : WaterFlowPoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Domestic
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric flow of domestic water
+DomesticWaterFlowSensor : WaterFlowSensor { domestic }
+
+// Setpoint for volumetric flow of domestic water
+DomesticWaterFlowSp : WaterFlowSp { domestic }
+
+//////////////////////////////////////////////////////////////////////////
+// Chilled Water
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric flow of chilled water
+ChilledWaterFlowSensor : WaterFlowSensor { chilled }
+
+// Setpoint for volumetric flow of chilled water
+ChilledWaterFlowSp : WaterFlowSp { chilled }
+
+//////////////////////////////////////////////////////////////////////////
+// Hot Water
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric flow of hot water
+HotWaterFlowSensor : WaterFlowSensor { hot }
+
+// Setpoint for volumetric flow of hot water
+HotWaterFlowSp : WaterFlowSp { hot }
+
+// --- water-pressure.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   5 Jan 2025 Creation - Water pressure points from community documentation
+//
+
+// Point associated with water pressure
+WaterPressurePoint : NumberPoint <abstract> {
+  water
+  pressure
+  unit: Unit <quantity:"pressure"> "psi"
+}
+
+// Sensor for water pressure
+WaterPressureSensor : WaterPressurePoint & SensorPoint <abstract>
+
+// Setpoint for water pressure
+WaterPressureSp : WaterPressurePoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Chilled Water Pressure
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for chilled water leaving pressure
+ChilledWaterLeavingPressureSensor : WaterPressureSensor { chilled, leaving }
+
+// Sensor for chilled water entering pressure
+ChilledWaterEnteringPressureSensor : WaterPressureSensor { chilled, entering }
+
+// Setpoint for chilled water leaving pressure
+ChilledWaterLeavingPressureSp : WaterPressureSp { chilled, leaving }
+
+// Setpoint for chilled water entering pressure
+ChilledWaterEnteringPressureSp : WaterPressureSp { chilled, entering }
+
+//////////////////////////////////////////////////////////////////////////
+// Hot Water Pressure
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for hot water leaving pressure
+HotWaterLeavingPressureSensor : WaterPressureSensor { hot, leaving }
+
+// Sensor for hot water entering pressure
+HotWaterEnteringPressureSensor : WaterPressureSensor { hot, entering }
+
+// Setpoint for hot water leaving pressure
+HotWaterLeavingPressureSp : WaterPressureSp { hot, leaving }
+
+// Setpoint for hot water entering pressure
+HotWaterEnteringPressureSp : WaterPressureSp { hot, entering }
+
+// --- water-temp.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   3 Nov 2025  Adam Garnhart  Creation
+//
+
+///////////////////////////////////////////////////////////////////////////
+// Abstracts
+///////////////////////////////////////////////////////////////////////////
+
+// Point associated with water temperature
+WaterTempPoint : NumberPoint <abstract> {
+  water
+  temp
+  unit: Unit <quantity:"temperature"> "°F"
+}
+
+// Sensor for water temperature
+WaterTempSensor : WaterTempPoint & SensorPoint <abstract>
+
+// Setpoint for water temperature
+WaterTempSp : WaterTempPoint & SpPoint <abstract>
+
+
+//////////////////////////////////////////////////////////////////////////
+// Hot Water Temps
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for Hot Water Temperature Entering a component of a system
+HotWaterEnteringTempSensor : WaterTempSensor { hot, entering }
+
+// Sensor for Hot Water Temperature Leaving a component of a system
+HotWaterLeavingTempSensor : WaterTempSensor { hot, leaving }
+
+// Setpoint for Hot Water Temperature Leaving a component of a system
+HotWaterLeavingTempSp : WaterTempSp { hot, leaving }
+
+
+//////////////////////////////////////////////////////////////////////////
+// Chilled Water Temps
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for Chilled Water Temperature Entering a component of a system
+ChilledWaterEnteringTempSensor : WaterTempSensor { chilled, entering }
+
+// Sensor for Chilled Water Temperature Leaving a component of a system
+ChilledWaterLeavingTempSensor : WaterTempSensor { chilled, leaving }
+
+// Setpoint for Chilled Water Temperature Leaving a component of a system
+ChilledWaterLeavingTempSp : WaterTempSp { chilled, leaving }
+
+
+//////////////////////////////////////////////////////////////////////////
+// Condenser Water Temps
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for Condenser Water Temperature Entering a component of a system
+CondenserWaterEnteringTempSensor : WaterTempSensor { condenser, entering }
+
+// Sensor for Condenser Water Temperature Leaving a component of a system
+CondenserWaterLeavingTempSensor : WaterTempSensor { condenser, leaving }
+
+// Setpoint for Condenser Water Temperature Leaving a component of a system
+CondenserWaterLeavingTempSp : WaterTempSp { condenser, leaving }
+
+
+// --- water-volume.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   21 Mar 2024  Brian Frank  Creation
+//
+
+// Point associated with volumetric consumption of water
+WaterVolumePoint : NumberPoint <abstract> {
+  water
+  volume
+  unit: Unit <quantity:"volume"> "gal"
+}
+
+// Sensor for volumetric consumption of water
+WaterVolumeSensor : WaterVolumePoint & SensorPoint <abstract>
+
+// Setpoint for volumetric consumption of water
+WaterVolumeSp : WaterVolumePoint & SpPoint <abstract>
+
+//////////////////////////////////////////////////////////////////////////
+// Domestic
+//////////////////////////////////////////////////////////////////////////
+
+// Sensor for volumetric consumption of domestic water
+DomesticWaterVolumeSensor : WaterVolumeSensor { domestic }
+
+// Setpoint for volumetric consumption of domestic water
+DomesticWaterVolumeSp : WaterVolumeSp { domestic }
+
+
+// --- weather.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   16 Jan 2024  Brian Frank  Creation
+//
+
+// Weather observation point
+WeatherPoint : Point & SensorPoint <abstract> {
+  weather
+  weatherStationRef: Ref
+}
+
+// Weather enumeration for condition such as clear, cloudy, rain, etc
+WeatherCondPoint : WeatherPoint & EnumPoint {
+  weatherCond
+  enum: Obj <val:WeatherCondEnum>
+}
+
+// Weather boolean point that is true between sunrise and sunset
+WeatherDaytimePoint : WeatherPoint & BoolPoint {
+  daytime
+  enum: Obj <val:WeatherDaytimeEnum>
+}
+
+// Numeric weather observation point
+WeatherNumberPoint : WeatherPoint & NumberPoint <abstract> {
+}
+
+// Dry bulb weather temperature
+WeatherTempPoint : WeatherNumberPoint {
+  temp
+  unit: Unit <quantity:"temperature"> "°F"
+}
+
+// Wet bulb weather temperature
+WeatherWetbulbPoint : WeatherNumberPoint {
+  webBulb
+  unit: Unit <quantity:"temperature"> "°F"
+}
+
+// Apparent weather temperature considering humidity, wind
+// chill, and heat index
+WeatherFeelsLikePoint : WeatherNumberPoint {
+  feelsLike
+  unit: Unit <quantity:"temperature"> "°F"
+}
+
+// Weather dew point temperature at which water vapor will form dew
+WeatherDewPointPoint : WeatherNumberPoint {
+  dewPoint
+  unit: Unit <quantity:"temperature"> "°F"
+}
+
+// Weather percent relative humidity
+WeatherHumidityPoint : WeatherNumberPoint {
+  humidity
+  unit: Unit <fixed> "%RH"
+}
+
+// Weather enthalpy is sum of heat energy in the dry air and water vapor
+WeatherEnthalpyPoint : WeatherNumberPoint {
+  enthalpy
+  unit: Unit <quantity:"enthalpy"> "BTU/lb"
+}
+
+// Weather barometric pressure in millibar or inHg
+WeatherAtmosphericPressurePoint : WeatherNumberPoint {
+  atmospheric
+  pressure
+  unit: Unit <quantity:"pressure"> "inHg"
+}
+
+// Weather cloudiness as percentage
+WeatherCloudagePoint : WeatherNumberPoint {
+  cloudage
+  unit: Unit <fixed> "%"
+}
+
+// Weather fallen atmospheric water vapor in mm or in
+WeatherPrecipitationPoint : WeatherNumberPoint {
+  precipitation
+  unit: Unit <quantity:"length"> "in"
+}
+
+// Weather energy received from the sun in W/m²
+WeatherSolarIrradiancePoint : WeatherNumberPoint {
+  solar
+  irradiance
+  unit: Unit <quantity:"energy"> "W/m²"
+}
+
+// Weather wind speed in km/h or mph
+WeatherWindSpeedPoint : WeatherNumberPoint {
+  wind
+  speed
+  unit: Unit <quantity:"velocity"> "mph"
+}
+
+// Weather direction that wind originates in degrees
+WeatherWindDirectionPoint : WeatherNumberPoint {
+  wind
+  direction
+  unit: Unit <fixed> "deg"
+}
+
+// Weather visibility at which light can be discerned in km or mile
+WeatherVisibilityPoint : WeatherNumberPoint {
+  visibility
+  unit: Unit <quantity:"length"> "mile"
+}
+
+

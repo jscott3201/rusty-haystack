@@ -1,0 +1,54 @@
+// --- meta.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   30 Aug 2025  Brian Frank  Creation
+//
+
++Spec {
+  // Component tree as Xeto source string
+  compTree: Str?
+
+  // Binds a slot to a component id within the compTree
+  compId: Ref?
+}
+
+
+// --- types.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   24 Apr 2024  Brian Frank  Creation
+//
+
+// Component or function block
+Comp: Dict {
+  parentRef: Ref?<of:Comp>  // Component tree parent
+  compName: Str?            // Component name in parent
+  compLayout: CompLayout?   // Layout in a visual coordinate system
+  links: Links?             // List of links to this component
+}
+
+// Component layout stored as "x, y, w" in a logical coordinate system.
+CompLayout: Scalar
+
+// Component link is a dataflow between two slots
+Link: Dict {
+  fromRef: Ref              // Reference to source component
+  fromSlot: Str             // Slot name of source component
+}
+
+// Incoming links on a component as dict keyed by toSlot name.
+// The values for each slot name may be a Link or a list of Link.
+Links: Dict <of:Link | List<of:Link>>
+
+// Variable component to inject input and output variables
+Var: Comp {
+  val: Obj?   // Current value of the variable
+}
+
+

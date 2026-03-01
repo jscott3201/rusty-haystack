@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+*.pyo
+*.pyc
+__pycache__/
+.venv/
+*.egg-info/
+dist/
+haystack-core/src/ontology/generated.rs
+
+# Claude
+.claude/
+CLAUDE.md
+.DS_Store

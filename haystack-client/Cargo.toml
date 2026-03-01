@@ -1,0 +1,18 @@
+[package]
+name = "haystack-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+haystack-core = { path = "../haystack-core" }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2"
+base64 = "0.22"
+futures-util = "0.3"
+thiserror = "2"
+log = "0.4"

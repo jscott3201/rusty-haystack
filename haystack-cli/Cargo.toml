@@ -1,0 +1,17 @@
+[package]
+name = "haystack-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "haystack"
+path = "src/main.rs"
+
+[dependencies]
+haystack-core = { path = "../haystack-core" }
+haystack-server = { path = "../haystack-server" }
+haystack-client = { path = "../haystack-client" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }

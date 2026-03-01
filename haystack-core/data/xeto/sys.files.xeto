@@ -1,0 +1,162 @@
+// --- app.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   4 Apr 2025  Brian Frank  Creation
+//
+
+// Application specific file format
+AppFile : File <abstract>
+
+// Microsoft Word file in docx format
+MicorosftWordFile : AppFile <mimeType:"application/vnd.openxmlformats-officedocument.wordprocessingml.document", fileExt:"docx">
+
+// Microsoft Excel file in xlsx format
+MicorosftExcelFile : AppFile <mimeType:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileExt:"xlsx">
+
+// Microsoft PowerPoint file in pptx format
+MicorosftPowerPointFile : AppFile <mimeType:"application/vnd.openxmlformats-officedocument.presentationml.presentation", fileExt:"pptx">
+
+// Portable Document Format file
+PdfFile : AppFile <mimeType:"application/pdf", fileExt:"pdf">
+
+// TAR archive file
+TarFile : AppFile <mimeType:"application/x-tar", fileExt:"tar">
+
+// Xeto library zip file
+XetoLibFile : AppFile <mimeType:"application/xetolib", fileExt:"xetolib">
+
+// Zip archive file
+ZipFile : AppFile <mimeType:"application/zip", fileExt:"zip">
+
+
+// --- media.xeto ---
+//
+// Copyright (c) 2023, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   12 May 2023  Brian Frank  Creation
+//
+
+//////////////////////////////////////////////////////////////////////////
+// Images
+//////////////////////////////////////////////////////////////////////////
+
+// Image file
+ImageFile : File <abstract>
+
+// Image file in GIF format
+GifImage : ImageFile <mimeType:"image/gif", fileExt:"gif">
+
+// Image file in JPEG format
+JpegImage : ImageFile <mimeType:"image/jpeg", fileExt:"jpeg">
+
+// Image file in PNG format
+PngFile : ImageFile <mimeType:"image/png", fileExt:"png">
+
+// Scalable vector graphics image file
+SvgFile : ImageFile <mimeType:"image/svg+xml", fileExt:"svg">
+
+// Image file in TIFF format
+TiffFile : ImageFile <mimeType:"image/tiff", fileExt:"tiff">
+
+//////////////////////////////////////////////////////////////////////////
+// Audio
+//////////////////////////////////////////////////////////////////////////
+
+// Audio media file
+AudioFile : File <abstract>
+
+// AAC audio file
+AacFile : AudioFile <mimeType:"audio/aac", fileExt:"aac">
+
+// MP3 audio file
+Mp3File : AudioFile <mimeType:"audio/mpeg", fileExt:"mp3">
+
+// Waveform audio file
+WavFile : AudioFile <mimeType:"audio/wav", fileExt:"wav">
+
+//////////////////////////////////////////////////////////////////////////
+// Video
+//////////////////////////////////////////////////////////////////////////
+
+// Video media file
+VideoFile : File <abstract>
+
+// MP4 video file
+Mp4File : VideoFile <mimeType:"video/mp4", fileExt:"mp4">
+
+// MP3 video file
+MpegFile : VideoFile <mimeType:"video/mpeg", fileExt:"mpeg">
+
+// Ogg video file
+OggFile : VideoFile <mimeType:"video/ogg", fileExt:"ogg">
+
+
+// --- meta.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   4 Apr 2025  Brian Frank  Creation
+//
+
++Spec {
+  // MIME type for a file spec
+  mimeType: Str?
+
+  // Default file name extension to use for a file spec
+  fileExt: Str?
+}
+
+
+// --- text.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   4 Apr 2025  Brian Frank  Creation
+//
+
+// Text file
+TextFile : File <abstract>
+
+// Comma separated values text field
+CsvFile : TextFile <mimeType:"text/csv", fileExt:"csv">
+
+// HTML text file
+HtmlFile : TextFile <mimeType:"text/html; charset=utf-8", fileExt:"html">
+
+// JSON text file
+JsonFile : TextFile <mimeType:"application/json", fileExt:"json">
+
+// JSON-LD text file
+JsonLdFile : TextFile <mimeType:"application/ld+json", fileExt:"jsonld">
+
+// Markdown text file
+MarkdownFile : TextFile <mimeType:"text/markdown; charset=utf-8", fileExt:"md">
+
+// Plain text file
+PlainTextFile : TextFile <mimeType:"text/plain; charset=utf-8", fileExt:"txt">
+
+// Project Haystack Trio text file - see [ph.doc::Trio]
+TrioFile : TextFile <mimeType:"text/trio; charset=utf-8", fileExt:"trio">
+
+// RDF turtle file
+TurtleFile : TextFile <mimeType:"text/turtle; charset=utf-8", fileExt:"ttl">
+
+// Project Haystack Zinc text file - see [ph.doc::Zinc]
+ZincFile : TextFile <mimeType:"text/zinc; charset=utf-8", fileExt:"zinc">
+
+// Extensible markup language text file
+XmlFile : TextFile <mimeType:"text/xml", fileExt:"xml">
+
+// YAML Ain't Markup Language text file
+YamlFile : TextFile <mimeType:"text/yaml", fileExt:"yaml">
+
+

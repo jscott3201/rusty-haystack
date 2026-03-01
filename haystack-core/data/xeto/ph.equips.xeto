@@ -1,0 +1,88 @@
+// --- ducts.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   26 Feb 2025  Brian Frank  Creation
+//
+
+// Duct to access fresh outside air only for economizing, not ventilation
+EconomizerDuct: Duct { economizer }
+
+// Duct for exhausting combustion
+FlueDuct: Duct { flue }
+
+// Duct with air entering an equipment
+InletDuct: Duct { inlet }
+
+// Duct to access fresh outside air only for ventilation, not economizing
+VentilationDuct: Duct { ventilation }
+
+// Duct to access fresh outside air for both ventilation and economizer.
+OutsideDuct: Duct { outside }
+
+// Duct for air leaving an equipment
+DischargeDuct: Duct { discharge }
+
+// Duct used to expel air back outside
+ExhaustDuct: Duct { exhaust }
+
+// Duct returning air back to equipment
+ReturnDuct: Duct { return }
+
+// Duct where fresh outside air and return air is mixed together
+MixedDuct: DuctSection { mixed }
+
+// Discharge duct for cooling
+ColdDeckDischargeDuct: DischargeDuct { coldDeck }
+
+// Discharge duct for heating
+HotDeckDischargeDuct: DischargeDuct { hotDeck }
+
+// Discharge duct which by-passes both heating and cooling coils
+NeutralDeckDischargeDuct: DischargeDuct { neutralDeck }
+
+
+// --- hvac.xeto ---
+//
+// Copyright (c) 2023, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   22 Mar 2023  Brian Frank  Creation
+//
+
+// Air handler which feeds VAVs
+VavZoneAhu : Ahu {
+  vavZone
+  vavs: Query <of:Vav, inverse:"ph.equips::AhuVav.ahu">
+}
+
+// VAV which is fed by an AHU
+AhuVav : Vav {
+  myAhu: Query<of:Ahu, via:"airRef+">
+}
+
+
+// --- meters.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   21 Mar 2024 Brian Frank  Creation
+//
+
+// Water flow meter
+WaterMeter : FlowMeter { water }
+
+// Domestic water flow meter
+DomesticWaterMeter : WaterMeter { domestic }
+
+// VAV which is fed by an AHU
+NaturalGasMeter : FlowMeter { naturalGas }
+
+
+
+

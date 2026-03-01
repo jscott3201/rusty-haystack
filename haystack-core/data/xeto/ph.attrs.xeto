@@ -1,0 +1,165 @@
+// --- base.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   27 Mar 2024 Brian Frank  Creation
+//
+
+// Attribute with a string value type
+StrAttr: Attr <abstract> {
+  val: Str       // String value of the attribute
+}
+
+// Attribute with a date value type
+DateAttr: Attr <abstract> {
+  val: Date      // Date value of the attribute
+}
+
+// Attribute with a number value type
+NumberAttr: Attr <abstract> {
+  val: Number    // Number value of the attribute
+}
+
+// Attribute with a number value with length unit
+LengthAttr: NumberAttr <abstract> {
+  val: Number <quantity:"length">
+}
+
+// Attribute with a number value with mass (weight) unit
+MassAttr: NumberAttr <abstract> {
+  val: Number <quantity:"mass">
+}
+
+// Attribute with a number value with temperature unit
+TempAttr : NumberAttr <abstract> {
+  temp
+  val: Number <quantity:"temperature">
+}
+
+
+// --- elec.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   16 Apr 2025 Rick Jennings  Creation
+//
+
+// Current attribute for the asset
+ElecCurrentAttr : NumberAttr <abstract> { elec, current }
+
+// AC current attribute for the asset
+ElecAcCurrentAttr : ElecCurrentAttr <abstract> { ac }
+
+// AC current rating of the asset
+ElecAcRatedCurrentAttr : ElecAcCurrentAttr <abstract> { rated }
+
+// Continuous AC current capacity rating of the asset (80% or 100% - for circuit breakers)
+ElecAcRatedContinuousCapacityCurrentAttr : ElecAcRatedCurrentAttr { currentContinuousCapacity }
+
+// Continuous AC current rating of the asset (for circuit breakers)
+ElecAcRatedContinuousCurrentAttr : ElecAcRatedCurrentAttr <abstract> { currentContinuous }
+
+// Max continuous AC current rating of the asset (for circuit breakers)
+ElecAcRatedMaxContinuousCurrentAttr : ElecAcRatedContinuousCurrentAttr { max }
+
+// AC current input rating of the asset
+ElecAcRatedInputCurrentAttr : ElecAcRatedCurrentAttr <abstract> { input }
+
+// Maximum AC current input rating of the asset
+ElecAcRatedInputMaxCurrentAttr : ElecAcRatedInputCurrentAttr { max }
+
+// Voltage attribute for the asset
+ElecVoltAttr : NumberAttr <abstract> { elec, volt }
+
+// AC voltage attribute for the asset
+ElecAcVoltAttr : ElecVoltAttr <abstract> { ac }
+
+// AC voltage rating of the asset
+ElecAcRatedVoltAttr : ElecAcVoltAttr <abstract> { rated }
+
+// AC voltage input rating of the asset
+ElecAcRatedInputVoltAttr : ElecAcRatedVoltAttr <abstract> { input }
+
+// Nominal AC voltage input rating of the asset
+ElecAcRatedInputNominalVoltAttr : ElecAcRatedInputVoltAttr <abstract> { nominal }
+
+// Nominal line-to-line AC voltage input rating of the asset
+ElecAcRatedInputLineToLineNominalVoltAttr : ElecAcRatedInputNominalVoltAttr { voltLineToLine }
+
+// Nominal line-to-neutral AC voltage input rating of the asset
+ElecAcRatedInputLineToNeutralNominalVoltAttr : ElecAcRatedInputNominalVoltAttr { voltLineToNeutral }
+
+// Minimum AC voltage input rating of the asset
+ElecAcRatedInputMinVoltAttr : ElecAcRatedInputVoltAttr <abstract> { min }
+
+// Minimum line-to-line AC voltage input rating of the asset
+ElecAcRatedInputLineToLineMinVoltAttr : ElecAcRatedInputMinVoltAttr { voltLineToLine }
+
+// Maximum AC voltage input rating of the asset
+ElecAcRatedInputMaxVoltAttr : ElecAcRatedInputVoltAttr <abstract> { max }
+
+// Maximum line-to-line AC voltage input rating of the asset
+ElecAcRatedInputLineToLineMaxVoltAttr : ElecAcRatedInputMaxVoltAttr { voltLineToLine }
+
+// --- temp.xeto ---
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   12 May 2025 Rick Jennings  Creation
+//
+
+// Rated operating temperature of the asset
+RatedOperatingTempAttr : TempAttr <abstract> { rated, operating }
+
+// Minimum rated operating temperature of the asset
+MinRatedOperatingTempAttr : RatedOperatingTempAttr { min }
+
+// Maximum rated operating temperature of the asset
+MaxRatedOperatingTempAttr : RatedOperatingTempAttr { max }
+
+// --- universal.xeto ---
+//
+// Copyright (c) 2024, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   27 Mar 2024 Brian Frank  Creation
+//
+
+// Company name that produced the asset
+ManufacturerAttr : StrAttr { manufacturer }
+
+// Manufacturer assigned identifier for a general product line.
+// For example, modelSeries is "iPhone 12", but modelNumber is "MGF43LL/A".
+// The modelSeries tends to be a marketing name and not an exact identifier.
+// Always use modelNumber for the actual model identifier.
+ModelSeriesAttr : StrAttr { modelSeries }
+
+// Manufacturer assigned alphanumeric identifier for a specific product configuration.
+// For example, modelSeries is "iPhone 12", but modelNumber is "MGF43LL/A".
+ModelNumberAttr : StrAttr { modelNumber }
+
+// Manufacturer assigned unique, alphanumeric identifier for an equip.
+SerialNumberAttr : StrAttr { serialNum }
+
+// Date that the asset was produced by the manufacturer.
+ManufactureDateAttr : DateAttr { manufactureDate }
+
+// Dimensional length of the asset
+DimensionLengthAttr : LengthAttr { length }
+
+// Dimensional width of the asset
+DimensionWidthAttr : LengthAttr { width }
+
+// Dimensional height of the asset
+DimensionHeightAttr : LengthAttr { height }
+
+// Weight of the asset
+WeightAttr : MassAttr { weight }
+
