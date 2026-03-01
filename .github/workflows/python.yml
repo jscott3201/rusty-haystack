@@ -20,7 +20,7 @@ jobs:
             target: x86_64
           - os: ubuntu-latest
             target: aarch64
-          - os: macos-13
+          - os: macos-latest
             target: x86_64
           - os: macos-latest
             target: aarch64
