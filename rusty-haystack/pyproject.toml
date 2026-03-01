@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rusty-haystack"
-version = "0.2.8"
+version = "0.2.9"
 description = "Python bindings for the Rusty Haystack Project Haystack implementation"
 requires-python = ">=3.11"
 license = {text = "MIT"}
