@@ -52,7 +52,9 @@ pub async fn handle(
 
     for (symbol, def) in defs {
         // If a filter is provided, only include defs whose symbol contains the filter
-        if let Some(ref f) = filter && !symbol.contains(f.as_str()) {
+        if let Some(ref f) = filter
+            && !symbol.contains(f.as_str())
+        {
             continue;
         }
 

@@ -179,16 +179,15 @@ fn handle_watch_unsub(req: &WsRequest, username: &str, state: &AppState) -> WsRe
 
     // If specific IDs are provided, remove only those; otherwise remove the
     // entire watch.
-    if let Some(ids) = &req.ids && !ids.is_empty() {
+    if let Some(ids) = &req.ids
+        && !ids.is_empty()
+    {
         let clean: Vec<String> = ids
             .iter()
             .map(|id| id.strip_prefix('@').unwrap_or(id).to_string())
             .collect();
         if !state.watches.remove_ids(&watch_id, username, &clean) {
-            return WsResponse::error(
-                req.req_id.clone(),
-                format!("watch not found: {watch_id}"),
-            );
+            return WsResponse::error(req.req_id.clone(), format!("watch not found: {watch_id}"));
         }
         return WsResponse::ok(req.req_id.clone(), vec![], Some(watch_id));
     }

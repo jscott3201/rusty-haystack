@@ -187,7 +187,9 @@ impl DefNamespace {
         };
 
         for parent in &is_ {
-            if let Some(parent_def) = self.defs.get(parent) && parent_def.kind() == DefKind::Choice {
+            if let Some(parent_def) = self.defs.get(parent)
+                && parent_def.kind() == DefKind::Choice
+            {
                 self.choice_index
                     .entry(parent.clone())
                     .or_default()

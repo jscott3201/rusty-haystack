@@ -316,7 +316,9 @@ impl EntityGraph {
                 if name == "id" {
                     continue;
                 }
-                if let Kind::Ref(r) = val && !self.entities.contains_key(&r.val) {
+                if let Kind::Ref(r) = val
+                    && !self.entities.contains_key(&r.val)
+                {
                     issues.push(ValidationIssue {
                         entity: entity_ref.map(|s| s.to_string()),
                         issue_type: "dangling_ref".to_string(),

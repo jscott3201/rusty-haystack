@@ -139,7 +139,9 @@ fn encode_grid_value(grid: &HGrid) -> Result<Map<String, Value>, CodecError> {
             let mut cm = Map::new();
             cm.insert("name".into(), Value::String(col.name.clone()));
             // Flatten meta into column object (v3 spec)
-            if !col.meta.is_empty() && let Value::Object(meta_map) = encode_dict(&col.meta)? {
+            if !col.meta.is_empty()
+                && let Value::Object(meta_map) = encode_dict(&col.meta)?
+            {
                 for (k, v) in meta_map {
                     cm.insert(k, v);
                 }

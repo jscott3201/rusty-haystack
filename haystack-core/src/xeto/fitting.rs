@@ -230,14 +230,18 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 
         // minVal / maxVal for Numbers
         if let Kind::Number(num) = val {
-            if let Some(Kind::Number(min)) = slot.meta.get("minVal") && num.val < min.val {
+            if let Some(Kind::Number(min)) = slot.meta.get("minVal")
+                && num.val < min.val
+            {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "minVal".into(),
                     detail: format!("{} < {}", num.val, min.val),
                 });
             }
-            if let Some(Kind::Number(max)) = slot.meta.get("maxVal") && num.val > max.val {
+            if let Some(Kind::Number(max)) = slot.meta.get("maxVal")
+                && num.val > max.val
+            {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "maxVal".into(),
@@ -245,7 +249,9 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
                 });
             }
             // unitless constraint
-            if slot.meta.contains_key("unitless") && let Some(unit) = &num.unit {
+            if slot.meta.contains_key("unitless")
+                && let Some(unit) = &num.unit
+            {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "unitless".into(),
@@ -276,14 +282,18 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 
         // minSize / maxSize / nonEmpty / pattern for Strings
         if let Kind::Str(s) = val {
-            if let Some(Kind::Number(min)) = slot.meta.get("minSize") && (s.len() as f64) < min.val {
+            if let Some(Kind::Number(min)) = slot.meta.get("minSize")
+                && (s.len() as f64) < min.val
+            {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "minSize".into(),
                     detail: format!("length {} < {}", s.len(), min.val),
                 });
             }
-            if let Some(Kind::Number(max)) = slot.meta.get("maxSize") && (s.len() as f64) > max.val {
+            if let Some(Kind::Number(max)) = slot.meta.get("maxSize")
+                && (s.len() as f64) > max.val
+            {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "maxSize".into(),
@@ -321,14 +331,18 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 
         // minSize / maxSize for Lists
         if let Kind::List(items) = val {
-            if let Some(Kind::Number(min)) = slot.meta.get("minSize") && (items.len() as f64) < min.val {
+            if let Some(Kind::Number(min)) = slot.meta.get("minSize")
+                && (items.len() as f64) < min.val
+            {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "minSize".into(),
                     detail: format!("list length {} < {}", items.len(), min.val),
                 });
             }
-            if let Some(Kind::Number(max)) = slot.meta.get("maxSize") && (items.len() as f64) > max.val {
+            if let Some(Kind::Number(max)) = slot.meta.get("maxSize")
+                && (items.len() as f64) > max.val
+            {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "maxSize".into(),

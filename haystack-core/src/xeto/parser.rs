@@ -301,7 +301,9 @@ impl Parser {
                         slot.query_of = Some(s.clone());
                     }
                     // Also handle "of" as a bare ident value
-                    if slot.query_of.is_none() && let Some(Kind::Marker) = query_meta.get("of") {
+                    if slot.query_of.is_none()
+                        && let Some(Kind::Marker) = query_meta.get("of")
+                    {
                         // "of" was parsed as marker (bare ident); we need
                         // the actual ident value. This is handled by type
                         // ref parsing in meta.
