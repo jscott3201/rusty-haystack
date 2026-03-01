@@ -99,8 +99,14 @@ mod tests {
 
         let mut row1 = HDict::new();
         row1.set("dis", Kind::Str("Alpha".into()));
-        row1.set("area", Kind::Number(Number::new(3500.0, Some("ft\u{00B2}".into()))));
-        row1.set("built", Kind::Date(NaiveDate::from_ymd_opt(2020, 6, 15).unwrap()));
+        row1.set(
+            "area",
+            Kind::Number(Number::new(3500.0, Some("ft\u{00B2}".into()))),
+        );
+        row1.set(
+            "built",
+            Kind::Date(NaiveDate::from_ymd_opt(2020, 6, 15).unwrap()),
+        );
         row1.set("site", Kind::Marker);
 
         let mut row2 = HDict::new();
@@ -182,7 +188,9 @@ mod tests {
     fn scalar_delegates_to_zinc() {
         let codec = CsvCodec;
         // encode
-        let encoded = codec.encode_scalar(&Kind::Number(Number::unitless(42.0))).unwrap();
+        let encoded = codec
+            .encode_scalar(&Kind::Number(Number::unitless(42.0)))
+            .unwrap();
         assert_eq!(encoded, "42");
 
         // decode

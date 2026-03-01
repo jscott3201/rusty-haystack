@@ -436,11 +436,7 @@ mod tests {
         assert_eq!(
             node,
             FilterNode::Cmp {
-                path: Path(vec![
-                    "equipRef".into(),
-                    "siteRef".into(),
-                    "area".into(),
-                ]),
+                path: Path(vec!["equipRef".into(), "siteRef".into(), "area".into(),]),
                 op: CmpOp::Gt,
                 val: Kind::Number(Number::unitless(1000.0)),
             }
@@ -674,8 +670,7 @@ mod tests {
     #[test]
     fn parse_complex_expression() {
         // (site or equip) and not deprecated and temp > 72°F
-        let node =
-            parse_filter("(site or equip) and not deprecated and temp > 72°F").unwrap();
+        let node = parse_filter("(site or equip) and not deprecated and temp > 72°F").unwrap();
         // Should parse as: ((site or equip) and (not deprecated)) and (temp > 72°F)
         match node {
             FilterNode::And(_, _) => {} // valid structure

@@ -140,10 +140,7 @@ impl From<&super::ast::SlotDef> for Slot {
 }
 
 /// Convert an AST `SpecDef` into a resolved `Spec`.
-pub fn spec_from_def(
-    def: &super::ast::SpecDef,
-    lib_name: &str,
-) -> Spec {
+pub fn spec_from_def(def: &super::ast::SpecDef, lib_name: &str) -> Spec {
     let qname = format!("{}::{}", lib_name, def.name);
     let is_abstract = def.meta.contains_key("abstract");
     Spec {

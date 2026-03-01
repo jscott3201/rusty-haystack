@@ -1,6 +1,6 @@
 //! The `formats` op — list supported MIME types.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;

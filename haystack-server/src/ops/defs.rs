@@ -1,6 +1,6 @@
 //! The `defs` and `libs` ops — query the definition namespace.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
@@ -45,11 +45,7 @@ pub async fn handle(
     };
 
     // Build def grid
-    let cols = vec![
-        HCol::new("def"),
-        HCol::new("lib"),
-        HCol::new("doc"),
-    ];
+    let cols = vec![HCol::new("def"), HCol::new("lib"), HCol::new("doc")];
 
     let defs = ns.defs();
     let mut rows: Vec<HDict> = Vec::new();
@@ -63,8 +59,14 @@ pub async fn handle(
         }
 
         let mut row = HDict::new();
-        row.set("def", Kind::Symbol(haystack_core::kinds::Symbol::new(symbol)));
-        row.set("lib", Kind::Symbol(haystack_core::kinds::Symbol::new(&def.lib)));
+        row.set(
+            "def",
+            Kind::Symbol(haystack_core::kinds::Symbol::new(symbol)),
+        );
+        row.set(
+            "lib",
+            Kind::Symbol(haystack_core::kinds::Symbol::new(&def.lib)),
+        );
         row.set("doc", Kind::Str(def.doc.clone()));
         rows.push(row);
     }

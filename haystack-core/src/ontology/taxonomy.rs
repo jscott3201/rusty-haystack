@@ -1,7 +1,7 @@
 // TaxonomyTree -- unified type hierarchy for Haystack 4 defs.
 
-use std::collections::{HashMap, HashSet, VecDeque};
 use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Unified inheritance graph for Haystack 4 defs.
 ///
@@ -104,10 +104,7 @@ impl TaxonomyTree {
 
     /// Direct children of a type.
     pub fn subtypes_of(&self, name: &str) -> Vec<String> {
-        self.children
-            .get(name)
-            .cloned()
-            .unwrap_or_default()
+        self.children.get(name).cloned().unwrap_or_default()
     }
 
     /// All descendants (transitive, breadth-first).
@@ -140,11 +137,7 @@ impl TaxonomyTree {
     ///
     /// Walks the supertype chain and collects all types that are
     /// marked as mandatory. Results are cached.
-    pub fn mandatory_tags(
-        &self,
-        name: &str,
-        mandatory_defs: &HashSet<String>,
-    ) -> HashSet<String> {
+    pub fn mandatory_tags(&self, name: &str, mandatory_defs: &HashSet<String>) -> HashSet<String> {
         if let Some(cached) = self.mandatory_cache.read().get(name) {
             return cached.clone();
         }
@@ -164,7 +157,9 @@ impl TaxonomyTree {
             }
         }
 
-        self.mandatory_cache.write().insert(name.to_string(), tags.clone());
+        self.mandatory_cache
+            .write()
+            .insert(name.to_string(), tags.clone());
         tags
     }
 

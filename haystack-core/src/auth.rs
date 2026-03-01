@@ -8,8 +8,8 @@
 //! for the three-phase handshake: HELLO, SCRAM challenge/response, and
 //! BEARER token issuance.
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rand::Rng;
@@ -87,8 +87,7 @@ pub enum AuthHeader {
 
 /// Compute HMAC-SHA-256(key, msg).
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any size");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any size");
     mac.update(msg);
     mac.finalize().into_bytes().to_vec()
 }
@@ -144,11 +143,7 @@ fn make_client_first_bare(username: &str, client_nonce: &str) -> String {
 /// Derive SCRAM credentials from a password (for user creation/storage).
 ///
 /// Uses PBKDF2-HMAC-SHA-256 with the given salt and iteration count.
-pub fn derive_credentials(
-    password: &str,
-    salt: &[u8],
-    iterations: u32,
-) -> ScramCredentials {
+pub fn derive_credentials(password: &str, salt: &[u8], iterations: u32) -> ScramCredentials {
     let salted_password = pbkdf2_sha256(password.as_bytes(), salt, iterations);
     let (_client_key, stored_key, server_key) = derive_keys(&salted_password);
     ScramCredentials {
@@ -209,7 +204,10 @@ pub fn server_first_message(
     let client_final_without_proof = format!("c=biws,r={}", combined_nonce);
 
     // AuthMessage = client-first-bare "," server-first-msg "," client-final-without-proof
-    let auth_message = format!("{},{},{}", cfmb, server_first_msg, client_final_without_proof);
+    let auth_message = format!(
+        "{},{},{}",
+        cfmb, server_first_msg, client_final_without_proof
+    );
 
     // Pre-compute server signature
     let server_signature = hmac_sha256(&credentials.server_key, auth_message.as_bytes());
@@ -273,9 +271,9 @@ pub fn client_final_message(
     let salt = BASE64
         .decode(salt_b64)
         .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-    let iterations: u32 = iterations_str.parse().map_err(|e: std::num::ParseIntError| {
-        AuthError::HandshakeFailed(e.to_string())
-    })?;
+    let iterations: u32 = iterations_str
+        .parse()
+        .map_err(|e: std::num::ParseIntError| AuthError::HandshakeFailed(e.to_string()))?;
 
     // Key derivation
     let salted_password = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
@@ -284,7 +282,10 @@ pub fn client_final_message(
     // Build AuthMessage
     let cfmb = make_client_first_bare(username, client_nonce);
     let client_final_without_proof = format!("c=biws,r={}", combined_nonce);
-    let auth_message = format!("{},{},{}", cfmb, server_first_msg, client_final_without_proof);
+    let auth_message = format!(
+        "{},{},{}",
+        cfmb, server_first_msg, client_final_without_proof
+    );
 
     // ClientSignature = HMAC(StoredKey, AuthMessage)
     let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
@@ -354,7 +355,11 @@ pub fn server_verify_final(
     let recovered_client_key = xor_bytes(&client_proof, &client_signature);
     let recovered_stored_key = sha256(&recovered_client_key);
 
-    if recovered_stored_key.ct_eq(&handshake.stored_key).unwrap_u8() == 0 {
+    if recovered_stored_key
+        .ct_eq(&handshake.stored_key)
+        .unwrap_u8()
+        == 0
+    {
         return Err(AuthError::InvalidCredentials);
     }
 
@@ -393,13 +398,13 @@ pub fn parse_auth_header(header: &str) -> Result<AuthHeader, AuthError> {
                 data = Some(val.trim().to_string());
             }
         }
-        let handshake_token = handshake_token.ok_or_else(|| {
-            AuthError::InvalidHeader("missing handshakeToken= in SCRAM".into())
-        })?;
-        let data = data.ok_or_else(|| {
-            AuthError::InvalidHeader("missing data= in SCRAM".into())
-        })?;
-        Ok(AuthHeader::Scram { handshake_token, data })
+        let handshake_token = handshake_token
+            .ok_or_else(|| AuthError::InvalidHeader("missing handshakeToken= in SCRAM".into()))?;
+        let data = data.ok_or_else(|| AuthError::InvalidHeader("missing data= in SCRAM".into()))?;
+        Ok(AuthHeader::Scram {
+            handshake_token,
+            data,
+        })
     } else if let Some(rest) = header.strip_prefix("BEARER ") {
         let token = rest
             .trim()
@@ -419,11 +424,7 @@ pub fn parse_auth_header(header: &str) -> Result<AuthHeader, AuthError> {
 /// Format a Haystack `WWW-Authenticate` header for a SCRAM challenge.
 ///
 /// Produces: `SCRAM handshakeToken=<token>, hash=<hash>, data=<data_b64>`
-pub fn format_www_authenticate(
-    handshake_token: &str,
-    hash: &str,
-    data_b64: &str,
-) -> String {
+pub fn format_www_authenticate(handshake_token: &str, hash: &str, data_b64: &str) -> String {
     format!(
         "SCRAM handshakeToken={}, hash={}, data={}",
         handshake_token, hash, data_b64
@@ -568,16 +569,14 @@ mod tests {
             server_first_message(username, &client_nonce, &credentials);
 
         // --- Server: format WWW-Authenticate header ---
-        let www_auth =
-            format_www_authenticate("handshake-token-xyz", "SHA-256", &server_first_b64);
+        let www_auth = format_www_authenticate("handshake-token-xyz", "SHA-256", &server_first_b64);
         assert!(www_auth.contains("SCRAM"));
         assert!(www_auth.contains("SHA-256"));
         assert!(www_auth.contains("handshake-token-xyz"));
 
         // --- Client: process server-first, produce client-final ---
         let (client_final_b64, expected_server_sig) =
-            client_final_message(password, &client_nonce, &server_first_b64, username)
-                .unwrap();
+            client_final_message(password, &client_nonce, &server_first_b64, username).unwrap();
 
         // --- Server: verify client-final ---
         let server_sig = server_verify_final(&handshake, &client_final_b64).unwrap();
@@ -633,8 +632,7 @@ mod tests {
 
         // 4. Client: create client-final-message
         let (client_final_b64, expected_server_sig) =
-            client_final_message(password, &client_nonce, &server_first_b64, username)
-                .unwrap();
+            client_final_message(password, &client_nonce, &server_first_b64, username).unwrap();
 
         // Verify client-final structure
         let client_final_decoded = BASE64.decode(&client_final_b64).unwrap();

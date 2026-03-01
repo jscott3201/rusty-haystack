@@ -37,10 +37,7 @@ pub fn decode_grid(codec_name: &str, data: &str) -> PyResult<PyHGrid> {
 #[pyfunction]
 pub fn encode_scalar(codec_name: &str, val: &Bound<'_, PyAny>) -> PyResult<String> {
     let codec = codecs::codec_for(codec_name).ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-            "unknown codec: '{}'",
-            codec_name
-        ))
+        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("unknown codec: '{}'", codec_name))
     })?;
     let kind = py_to_kind(val)?;
     codec
@@ -51,10 +48,7 @@ pub fn encode_scalar(codec_name: &str, val: &Bound<'_, PyAny>) -> PyResult<Strin
 #[pyfunction]
 pub fn decode_scalar(py: Python<'_>, codec_name: &str, data: &str) -> PyResult<PyObject> {
     let codec = codecs::codec_for(codec_name).ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-            "unknown codec: '{}'",
-            codec_name
-        ))
+        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("unknown codec: '{}'", codec_name))
     })?;
     let kind = codec
         .decode_scalar(data)

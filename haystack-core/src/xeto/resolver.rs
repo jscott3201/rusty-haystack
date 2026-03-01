@@ -29,12 +29,7 @@ impl XetoResolver {
     }
 
     /// Register a library with its spec names and dependency list.
-    pub fn add_lib(
-        &mut self,
-        lib_name: &str,
-        spec_names: HashSet<String>,
-        depends: Vec<String>,
-    ) {
+    pub fn add_lib(&mut self, lib_name: &str, spec_names: HashSet<String>, depends: Vec<String>) {
         self.lib_specs.insert(lib_name.to_string(), spec_names);
         self.lib_depends.insert(lib_name.to_string(), depends);
     }
@@ -169,7 +164,11 @@ mod tests {
         phiot_specs.insert("Equip".to_string());
         phiot_specs.insert("Point".to_string());
         phiot_specs.insert("Ahu".to_string());
-        resolver.add_lib("phIoT", phiot_specs, vec!["ph".to_string(), "sys".to_string()]);
+        resolver.add_lib(
+            "phIoT",
+            phiot_specs,
+            vec!["ph".to_string(), "sys".to_string()],
+        );
 
         resolver
     }

@@ -178,10 +178,7 @@ mod tests {
         assert_eq!(d.get("site"), Some(&Kind::Marker));
 
         assert!(d.has("area"));
-        assert_eq!(
-            d.get("area"),
-            Some(&Kind::Number(Number::unitless(4500.0)))
-        );
+        assert_eq!(d.get("area"), Some(&Kind::Number(Number::unitless(4500.0))));
 
         assert!(d.has("dis"));
         assert_eq!(d.get("dis"), Some(&Kind::Str("Main Site".into())));
@@ -230,7 +227,10 @@ mod tests {
     #[test]
     fn dis_from_ref_fallback() {
         let mut d = HDict::new();
-        d.set("id", Kind::Ref(HRef::new("b-1", Some("Ref Display".into()))));
+        d.set(
+            "id",
+            Kind::Ref(HRef::new("b-1", Some("Ref Display".into()))),
+        );
 
         // No dis tag, falls back to ref dis
         assert_eq!(d.dis(), Some("Ref Display"));
@@ -276,10 +276,7 @@ mod tests {
             base.get("area"),
             Some(&Kind::Number(Number::unitless(2000.0)))
         );
-        assert_eq!(
-            base.get("geoCity"),
-            Some(&Kind::Str("Richmond".into()))
-        );
+        assert_eq!(base.get("geoCity"), Some(&Kind::Str("Richmond".into())));
         assert_eq!(base.len(), 3);
     }
 
@@ -418,10 +415,7 @@ mod tests {
         d.set("val", Kind::Number(Number::unitless(2.0)));
 
         assert_eq!(d.len(), 1);
-        assert_eq!(
-            d.get("val"),
-            Some(&Kind::Number(Number::unitless(2.0)))
-        );
+        assert_eq!(d.get("val"), Some(&Kind::Number(Number::unitless(2.0))));
     }
 
     #[test]

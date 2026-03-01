@@ -2,7 +2,7 @@
 //!
 //! Backed by the in-memory `HisStore` stored in `AppState`.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
 
 use haystack_core::data::{HCol, HDict, HGrid};
@@ -52,13 +52,21 @@ pub async fn handle_read(
     // Extract id.
     let id = match row.get("id") {
         Some(Kind::Ref(r)) => r.val.clone(),
-        _ => return Err(HaystackError::bad_request("hisRead: missing or invalid 'id' Ref")),
+        _ => {
+            return Err(HaystackError::bad_request(
+                "hisRead: missing or invalid 'id' Ref",
+            ));
+        }
     };
 
     // Extract range string.
     let range_str = match row.get("range") {
         Some(Kind::Str(s)) => s.as_str(),
-        _ => return Err(HaystackError::bad_request("hisRead: missing or invalid 'range' Str")),
+        _ => {
+            return Err(HaystackError::bad_request(
+                "hisRead: missing or invalid 'range' Str",
+            ));
+        }
     };
 
     // Parse range into (start, end) pair of DateTime<FixedOffset>.
@@ -74,10 +82,7 @@ pub async fn handle_read(
         .into_iter()
         .map(|item| {
             let mut d = HDict::new();
-            d.set(
-                "ts",
-                Kind::DateTime(HDateTime::new(item.ts, "UTC")),
-            );
+            d.set("ts", Kind::DateTime(HDateTime::new(item.ts, "UTC")));
             d.set("val", item.val);
             d
         })
@@ -182,7 +187,7 @@ pub async fn handle_write(
         _ => {
             return Err(HaystackError::bad_request(
                 "hisWrite: grid meta must contain 'id' Ref",
-            ))
+            ));
         }
     };
 
@@ -194,13 +199,10 @@ pub async fn handle_write(
             _ => {
                 return Err(HaystackError::bad_request(format!(
                     "hisWrite: row {i} missing or invalid 'ts' DateTime"
-                )))
+                )));
             }
         };
-        let val = row
-            .get("val")
-            .cloned()
-            .unwrap_or(Kind::Null);
+        let val = row.get("val").cloned().unwrap_or(Kind::Null);
 
         items.push(HisItem { ts, val });
     }

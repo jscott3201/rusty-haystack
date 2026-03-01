@@ -2,6 +2,11 @@
 name = "haystack-cli"
 version.workspace = true
 edition.workspace = true
+description = "CLI tool for importing, exporting, serving, and querying Project Haystack data"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "haystack"

@@ -1,7 +1,7 @@
 // JSON v3 codec — application/json;v=3 with type-prefix strings.
 
-use crate::codecs::{Codec, CodecError};
 use crate::codecs::shared;
+use crate::codecs::{Codec, CodecError};
 use crate::data::{HCol, HDict, HGrid};
 use crate::kinds::*;
 use chrono::{NaiveDate, NaiveTime, Timelike};
@@ -23,8 +23,10 @@ impl Codec for Json3Codec {
     }
 
     fn decode_grid(&self, input: &str) -> Result<HGrid, CodecError> {
-        let val: Value = serde_json::from_str(input)
-            .map_err(|e| CodecError::Parse { pos: 0, message: e.to_string() })?;
+        let val: Value = serde_json::from_str(input).map_err(|e| CodecError::Parse {
+            pos: 0,
+            message: e.to_string(),
+        })?;
         decode_grid_value(&val)
     }
 
@@ -34,8 +36,10 @@ impl Codec for Json3Codec {
     }
 
     fn decode_scalar(&self, input: &str) -> Result<Kind, CodecError> {
-        let val: Value = serde_json::from_str(input)
-            .map_err(|e| CodecError::Parse { pos: 0, message: e.to_string() })?;
+        let val: Value = serde_json::from_str(input).map_err(|e| CodecError::Parse {
+            pos: 0,
+            message: e.to_string(),
+        })?;
         decode_kind(&val)
     }
 }
@@ -128,25 +132,27 @@ fn encode_grid_value(grid: &HGrid) -> Result<Map<String, Value>, CodecError> {
     m.insert("meta".into(), Value::Object(meta_map));
 
     // cols
-    let cols: Result<Vec<Value>, CodecError> = grid.cols.iter().map(|col| {
-        let mut cm = Map::new();
-        cm.insert("name".into(), Value::String(col.name.clone()));
-        // Flatten meta into column object (v3 spec)
-        if !col.meta.is_empty() {
-            if let Value::Object(meta_map) = encode_dict(&col.meta)? {
-                for (k, v) in meta_map {
-                    cm.insert(k, v);
+    let cols: Result<Vec<Value>, CodecError> = grid
+        .cols
+        .iter()
+        .map(|col| {
+            let mut cm = Map::new();
+            cm.insert("name".into(), Value::String(col.name.clone()));
+            // Flatten meta into column object (v3 spec)
+            if !col.meta.is_empty() {
+                if let Value::Object(meta_map) = encode_dict(&col.meta)? {
+                    for (k, v) in meta_map {
+                        cm.insert(k, v);
+                    }
                 }
             }
-        }
-        Ok(Value::Object(cm))
-    }).collect();
+            Ok(Value::Object(cm))
+        })
+        .collect();
     m.insert("cols".into(), Value::Array(cols?));
 
     // rows
-    let rows: Result<Vec<Value>, CodecError> = grid.rows.iter().map(|row| {
-        encode_dict(row)
-    }).collect();
+    let rows: Result<Vec<Value>, CodecError> = grid.rows.iter().map(encode_dict).collect();
     m.insert("rows".into(), Value::Array(rows?));
 
     Ok(m)
@@ -225,7 +231,14 @@ fn decode_number_str(s: &str) -> Result<Kind, CodecError> {
         Some(pos) => {
             let val_part = &s[..pos];
             let unit_part = &s[pos + 1..];
-            (val_part, if unit_part.is_empty() { None } else { Some(unit_part.to_string()) })
+            (
+                val_part,
+                if unit_part.is_empty() {
+                    None
+                } else {
+                    Some(unit_part.to_string())
+                },
+            )
         }
         None => (s, None),
     };
@@ -257,8 +270,9 @@ fn decode_ref_str(s: &str) -> Result<Kind, CodecError> {
 
 /// Decode a date from the v3 `d:` prefix body: `"2024-01-01"`.
 fn decode_date_str(s: &str) -> Result<Kind, CodecError> {
-    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| {
-        CodecError::Parse { pos: 0, message: format!("invalid v3 date: {e}") }
+    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| CodecError::Parse {
+        pos: 0,
+        message: format!("invalid v3 date: {e}"),
     })?;
     Ok(Kind::Date(d))
 }
@@ -409,10 +423,12 @@ fn decode_object(m: &Map<String, Value>) -> Result<Kind, CodecError> {
 pub fn decode_grid_value(val: &Value) -> Result<HGrid, CodecError> {
     let m = match val {
         Value::Object(m) => m,
-        _ => return Err(CodecError::Parse {
-            pos: 0,
-            message: "grid must be a JSON object".into(),
-        }),
+        _ => {
+            return Err(CodecError::Parse {
+                pos: 0,
+                message: "grid must be a JSON object".into(),
+            });
+        }
     };
     decode_grid_from_map(m)
 }
@@ -445,10 +461,12 @@ fn decode_grid_from_map(m: &Map<String, Value>) -> Result<HGrid, CodecError> {
                 })?;
                 let name = match col_obj.get("name") {
                     Some(Value::String(n)) => n.clone(),
-                    _ => return Err(CodecError::Parse {
-                        pos: 0,
-                        message: "col missing 'name' field".into(),
-                    }),
+                    _ => {
+                        return Err(CodecError::Parse {
+                            pos: 0,
+                            message: "col missing 'name' field".into(),
+                        });
+                    }
                 };
                 let mut col_meta = HDict::new();
                 for (key, val) in col_obj {
@@ -719,10 +737,7 @@ mod tests {
     fn ref_encoding_format() {
         let codec = Json3Codec;
         let k = Kind::Ref(HRef::new("abc", Some("Display Name".into())));
-        assert_eq!(
-            codec.encode_scalar(&k).unwrap(),
-            "\"r:abc Display Name\""
-        );
+        assert_eq!(codec.encode_scalar(&k).unwrap(), "\"r:abc Display Name\"");
     }
 
     // ── Uri ──
@@ -737,10 +752,7 @@ mod tests {
     fn uri_encoding_format() {
         let codec = Json3Codec;
         let k = Kind::Uri(Uri::new("http://example.com"));
-        assert_eq!(
-            codec.encode_scalar(&k).unwrap(),
-            "\"u:http://example.com\""
-        );
+        assert_eq!(codec.encode_scalar(&k).unwrap(), "\"u:http://example.com\"");
     }
 
     // ── Symbol ──
@@ -896,7 +908,10 @@ mod tests {
         let mut d = HDict::new();
         d.set("site", Kind::Marker);
         d.set("dis", Kind::Str("Main".into()));
-        d.set("area", Kind::Number(Number::new(4500.0, Some("ft\u{00B2}".into()))));
+        d.set(
+            "area",
+            Kind::Number(Number::new(4500.0, Some("ft\u{00B2}".into()))),
+        );
         let k = Kind::Dict(Box::new(d));
         assert_eq!(roundtrip_scalar(k.clone()), k);
     }
@@ -917,10 +932,7 @@ mod tests {
     fn grid_with_data_roundtrip() {
         let codec = Json3Codec;
 
-        let cols = vec![
-            HCol::new("dis"),
-            HCol::new("area"),
-        ];
+        let cols = vec![HCol::new("dis"), HCol::new("area")];
         let mut row1 = HDict::new();
         row1.set("dis", Kind::Str("Site One".into()));
         row1.set("area", Kind::Number(Number::unitless(4500.0)));
@@ -971,20 +983,14 @@ mod tests {
         let mut col_meta = HDict::new();
         col_meta.set("unit", Kind::Str("kW".into()));
 
-        let cols = vec![
-            HCol::new("name"),
-            HCol::with_meta("power", col_meta),
-        ];
+        let cols = vec![HCol::new("name"), HCol::with_meta("power", col_meta)];
         let g = HGrid::from_parts(HDict::new(), cols, vec![]);
         let encoded = codec.encode_grid(&g).unwrap();
         let decoded = codec.decode_grid(&encoded).unwrap();
 
         assert_eq!(decoded.num_cols(), 2);
         let power_col = decoded.col("power").unwrap();
-        assert_eq!(
-            power_col.meta.get("unit"),
-            Some(&Kind::Str("kW".into()))
-        );
+        assert_eq!(power_col.meta.get("unit"), Some(&Kind::Str("kW".into())));
     }
 
     #[test]
@@ -1068,7 +1074,10 @@ mod tests {
     #[test]
     fn nested_dict_with_typed_values() {
         let mut inner = HDict::new();
-        inner.set("temp", Kind::Number(Number::new(72.5, Some("\u{00B0}F".into()))));
+        inner.set(
+            "temp",
+            Kind::Number(Number::new(72.5, Some("\u{00B0}F".into()))),
+        );
         inner.set("site", Kind::Ref(HRef::from_val("s1")));
         let k = Kind::Dict(Box::new(inner));
         assert_eq!(roundtrip_scalar(k.clone()), k);

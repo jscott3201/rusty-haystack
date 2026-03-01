@@ -1,11 +1,11 @@
 // Haystack codecs — wire format serialization / deserialization.
 
-pub mod zinc;
-pub mod trio;
-pub mod json;
 pub mod csv;
+pub mod json;
 pub mod rdf;
 pub mod shared;
+pub mod trio;
+pub mod zinc;
 
 use crate::data::HGrid;
 use crate::kinds::Kind;

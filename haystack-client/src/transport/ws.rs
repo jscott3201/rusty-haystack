@@ -4,15 +4,14 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite};
 
+use crate::error::ClientError;
+use crate::transport::Transport;
 use haystack_core::codecs::codec_for;
 use haystack_core::data::HGrid;
 use haystack_core::kinds::Kind;
-use crate::error::ClientError;
-use crate::transport::Transport;
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// WebSocket transport for communicating with a Haystack server.
 ///
@@ -34,7 +33,10 @@ impl WsTransport {
         let request = tungstenite::http::Request::builder()
             .uri(url)
             .header("Authorization", format!("BEARER authToken={}", auth_token))
-            .header("Sec-WebSocket-Key", tungstenite::handshake::client::generate_key())
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
             .header("Sec-WebSocket-Version", "13")
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
@@ -83,8 +85,8 @@ impl Transport for WsTransport {
             "body": body,
         });
 
-        let msg_text = serde_json::to_string(&envelope)
-            .map_err(|e| ClientError::Codec(e.to_string()))?;
+        let msg_text =
+            serde_json::to_string(&envelope).map_err(|e| ClientError::Codec(e.to_string()))?;
 
         // Send the request
         {
@@ -139,7 +141,13 @@ impl Transport for WsTransport {
             let dis = grid
                 .meta
                 .get("dis")
-                .and_then(|k| if let Kind::Str(s) = k { Some(s.as_str()) } else { None })
+                .and_then(|k| {
+                    if let Kind::Str(s) = k {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("unknown server error");
             return Err(ClientError::ServerError(dis.to_string()));
         }

@@ -4,11 +4,25 @@ build-backend = "maturin"
 
 [project]
 name = "rusty-haystack"
+version = "0.2.0"
+description = "Python bindings for the Rusty Haystack Project Haystack implementation"
 requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Justin Scott", email = "jscott3201@gmail.com"}]
+keywords = ["haystack", "iot", "building-automation", "smart-buildings"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Libraries",
 ]
+
+[project.urls]
+Homepage = "https://github.com/justinscott/rusty-haystack"
+Repository = "https://github.com/justinscott/rusty-haystack"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

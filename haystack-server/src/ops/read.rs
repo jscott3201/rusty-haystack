@@ -1,6 +1,6 @@
 //! The `read` op — read entities by filter or by id.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::filter::{matches, parse_filter};
@@ -63,11 +63,7 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
 
     let filter = match row.get("filter") {
         Some(Kind::Str(s)) => s.as_str(),
-        _ => {
-            return Err(HaystackError::bad_request(
-                "filter must be a Str value",
-            ))
-        }
+        _ => return Err(HaystackError::bad_request("filter must be a Str value")),
     };
 
     let limit = match row.get("limit") {

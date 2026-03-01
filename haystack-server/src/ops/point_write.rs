@@ -1,6 +1,6 @@
 //! The `pointWrite` op — write a value to a writable point.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HDict, HGrid};
 use haystack_core::kinds::Kind;
@@ -43,7 +43,7 @@ pub async fn handle(
             _ => 17, // Default level
         };
 
-        if level < 1 || level > 17 {
+        if !(1..=17).contains(&level) {
             return Err(HaystackError::bad_request(format!(
                 "level must be between 1 and 17, got {level}"
             )));
@@ -65,7 +65,10 @@ pub async fn handle(
             // Simple implementation: update the entity's curVal tag at the given level
             let mut changes = HDict::new();
             changes.set("curVal", val.clone());
-            changes.set("writeLevel", Kind::Number(haystack_core::kinds::Number::unitless(level as f64)));
+            changes.set(
+                "writeLevel",
+                Kind::Number(haystack_core::kinds::Number::unitless(level as f64)),
+            );
             state
                 .graph
                 .update(&ref_val, changes)

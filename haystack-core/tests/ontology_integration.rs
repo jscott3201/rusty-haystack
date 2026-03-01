@@ -20,7 +20,7 @@ fn load_standard_defs_count() {
     // Allow some variance for file updates, but should be in the ballpark.
     let count = ns.len();
     assert!(
-        count >= 600 && count <= 900,
+        (600..=900).contains(&count),
         "Expected ~719 defs, got {}",
         count
     );
@@ -175,7 +175,10 @@ fn fits_valid_ahu_entity() {
     entity.set("equip", Kind::Marker);
     entity.set("airHandlingEquip", Kind::Marker);
 
-    assert!(ns.fits(&entity, "ahu"), "Entity with ahu+equip+airHandlingEquip should fit ahu");
+    assert!(
+        ns.fits(&entity, "ahu"),
+        "Entity with ahu+equip+airHandlingEquip should fit ahu"
+    );
 }
 
 #[test]
@@ -187,7 +190,10 @@ fn fits_missing_equip_marker() {
     entity.set("ahu", Kind::Marker);
     // Missing equip marker
 
-    assert!(!ns.fits(&entity, "ahu"), "Entity without equip should not fit ahu");
+    assert!(
+        !ns.fits(&entity, "ahu"),
+        "Entity without equip should not fit ahu"
+    );
 }
 
 #[test]
@@ -215,10 +221,14 @@ fn validate_entity_catches_missing_mandatory() {
     let issues = ns.validate_entity(&entity);
     assert!(!issues.is_empty(), "Should find validation issues");
 
-    let has_equip_issue = issues.iter().any(|i| {
-        i.issue_type == "missing_marker" && i.detail.contains("equip")
-    });
-    assert!(has_equip_issue, "Should report missing equip marker, issues: {:?}", issues);
+    let has_equip_issue = issues
+        .iter()
+        .any(|i| i.issue_type == "missing_marker" && i.detail.contains("equip"));
+    assert!(
+        has_equip_issue,
+        "Should report missing equip marker, issues: {:?}",
+        issues
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! Watch ops — subscribe, poll, and unsubscribe for entity changes.
 
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
@@ -57,28 +57,23 @@ pub async fn handle_sub(
     }
 
     // Check for existing watchId in grid meta (add to existing watch)
-    let existing_watch_id = request_grid
-        .meta
-        .get("watchId")
-        .and_then(|v| match v {
-            Kind::Str(s) => Some(s.clone()),
-            _ => None,
-        });
+    let existing_watch_id = request_grid.meta.get("watchId").and_then(|v| match v {
+        Kind::Str(s) => Some(s.clone()),
+        _ => None,
+    });
 
     let watch_id = if let Some(ref wid) = existing_watch_id {
         if state.watches.add_ids(wid, &username, ids.clone()) {
             wid.clone()
         } else {
-            return Err(HaystackError::not_found(format!(
-                "watch not found: {wid}"
-            )));
+            return Err(HaystackError::not_found(format!("watch not found: {wid}")));
         }
     } else {
         let graph_version = state.graph.version();
         state
             .watches
             .subscribe(&username, ids.clone(), graph_version)
-            .map_err(|e| HaystackError::bad_request(e))?
+            .map_err(HaystackError::bad_request)?
     };
 
     // Return current state of watched entities
@@ -154,7 +149,7 @@ pub async fn handle_poll(
         .ok_or_else(|| HaystackError::not_found(format!("watch not found: {watch_id}")))?;
 
     if changed.is_empty() {
-        return Ok(respond_grid(&HGrid::new(), accept)?);
+        return respond_grid(&HGrid::new(), accept);
     }
 
     // Build grid from changed entities

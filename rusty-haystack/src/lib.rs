@@ -1,9 +1,9 @@
-mod convert;
-mod kinds;
-mod data;
 mod codecs;
+mod convert;
+mod data;
 mod filter;
 mod graph;
+mod kinds;
 mod ontology;
 
 use pyo3::prelude::*;

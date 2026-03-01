@@ -68,9 +68,7 @@ fn full_pipeline_load_build_query_validate_encode_decode() {
     assert_eq!(result.rows.len(), 2);
 
     // Comparison filter
-    let result = graph
-        .read("curVal > 70\u{00b0}F", 0)
-        .unwrap();
+    let result = graph.read("curVal > 70\u{00b0}F", 0).unwrap();
     assert_eq!(result.rows.len(), 1);
 
     // 5. Verify ref traversal
@@ -168,15 +166,11 @@ fn codec_round_trip_all_formats() {
         "application/json;v=3",
         "text/trio",
     ] {
-        let codec = codec_for(mime)
-            .unwrap_or_else(|| panic!("Codec not found for {mime}"));
+        let codec = codec_for(mime).unwrap_or_else(|| panic!("Codec not found for {mime}"));
         let encoded = codec
             .encode_grid(&grid)
             .unwrap_or_else(|e| panic!("Encode failed for {mime}: {e}"));
-        assert!(
-            !encoded.is_empty(),
-            "Encoded output empty for {mime}"
-        );
+        assert!(!encoded.is_empty(), "Encoded output empty for {mime}");
         let decoded = codec
             .decode_grid(&encoded)
             .unwrap_or_else(|e| panic!("Decode failed for {mime}: {e}"));
@@ -192,10 +186,7 @@ fn codec_round_trip_all_formats() {
         let id = row
             .id()
             .unwrap_or_else(|| panic!("Missing id after {mime} round-trip"));
-        assert_eq!(
-            id.val, "test-1",
-            "Id mismatch after {mime} round-trip"
-        );
+        assert_eq!(id.val, "test-1", "Id mismatch after {mime} round-trip");
 
         // Verify key string tag survived.
         assert_eq!(
@@ -243,7 +234,7 @@ fn filter_round_trip_parse_and_match() {
         ("dis == \"Alpha\"", vec![true, false, false]),
     ];
 
-    let entities = vec![&site, &equip, &point];
+    let entities = [&site, &equip, &point];
 
     for (expr, expected) in test_cases {
         let ast = filter::parse_filter(expr)
@@ -284,10 +275,7 @@ fn graph_crud_lifecycle() {
     assert_eq!(g.version(), 2);
     let entity = g.get("site-1").unwrap();
     assert_eq!(entity.get("dis"), Some(&Kind::Str("Updated".into())));
-    assert_eq!(
-        entity.get("geoCity"),
-        Some(&Kind::Str("Richmond".into()))
-    );
+    assert_eq!(entity.get("geoCity"), Some(&Kind::Str("Richmond".into())));
 
     // Remove
     let removed = g.remove("site-1").unwrap();
@@ -306,7 +294,7 @@ fn multi_codec_grid_fidelity() {
     let mut rows = Vec::new();
     for i in 0..5 {
         let mut d = HDict::new();
-        d.set("id", Kind::Ref(HRef::from_val(&format!("r-{i}"))));
+        d.set("id", Kind::Ref(HRef::from_val(format!("r-{i}"))));
         d.set("dis", Kind::Str(format!("Row {i}")));
         d.set(
             "val",

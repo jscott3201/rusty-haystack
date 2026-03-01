@@ -1,6 +1,6 @@
 //! Library and spec management endpoints.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
@@ -15,10 +15,16 @@ pub async fn handle_specs(
     body: String,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, HaystackError> {
-    let content_type = req.headers().get("Content-Type")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
-    let accept = req.headers().get("Accept")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_type = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept = req
+        .headers()
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let ns = state.namespace.read();
 
@@ -44,24 +50,33 @@ pub async fn handle_specs(
         HCol::new("abstract"),
     ];
 
-    let mut rows: Vec<HDict> = specs.iter().map(|spec| {
-        let mut row = HDict::new();
-        row.set("qname", Kind::Str(spec.qname.clone()));
-        row.set("name", Kind::Str(spec.name.clone()));
-        row.set("lib", Kind::Str(spec.lib.clone()));
-        if let Some(ref base) = spec.base {
-            row.set("base", Kind::Str(base.clone()));
-        }
-        row.set("doc", Kind::Str(spec.doc.clone()));
-        if spec.is_abstract {
-            row.set("abstract", Kind::Marker);
-        }
-        row
-    }).collect();
+    let mut rows: Vec<HDict> = specs
+        .iter()
+        .map(|spec| {
+            let mut row = HDict::new();
+            row.set("qname", Kind::Str(spec.qname.clone()));
+            row.set("name", Kind::Str(spec.name.clone()));
+            row.set("lib", Kind::Str(spec.lib.clone()));
+            if let Some(ref base) = spec.base {
+                row.set("base", Kind::Str(base.clone()));
+            }
+            row.set("doc", Kind::Str(spec.doc.clone()));
+            if spec.is_abstract {
+                row.set("abstract", Kind::Marker);
+            }
+            row
+        })
+        .collect();
 
     rows.sort_by(|a, b| {
-        let a_name = match a.get("qname") { Some(Kind::Str(s)) => s.as_str(), _ => "" };
-        let b_name = match b.get("qname") { Some(Kind::Str(s)) => s.as_str(), _ => "" };
+        let a_name = match a.get("qname") {
+            Some(Kind::Str(s)) => s.as_str(),
+            _ => "",
+        };
+        let b_name = match b.get("qname") {
+            Some(Kind::Str(s)) => s.as_str(),
+            _ => "",
+        };
         a_name.cmp(b_name)
     });
 
@@ -77,14 +92,21 @@ pub async fn handle_spec(
     body: String,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, HaystackError> {
-    let content_type = req.headers().get("Content-Type")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
-    let accept = req.headers().get("Accept")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_type = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept = req
+        .headers()
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("decode error: {e}")))?;
-    let row = grid.row(0)
+    let row = grid
+        .row(0)
         .ok_or_else(|| HaystackError::bad_request("request grid has no rows"))?;
     let qname = match row.get("qname") {
         Some(Kind::Str(s)) => s.clone(),
@@ -92,7 +114,8 @@ pub async fn handle_spec(
     };
 
     let ns = state.namespace.read();
-    let spec = ns.get_spec(&qname)
+    let spec = ns
+        .get_spec(&qname)
         .ok_or_else(|| HaystackError::bad_request(format!("spec '{}' not found", qname)))?;
 
     let cols = vec![
@@ -132,14 +155,21 @@ pub async fn handle_load_lib(
     body: String,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, HaystackError> {
-    let content_type = req.headers().get("Content-Type")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
-    let accept = req.headers().get("Accept")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_type = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept = req
+        .headers()
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("decode error: {e}")))?;
-    let row = grid.row(0)
+    let row = grid
+        .row(0)
         .ok_or_else(|| HaystackError::bad_request("request grid has no rows"))?;
     let name = match row.get("name") {
         Some(Kind::Str(s)) => s.clone(),
@@ -151,7 +181,8 @@ pub async fn handle_load_lib(
     };
 
     let mut ns = state.namespace.write();
-    let qnames = ns.load_xeto_str(&source, &name)
+    let qnames = ns
+        .load_xeto_str(&source, &name)
         .map_err(|e| HaystackError::bad_request(format!("load error: {e}")))?;
 
     let cols = vec![HCol::new("loaded"), HCol::new("specs")];
@@ -170,14 +201,21 @@ pub async fn handle_unload_lib(
     body: String,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, HaystackError> {
-    let content_type = req.headers().get("Content-Type")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
-    let accept = req.headers().get("Accept")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_type = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept = req
+        .headers()
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("decode error: {e}")))?;
-    let row = grid.row(0)
+    let row = grid
+        .row(0)
         .ok_or_else(|| HaystackError::bad_request("request grid has no rows"))?;
     let name = match row.get("name") {
         Some(Kind::Str(s)) => s.clone(),
@@ -185,8 +223,7 @@ pub async fn handle_unload_lib(
     };
 
     let mut ns = state.namespace.write();
-    ns.unload_lib(&name)
-        .map_err(|e| HaystackError::bad_request(e))?;
+    ns.unload_lib(&name).map_err(HaystackError::bad_request)?;
 
     let cols = vec![HCol::new("unloaded")];
     let mut result = HDict::new();
@@ -203,14 +240,21 @@ pub async fn handle_export_lib(
     body: String,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, HaystackError> {
-    let content_type = req.headers().get("Content-Type")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
-    let accept = req.headers().get("Accept")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_type = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept = req
+        .headers()
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("decode error: {e}")))?;
-    let row = grid.row(0)
+    let row = grid
+        .row(0)
         .ok_or_else(|| HaystackError::bad_request("request grid has no rows"))?;
     let name = match row.get("name") {
         Some(Kind::Str(s)) => s.clone(),
@@ -218,8 +262,9 @@ pub async fn handle_export_lib(
     };
 
     let ns = state.namespace.read();
-    let xeto_text = ns.export_lib_xeto(&name)
-        .map_err(|e| HaystackError::bad_request(e))?;
+    let xeto_text = ns
+        .export_lib_xeto(&name)
+        .map_err(HaystackError::bad_request)?;
 
     let cols = vec![HCol::new("name"), HCol::new("source")];
     let mut result = HDict::new();
@@ -237,10 +282,16 @@ pub async fn handle_validate(
     body: String,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, HaystackError> {
-    let content_type = req.headers().get("Content-Type")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
-    let accept = req.headers().get("Accept")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let content_type = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept = req
+        .headers()
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("decode error: {e}")))?;

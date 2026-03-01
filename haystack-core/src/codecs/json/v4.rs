@@ -1,7 +1,7 @@
 // JSON v4 codec — application/json with `_kind` discriminator.
 
-use crate::codecs::{Codec, CodecError};
 use crate::codecs::shared;
+use crate::codecs::{Codec, CodecError};
 use crate::data::{HCol, HDict, HGrid};
 use crate::kinds::*;
 use chrono::{NaiveDate, NaiveTime, Timelike};
@@ -23,8 +23,10 @@ impl Codec for Json4Codec {
     }
 
     fn decode_grid(&self, input: &str) -> Result<HGrid, CodecError> {
-        let val: Value = serde_json::from_str(input)
-            .map_err(|e| CodecError::Parse { pos: 0, message: e.to_string() })?;
+        let val: Value = serde_json::from_str(input).map_err(|e| CodecError::Parse {
+            pos: 0,
+            message: e.to_string(),
+        })?;
         decode_grid_value(&val)
     }
 
@@ -34,8 +36,10 @@ impl Codec for Json4Codec {
     }
 
     fn decode_scalar(&self, input: &str) -> Result<Kind, CodecError> {
-        let val: Value = serde_json::from_str(input)
-            .map_err(|e| CodecError::Parse { pos: 0, message: e.to_string() })?;
+        let val: Value = serde_json::from_str(input).map_err(|e| CodecError::Parse {
+            pos: 0,
+            message: e.to_string(),
+        })?;
         decode_kind(&val)
     }
 }
@@ -60,7 +64,10 @@ pub fn encode_kind(val: &Kind) -> Result<Value, CodecError> {
             m.insert("val".into(), Value::String(s.val().to_string()));
         })),
         Kind::Date(d) => Ok(kind_obj("date", |m| {
-            m.insert("val".into(), Value::String(d.format("%Y-%m-%d").to_string()));
+            m.insert(
+                "val".into(),
+                Value::String(d.format("%Y-%m-%d").to_string()),
+            );
         })),
         Kind::Time(t) => Ok(kind_obj("time", |m| {
             m.insert("val".into(), Value::String(encode_time_str(t)));
@@ -163,21 +170,23 @@ fn encode_grid_value(grid: &HGrid) -> Result<Map<String, Value>, CodecError> {
     }
 
     // cols
-    let cols: Result<Vec<Value>, CodecError> = grid.cols.iter().map(|col| {
-        let mut cm = Map::new();
-        cm.insert("name".into(), Value::String(col.name.clone()));
-        if !col.meta.is_empty() {
-            let meta_val = encode_dict(&col.meta)?;
-            cm.insert("meta".into(), meta_val);
-        }
-        Ok(Value::Object(cm))
-    }).collect();
+    let cols: Result<Vec<Value>, CodecError> = grid
+        .cols
+        .iter()
+        .map(|col| {
+            let mut cm = Map::new();
+            cm.insert("name".into(), Value::String(col.name.clone()));
+            if !col.meta.is_empty() {
+                let meta_val = encode_dict(&col.meta)?;
+                cm.insert("meta".into(), meta_val);
+            }
+            Ok(Value::Object(cm))
+        })
+        .collect();
     m.insert("cols".into(), Value::Array(cols?));
 
     // rows
-    let rows: Result<Vec<Value>, CodecError> = grid.rows.iter().map(|row| {
-        encode_dict(row)
-    }).collect();
+    let rows: Result<Vec<Value>, CodecError> = grid.rows.iter().map(encode_dict).collect();
     m.insert("rows".into(), Value::Array(rows?));
 
     Ok(m)
@@ -252,8 +261,9 @@ fn decode_typed(kind: &str, m: &Map<String, Value>) -> Result<Kind, CodecError> 
         }
         "date" => {
             let val = get_str(m, "val")?;
-            let d = NaiveDate::parse_from_str(&val, "%Y-%m-%d").map_err(|e| {
-                CodecError::Parse { pos: 0, message: format!("invalid date: {e}") }
+            let d = NaiveDate::parse_from_str(&val, "%Y-%m-%d").map_err(|e| CodecError::Parse {
+                pos: 0,
+                message: format!("invalid date: {e}"),
             })?;
             Ok(Kind::Date(d))
         }
@@ -300,10 +310,12 @@ fn decode_number(m: &Map<String, Value>) -> Result<Kind, CodecError> {
                 message: format!("invalid number string: {e}"),
             })?,
         },
-        _ => return Err(CodecError::Parse {
-            pos: 0,
-            message: "number 'val' must be a number or string".into(),
-        }),
+        _ => {
+            return Err(CodecError::Parse {
+                pos: 0,
+                message: "number 'val' must be a number or string".into(),
+            });
+        }
     };
     let unit = match m.get("unit") {
         Some(Value::String(u)) => Some(u.clone()),
@@ -352,10 +364,12 @@ fn decode_coord(m: &Map<String, Value>) -> Result<Kind, CodecError> {
 pub fn decode_grid_value(val: &Value) -> Result<HGrid, CodecError> {
     let m = match val {
         Value::Object(m) => m,
-        _ => return Err(CodecError::Parse {
-            pos: 0,
-            message: "grid must be a JSON object".into(),
-        }),
+        _ => {
+            return Err(CodecError::Parse {
+                pos: 0,
+                message: "grid must be a JSON object".into(),
+            });
+        }
     };
 
     // meta
@@ -774,7 +788,10 @@ mod tests {
         let mut d = HDict::new();
         d.set("site", Kind::Marker);
         d.set("dis", Kind::Str("Main".into()));
-        d.set("area", Kind::Number(Number::new(4500.0, Some("ft\u{00B2}".into()))));
+        d.set(
+            "area",
+            Kind::Number(Number::new(4500.0, Some("ft\u{00B2}".into()))),
+        );
         let k = Kind::Dict(Box::new(d));
         assert_eq!(roundtrip_scalar(k.clone()), k);
     }
@@ -809,10 +826,7 @@ mod tests {
     fn grid_with_data_roundtrip() {
         let codec = Json4Codec;
 
-        let cols = vec![
-            HCol::new("dis"),
-            HCol::new("area"),
-        ];
+        let cols = vec![HCol::new("dis"), HCol::new("area")];
         let mut row1 = HDict::new();
         row1.set("dis", Kind::Str("Site One".into()));
         row1.set("area", Kind::Number(Number::unitless(4500.0)));
@@ -863,20 +877,14 @@ mod tests {
         let mut col_meta = HDict::new();
         col_meta.set("unit", Kind::Str("kW".into()));
 
-        let cols = vec![
-            HCol::new("name"),
-            HCol::with_meta("power", col_meta),
-        ];
+        let cols = vec![HCol::new("name"), HCol::with_meta("power", col_meta)];
         let g = HGrid::from_parts(HDict::new(), cols, vec![]);
         let encoded = codec.encode_grid(&g).unwrap();
         let decoded = codec.decode_grid(&encoded).unwrap();
 
         assert_eq!(decoded.num_cols(), 2);
         let power_col = decoded.col("power").unwrap();
-        assert_eq!(
-            power_col.meta.get("unit"),
-            Some(&Kind::Str("kW".into()))
-        );
+        assert_eq!(power_col.meta.get("unit"), Some(&Kind::Str("kW".into())));
     }
 
     #[test]
@@ -969,7 +977,10 @@ mod tests {
     #[test]
     fn nested_dict_with_typed_values() {
         let mut inner = HDict::new();
-        inner.set("temp", Kind::Number(Number::new(72.5, Some("\u{00B0}F".into()))));
+        inner.set(
+            "temp",
+            Kind::Number(Number::new(72.5, Some("\u{00B0}F".into()))),
+        );
         inner.set("site", Kind::Ref(HRef::from_val("s1")));
         let k = Kind::Dict(Box::new(inner));
         assert_eq!(roundtrip_scalar(k.clone()), k);

@@ -48,11 +48,7 @@ pub enum FilterNode {
     /// Tag absence check: the path does not resolve to a value.
     Missing(Path),
     /// Comparison: resolve path and compare with a literal value.
-    Cmp {
-        path: Path,
-        op: CmpOp,
-        val: Kind,
-    },
+    Cmp { path: Path, op: CmpOp, val: Kind },
     /// Logical AND of two filters (short-circuit).
     And(Box<FilterNode>, Box<FilterNode>),
     /// Logical OR of two filters (short-circuit).

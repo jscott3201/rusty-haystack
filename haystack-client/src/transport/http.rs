@@ -1,10 +1,10 @@
 use reqwest::Client;
 
+use crate::error::ClientError;
+use crate::transport::Transport;
 use haystack_core::codecs::codec_for;
 use haystack_core::data::HGrid;
 use haystack_core::kinds::Kind;
-use crate::error::ClientError;
-use crate::transport::Transport;
 
 /// Operations that use GET (noSideEffects).
 const GET_OPS: &[&str] = &["about", "ops", "formats"];
@@ -55,7 +55,10 @@ impl Transport for HttpTransport {
             // GET request for side-effect-free ops
             self.client
                 .get(&url)
-                .header("Authorization", format!("BEARER authToken={}", self.auth_token))
+                .header(
+                    "Authorization",
+                    format!("BEARER authToken={}", self.auth_token),
+                )
                 .header("Accept", codec.mime_type())
                 .send()
                 .await
@@ -68,7 +71,10 @@ impl Transport for HttpTransport {
 
             self.client
                 .post(&url)
-                .header("Authorization", format!("BEARER authToken={}", self.auth_token))
+                .header(
+                    "Authorization",
+                    format!("BEARER authToken={}", self.auth_token),
+                )
                 .header("Content-Type", codec.mime_type())
                 .header("Accept", codec.mime_type())
                 .body(body)
@@ -100,7 +106,13 @@ impl Transport for HttpTransport {
             let dis = grid
                 .meta
                 .get("dis")
-                .and_then(|k| if let Kind::Str(s) = k { Some(s.as_str()) } else { None })
+                .and_then(|k| {
+                    if let Kind::Str(s) = k {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("unknown server error");
             return Err(ClientError::ServerError(dis.to_string()));
         }

@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use crate::kinds::{Kind, Number};
 
+use super::XetoError;
 use super::ast::{LibPragma, SlotDef, SpecDef, XetoFile};
 use super::lexer::{TokenType, XetoLexer};
-use super::XetoError;
 
 /// Parse Xeto source text into an AST.
 pub fn parse_xeto(source: &str) -> Result<XetoFile, XetoError> {
@@ -168,18 +168,16 @@ impl Parser {
         let depends = match meta.get("depends") {
             Some(Kind::List(items)) => items
                 .iter()
-                .filter_map(|k| {
-                    match k {
-                        Kind::Str(s) => Some(s.clone()),
-                        Kind::Dict(d) => {
-                            if let Some(Kind::Str(lib_name)) = d.get("lib") {
-                                Some(lib_name.clone())
-                            } else {
-                                None
-                            }
+                .filter_map(|k| match k {
+                    Kind::Str(s) => Some(s.clone()),
+                    Kind::Dict(d) => {
+                        if let Some(Kind::Str(lib_name)) = d.get("lib") {
+                            Some(lib_name.clone())
+                        } else {
+                            None
                         }
-                        _ => None,
                     }
+                    _ => None,
                 })
                 .collect(),
             Some(Kind::Dict(d)) => {
@@ -475,7 +473,8 @@ impl Parser {
                 // Check for parameterized type: Ident<...>
                 if *self.peek_type() == TokenType::LAngle {
                     let inner_meta = self.parse_meta()?;
-                    let parts: Vec<String> = inner_meta.iter()
+                    let parts: Vec<String> = inner_meta
+                        .iter()
                         .map(|(k, v)| format!("{}:{}", k, v))
                         .collect();
                     Ok(Kind::Str(format!("{}<{}>", full_name, parts.join(","))))
@@ -488,13 +487,16 @@ impl Parser {
                 self.advance(); // consume {
                 self.skip_newlines();
                 let mut items: Vec<Kind> = Vec::new();
-                while *self.peek_type() != TokenType::RBrace && *self.peek_type() != TokenType::Eof {
+                while *self.peek_type() != TokenType::RBrace && *self.peek_type() != TokenType::Eof
+                {
                     if *self.peek_type() == TokenType::LBrace {
                         // Nested dict: { key: val, ... }
                         self.advance(); // consume inner {
                         self.skip_newlines();
                         let mut dict = crate::data::HDict::new();
-                        while *self.peek_type() != TokenType::RBrace && *self.peek_type() != TokenType::Eof {
+                        while *self.peek_type() != TokenType::RBrace
+                            && *self.peek_type() != TokenType::Eof
+                        {
                             let key = self.expect(TokenType::Ident)?.val.clone();
                             self.expect(TokenType::Colon)?;
                             self.skip_newlines();
@@ -698,10 +700,8 @@ mod tests {
 
     #[test]
     fn parse_query_slots() {
-        let file = parse_xeto(
-            "Ahu : Equip {\n  points : Query<of:\"Point\", via:\"equipRef\">\n}",
-        )
-        .unwrap();
+        let file = parse_xeto("Ahu : Equip {\n  points : Query<of:\"Point\", via:\"equipRef\">\n}")
+            .unwrap();
         let slot = &file.specs[0].slots[0];
         assert_eq!(slot.name, "points");
         assert!(slot.is_query);
@@ -800,10 +800,7 @@ Foo : Bar
         let src = r#"Foo : Bar <doc: "A foo", maxVal: 100>"#;
         let file = parse_xeto(src).unwrap();
         let spec = &file.specs[0];
-        assert_eq!(
-            spec.meta.get("doc"),
-            Some(&Kind::Str("A foo".to_string()))
-        );
+        assert_eq!(spec.meta.get("doc"), Some(&Kind::Str("A foo".to_string())));
         assert_eq!(
             spec.meta.get("maxVal"),
             Some(&Kind::Number(Number::unitless(100.0)))

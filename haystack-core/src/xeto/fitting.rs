@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::data::HDict;
 use crate::kinds::{HRef, Kind};
-use crate::ontology::validation::FitIssue;
 use crate::ontology::DefNamespace;
+use crate::ontology::validation::FitIssue;
 
 use super::spec::Spec;
 
@@ -22,7 +22,12 @@ pub type EntityResolver = dyn Fn(&HRef) -> Option<HDict>;
 ///
 /// If `spec_qname` is not found in the namespace, this delegates to
 /// `DefNamespace::fits` for traditional def-based fitting.
-pub fn fits(entity: &HDict, spec_qname: &str, ns: &mut DefNamespace, resolver: Option<&EntityResolver>) -> bool {
+pub fn fits(
+    entity: &HDict,
+    spec_qname: &str,
+    ns: &mut DefNamespace,
+    resolver: Option<&EntityResolver>,
+) -> bool {
     fits_explain(entity, spec_qname, ns, resolver).is_empty()
 }
 
@@ -44,10 +49,7 @@ pub fn fits_explain(
         None => {
             // Fall back to plain def-based fitting
             // Strip any lib:: prefix to get bare def name
-            let bare_name = spec_qname
-                .split("::")
-                .last()
-                .unwrap_or(spec_qname);
+            let bare_name = spec_qname.split("::").last().unwrap_or(spec_qname);
             ns.fits_explain(entity, bare_name)
         }
     }
@@ -251,10 +253,7 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "unitless".into(),
-                    detail: format!(
-                        "expected no unit, got '{}'",
-                        num.unit.as_ref().unwrap()
-                    ),
+                    detail: format!("expected no unit, got '{}'", num.unit.as_ref().unwrap()),
                 });
             }
             // unit constraint
@@ -264,20 +263,14 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
                         issues.push(FitIssue::ConstraintViolation {
                             tag: slot.name.clone(),
                             constraint: "unit".into(),
-                            detail: format!(
-                                "expected unit '{}', got '{}'",
-                                expected_unit, u
-                            ),
+                            detail: format!("expected unit '{}', got '{}'", expected_unit, u),
                         });
                     }
                     None => {
                         issues.push(FitIssue::ConstraintViolation {
                             tag: slot.name.clone(),
                             constraint: "unit".into(),
-                            detail: format!(
-                                "expected unit '{}', got unitless",
-                                expected_unit
-                            ),
+                            detail: format!("expected unit '{}', got unitless", expected_unit),
                         });
                     }
                     _ => {}
@@ -319,10 +312,7 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
                             issues.push(FitIssue::ConstraintViolation {
                                 tag: slot.name.clone(),
                                 constraint: "pattern".into(),
-                                detail: format!(
-                                    "'{}' does not match pattern '{}'",
-                                    s, pattern
-                                ),
+                                detail: format!("'{}' does not match pattern '{}'", s, pattern),
                             });
                         }
                     }
@@ -353,11 +343,7 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
                     issues.push(FitIssue::ConstraintViolation {
                         tag: slot.name.clone(),
                         constraint: "maxSize".into(),
-                        detail: format!(
-                            "list length {} > {}",
-                            items.len(),
-                            max.val
-                        ),
+                        detail: format!("list length {} > {}", items.len(), max.val),
                     });
                 }
             }
@@ -377,20 +363,26 @@ fn check_query_slots(
             continue;
         }
         // Extract "of" type and "via" path from slot meta
-        let of_type = slot
-            .meta
-            .get("of")
-            .and_then(|v| if let Kind::Str(s) = v { Some(s.as_str()) } else { None });
+        let of_type = slot.meta.get("of").and_then(|v| {
+            if let Kind::Str(s) = v {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        });
 
-        let via_path = slot
-            .meta
-            .get("via")
-            .and_then(|v| if let Kind::Str(s) = v { Some(s.as_str()) } else { None });
+        let via_path = slot.meta.get("via").and_then(|v| {
+            if let Kind::Str(s) = v {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        });
 
         if let (Some(_of_type), Some(via)) = (of_type, via_path) {
             // Parse via path: "equipRef+" means follow equipRef transitively
-            let (ref_tag, transitive) = if via.ends_with('+') {
-                (&via[..via.len() - 1], true)
+            let (ref_tag, transitive) = if let Some(stripped) = via.strip_suffix('+') {
+                (stripped, true)
             } else {
                 (via, false)
             };
@@ -561,9 +553,9 @@ depends:[^lib:ph]
         let issues = fits_explain(&entity, "ahu", &mut ns, None);
         assert!(!issues.is_empty());
 
-        let has_equip_issue = issues.iter().any(|i| {
-            matches!(i, FitIssue::MissingMarker { tag, .. } if tag == "equip")
-        });
+        let has_equip_issue = issues
+            .iter()
+            .any(|i| matches!(i, FitIssue::MissingMarker { tag, .. } if tag == "equip"));
         assert!(has_equip_issue);
     }
 
@@ -713,10 +705,7 @@ depends:[^lib:ph]
             kind_type_name(&Kind::Number(Number::unitless(1.0))),
             "Number"
         );
-        assert_eq!(
-            kind_type_name(&Kind::Ref(HRef::from_val("x"))),
-            "Ref"
-        );
+        assert_eq!(kind_type_name(&Kind::Ref(HRef::from_val("x"))), "Ref");
     }
 
     #[test]
@@ -756,10 +745,13 @@ depends:[^lib:ph]
 
         let issues = explain_against_spec_with_specs(&entity, &child, &specs, None);
         assert!(!issues.is_empty());
-        let has_equip_issue = issues.iter().any(|i| {
-            matches!(i, FitIssue::MissingMarker { tag, .. } if tag == "equip")
-        });
-        assert!(has_equip_issue, "should report missing inherited 'equip' marker");
+        let has_equip_issue = issues
+            .iter()
+            .any(|i| matches!(i, FitIssue::MissingMarker { tag, .. } if tag == "equip"));
+        assert!(
+            has_equip_issue,
+            "should report missing inherited 'equip' marker"
+        );
 
         // Entity with both markers should pass
         let mut entity2 = HDict::new();
@@ -804,10 +796,7 @@ depends:[^lib:ph]
     #[test]
     fn constraint_max_val() {
         let mut meta = HashMap::new();
-        meta.insert(
-            "maxVal".to_string(),
-            Kind::Number(Number::unitless(100.0)),
-        );
+        meta.insert("maxVal".to_string(), Kind::Number(Number::unitless(100.0)));
         let spec = Spec {
             qname: "test::Pct".into(),
             name: "Pct".into(),
@@ -928,10 +917,7 @@ depends:[^lib:ph]
             }],
         };
         let mut entity = HDict::new();
-        entity.set(
-            "count",
-            Kind::Number(Number::new(5.0, Some("kg".into()))),
-        );
+        entity.set("count", Kind::Number(Number::new(5.0, Some("kg".into()))));
         let issues = explain_against_spec(&entity, &spec);
         assert!(issues.iter().any(|i| matches!(
             i,
@@ -942,10 +928,7 @@ depends:[^lib:ph]
     #[test]
     fn constraint_list_max_size() {
         let mut meta = HashMap::new();
-        meta.insert(
-            "maxSize".to_string(),
-            Kind::Number(Number::unitless(3.0)),
-        );
+        meta.insert("maxSize".to_string(), Kind::Number(Number::unitless(3.0)));
         let spec = Spec {
             qname: "test::Limited".into(),
             name: "Limited".into(),
@@ -977,10 +960,7 @@ depends:[^lib:ph]
     fn valid_constraints_produce_no_issues() {
         let mut meta = HashMap::new();
         meta.insert("minVal".to_string(), Kind::Number(Number::unitless(0.0)));
-        meta.insert(
-            "maxVal".to_string(),
-            Kind::Number(Number::unitless(100.0)),
-        );
+        meta.insert("maxVal".to_string(), Kind::Number(Number::unitless(100.0)));
         let spec = Spec {
             qname: "test::Pct".into(),
             name: "Pct".into(),
@@ -1014,12 +994,10 @@ depends:[^lib:ph]
         child.set("id", Kind::Ref(HRef::from_val("child")));
         child.set("equipRef", Kind::Ref(HRef::from_val("parent")));
 
-        let entities: HashMap<String, HDict> = vec![
-            ("parent".into(), parent),
-            ("child".into(), child.clone()),
-        ]
-        .into_iter()
-        .collect();
+        let entities: HashMap<String, HDict> =
+            vec![("parent".into(), parent), ("child".into(), child.clone())]
+                .into_iter()
+                .collect();
 
         let resolver = move |r: &HRef| -> Option<HDict> { entities.get(&r.val).cloned() };
 
@@ -1040,13 +1018,10 @@ depends:[^lib:ph]
         let mut c = HDict::new();
         c.set("id", Kind::Ref(HRef::from_val("c")));
 
-        let entities: HashMap<String, HDict> = vec![
-            ("a".into(), a.clone()),
-            ("b".into(), b),
-            ("c".into(), c),
-        ]
-        .into_iter()
-        .collect();
+        let entities: HashMap<String, HDict> =
+            vec![("a".into(), a.clone()), ("b".into(), b), ("c".into(), c)]
+                .into_iter()
+                .collect();
 
         let resolver = move |r: &HRef| -> Option<HDict> { entities.get(&r.val).cloned() };
 
@@ -1064,12 +1039,8 @@ depends:[^lib:ph]
         b.set("id", Kind::Ref(HRef::from_val("b")));
         b.set("equipRef", Kind::Ref(HRef::from_val("a")));
 
-        let entities: HashMap<String, HDict> = vec![
-            ("a".into(), a),
-            ("b".into(), b),
-        ]
-        .into_iter()
-        .collect();
+        let entities: HashMap<String, HDict> =
+            vec![("a".into(), a), ("b".into(), b)].into_iter().collect();
 
         let resolver = move |r: &HRef| -> Option<HDict> { entities.get(&r.val).cloned() };
 
@@ -1093,10 +1064,7 @@ depends:[^lib:ph]
     fn invalid_regex_pattern_produces_constraint_violation() {
         let mut meta = HashMap::new();
         // An invalid regex (unclosed group)
-        meta.insert(
-            "pattern".to_string(),
-            Kind::Str(r"(\d+".into()),
-        );
+        meta.insert("pattern".to_string(), Kind::Str(r"(\d+".into()));
         let spec = Spec {
             qname: "test::BadPattern".into(),
             name: "BadPattern".into(),

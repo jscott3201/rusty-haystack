@@ -338,10 +338,7 @@ mod tests {
         let dt = offset.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap();
         let hdt = HDateTime::new(dt, "UTC");
         let k = Kind::DateTime(hdt);
-        assert_eq!(
-            encode_scalar(&k).unwrap(),
-            "2024-06-15T12:00:00+00:00 UTC"
-        );
+        assert_eq!(encode_scalar(&k).unwrap(), "2024-06-15T12:00:00+00:00 UTC");
     }
 
     #[test]
@@ -439,10 +436,7 @@ mod tests {
     fn encode_grid_with_col_meta() {
         let mut col_meta = HDict::new();
         col_meta.set("unit", Kind::Str("kW".into()));
-        let cols = vec![
-            HCol::new("name"),
-            HCol::with_meta("power", col_meta),
-        ];
+        let cols = vec![HCol::new("name"), HCol::with_meta("power", col_meta)];
         let g = HGrid::from_parts(HDict::new(), cols, vec![]);
         let encoded = encode_grid(&g).unwrap();
         let lines: Vec<&str> = encoded.lines().collect();

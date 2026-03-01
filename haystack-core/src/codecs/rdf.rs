@@ -28,10 +28,8 @@ pub fn to_turtle(entities: &[HDict]) -> String {
         out.push_str(&format!("entity:{id}\n"));
 
         // Collect tags, excluding "id", sorted for deterministic output
-        let mut tags: Vec<(&str, &Kind)> = entity
-            .iter()
-            .filter(|(name, _)| *name != "id")
-            .collect();
+        let mut tags: Vec<(&str, &Kind)> =
+            entity.iter().filter(|(name, _)| *name != "id").collect();
         tags.sort_by_key(|(name, _)| *name);
 
         for (i, (name, val)) in tags.iter().enumerate() {
@@ -99,10 +97,8 @@ pub fn to_jsonld(entities: &[HDict]) -> String {
         );
 
         // Collect tags, excluding "id", sorted for deterministic output
-        let mut tags: Vec<(&str, &Kind)> = entity
-            .iter()
-            .filter(|(name, _)| *name != "id")
-            .collect();
+        let mut tags: Vec<(&str, &Kind)> =
+            entity.iter().filter(|(name, _)| *name != "id").collect();
         tags.sort_by_key(|(name, _)| *name);
 
         for (name, val) in &tags {
@@ -133,10 +129,7 @@ pub fn to_jsonld(entities: &[HDict]) -> String {
     );
 
     let mut doc = serde_json::Map::new();
-    doc.insert(
-        "@context".to_string(),
-        serde_json::Value::Object(context),
-    );
+    doc.insert("@context".to_string(), serde_json::Value::Object(context));
     doc.insert("@graph".to_string(), serde_json::Value::Array(graph));
 
     serde_json::to_string_pretty(&serde_json::Value::Object(doc))
@@ -161,10 +154,7 @@ fn kind_to_jsonld(val: &Kind) -> serde_json::Value {
         Kind::Str(s) => serde_json::Value::String(s.clone()),
         Kind::Number(n) => {
             let mut m = serde_json::Map::new();
-            m.insert(
-                "@value".to_string(),
-                serde_json::json!(n.val),
-            );
+            m.insert("@value".to_string(), serde_json::json!(n.val));
             m.insert(
                 "@type".to_string(),
                 serde_json::Value::String("xsd:double".to_string()),
@@ -241,7 +231,10 @@ mod tests {
     #[test]
     fn turtle_number_tags() {
         let mut entity = make_entity("demo-site");
-        entity.set("area", Kind::Number(Number::new(50000.0, Some("ft²".to_string()))));
+        entity.set(
+            "area",
+            Kind::Number(Number::new(50000.0, Some("ft²".to_string()))),
+        );
         entity.set("floors", Kind::Number(Number::unitless(3.0)));
 
         let result = to_turtle(&[entity]);

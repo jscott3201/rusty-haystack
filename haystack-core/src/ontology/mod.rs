@@ -1,19 +1,19 @@
 // Haystack 4 ontology layer -- defs, taxonomy, conjuncts, and validation.
 
+pub mod conjunct;
 pub mod def;
 pub mod lib;
-pub mod taxonomy;
-pub mod conjunct;
-pub mod trio_loader;
 pub mod namespace;
+pub mod taxonomy;
+pub mod trio_loader;
 pub mod validation;
 
+pub use conjunct::ConjunctIndex;
 pub use def::{Def, DefKind};
 pub use lib::Lib;
-pub use taxonomy::TaxonomyTree;
-pub use conjunct::ConjunctIndex;
-pub use trio_loader::load_trio;
 pub use namespace::{DefNamespace, LibSource};
+pub use taxonomy::TaxonomyTree;
+pub use trio_loader::load_trio;
 pub use validation::{FitIssue, ValidationIssue};
 
 use crate::codecs::CodecError;

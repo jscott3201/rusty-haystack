@@ -484,7 +484,10 @@ mod tests {
         d.set("id", Kind::Ref(HRef::from_val(id)));
         d.set("site", Kind::Marker);
         d.set("dis", Kind::Str(format!("Site {id}")));
-        d.set("area", Kind::Number(Number::new(4500.0, Some("ft\u{00b2}".into()))));
+        d.set(
+            "area",
+            Kind::Number(Number::new(4500.0, Some("ft\u{00b2}".into()))),
+        );
         d
     }
 
@@ -505,7 +508,10 @@ mod tests {
         d.set("temp", Kind::Marker);
         d.set("dis", Kind::Str(format!("Point {id}")));
         d.set("equipRef", Kind::Ref(HRef::from_val(equip_ref)));
-        d.set("curVal", Kind::Number(Number::new(72.5, Some("\u{00b0}F".into()))));
+        d.set(
+            "curVal",
+            Kind::Number(Number::new(72.5, Some("\u{00b0}F".into()))),
+        );
         d
     }
 
@@ -576,10 +582,7 @@ mod tests {
 
         let entity = g.get("site-1").unwrap();
         assert_eq!(entity.get("dis"), Some(&Kind::Str("Updated Site".into())));
-        assert_eq!(
-            entity.get("geoCity"),
-            Some(&Kind::Str("Richmond".into()))
-        );
+        assert_eq!(entity.get("geoCity"), Some(&Kind::Str("Richmond".into())));
         assert!(entity.has("site")); // unchanged
     }
 
@@ -911,7 +914,7 @@ mod tests {
         // Add more entities than MAX_CHANGELOG
         for i in 0..12_000 {
             let mut d = HDict::new();
-            d.set("id", Kind::Ref(HRef::from_val(&format!("e{i}"))));
+            d.set("id", Kind::Ref(HRef::from_val(format!("e{i}"))));
             d.set("dis", Kind::Str(format!("Entity {i}")));
             graph.add(d).unwrap();
         }

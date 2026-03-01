@@ -107,7 +107,7 @@ impl TagBitmapIndex {
         if max_id == 0 {
             return Vec::new();
         }
-        let total_words = (max_id + 63) / 64;
+        let total_words = max_id.div_ceil(64);
         let mut result = vec![0u64; total_words];
         for (i, word) in result.iter_mut().enumerate() {
             let src = bitmap.get(i).copied().unwrap_or(0);
@@ -124,12 +124,13 @@ impl TagBitmapIndex {
 
     /// Iterate over positions of set bits in a bitmap.
     pub fn iter_set_bits(bitmap: &[u64]) -> impl Iterator<Item = usize> + '_ {
-        bitmap.iter().enumerate().flat_map(|(word_idx, &word)| {
-            SetBitIter {
+        bitmap
+            .iter()
+            .enumerate()
+            .flat_map(|(word_idx, &word)| SetBitIter {
                 word,
                 base: word_idx * 64,
-            }
-        })
+            })
     }
 
     /// Count the number of set bits (population count).

@@ -3,6 +3,11 @@ name = "haystack-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "HTTP and WebSocket client for Project Haystack servers"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 haystack-core = { path = "../haystack-core" }

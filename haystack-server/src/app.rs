@@ -3,9 +3,9 @@
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::from_fn;
-use actix_web::{web, App, HttpMessage, HttpServer};
+use actix_web::{App, HttpMessage, HttpServer, web};
 
-use haystack_core::auth::{parse_auth_header, AuthHeader};
+use haystack_core::auth::{AuthHeader, parse_auth_header};
 use haystack_core::graph::SharedGraph;
 use haystack_core::ontology::DefNamespace;
 
@@ -92,11 +92,7 @@ impl HaystackServer {
             federation: self.federation,
         });
 
-        log::info!(
-            "Starting haystack-server on {}:{}",
-            self.host,
-            self.port
-        );
+        log::info!("Starting haystack-server on {}:{}", self.host, self.port);
 
         HttpServer::new(move || {
             App::new()
@@ -124,9 +120,13 @@ fn required_permission(path: &str) -> Option<&'static str> {
 
     // Write operations
     match path {
-        "/api/pointWrite" | "/api/hisWrite" | "/api/invokeAction"
-        | "/api/loadLib" | "/api/unloadLib"
-        | "/api/import" | "/api/federation/sync" => return Some("write"),
+        "/api/pointWrite"
+        | "/api/hisWrite"
+        | "/api/invokeAction"
+        | "/api/loadLib"
+        | "/api/unloadLib"
+        | "/api/import"
+        | "/api/federation/sync" => return Some("write"),
         _ => {}
     }
 
@@ -196,12 +196,10 @@ async fn auth_middleware(
                             // Check permission for the requested path
                             if let Some(required) = required_permission(&path) {
                                 if !AuthManager::check_permission(&auth_user, required) {
-                                    return Err(crate::error::HaystackError::forbidden(
-                                        format!(
-                                            "user '{}' lacks '{}' permission",
-                                            auth_user.username, required
-                                        ),
-                                    )
+                                    return Err(crate::error::HaystackError::forbidden(format!(
+                                        "user '{}' lacks '{}' permission",
+                                        auth_user.username, required
+                                    ))
                                     .into());
                                 }
                             }
@@ -210,31 +208,25 @@ async fn auth_middleware(
                             req.extensions_mut().insert(auth_user);
                             next.call(req).await
                         }
-                        None => {
-                            Err(crate::error::HaystackError::new(
-                                "invalid or expired auth token",
-                                actix_web::http::StatusCode::UNAUTHORIZED,
-                            )
-                            .into())
-                        }
+                        None => Err(crate::error::HaystackError::new(
+                            "invalid or expired auth token",
+                            actix_web::http::StatusCode::UNAUTHORIZED,
+                        )
+                        .into()),
                     }
                 }
-                _ => {
-                    Err(crate::error::HaystackError::new(
-                        "BEARER token required",
-                        actix_web::http::StatusCode::UNAUTHORIZED,
-                    )
-                    .into())
-                }
+                _ => Err(crate::error::HaystackError::new(
+                    "BEARER token required",
+                    actix_web::http::StatusCode::UNAUTHORIZED,
+                )
+                .into()),
             }
         }
-        None => {
-            Err(crate::error::HaystackError::new(
-                "Authorization header required",
-                actix_web::http::StatusCode::UNAUTHORIZED,
-            )
-            .into())
-        }
+        None => Err(crate::error::HaystackError::new(
+            "Authorization header required",
+            actix_web::http::StatusCode::UNAUTHORIZED,
+        )
+        .into()),
     }
 }
 
@@ -276,12 +268,12 @@ mod tests {
 
     // ---- Integration tests for the auth middleware ----
 
-    use actix_web::dev::Service;
-    use actix_web::test as actix_test;
-    use actix_web::{App, HttpResponse};
-    use actix_web::middleware::from_fn;
     use crate::auth::users::hash_password;
     use crate::ws::WatchManager;
+    use actix_web::dev::Service;
+    use actix_web::middleware::from_fn;
+    use actix_web::test as actix_test;
+    use actix_web::{App, HttpResponse};
 
     /// Build an AppState with auth enabled: one admin user and one read-only viewer.
     fn test_state() -> web::Data<AppState> {
@@ -311,7 +303,11 @@ permissions = ["read"]
     }
 
     /// Insert a token directly into the AuthManager and return it.
-    fn insert_token(state: &web::Data<AppState>, username: &str, permissions: Vec<String>) -> String {
+    fn insert_token(
+        state: &web::Data<AppState>,
+        username: &str,
+        permissions: Vec<String>,
+    ) -> String {
         let token = uuid::Uuid::new_v4().to_string();
         let user = crate::auth::AuthUser {
             username: username.to_string(),
@@ -356,7 +352,11 @@ permissions = ["read"]
     /// Helper: call the service and extract the status code, handling both
     /// success responses and middleware errors (which implement ResponseError).
     async fn call_status(
-        app: &impl Service<actix_http::Request, Response = ServiceResponse<impl MessageBody>, Error = actix_web::Error>,
+        app: &impl Service<
+            actix_http::Request,
+            Response = ServiceResponse<impl MessageBody>,
+            Error = actix_web::Error,
+        >,
         req: actix_http::Request,
     ) -> u16 {
         match app.call(req).await {
@@ -370,7 +370,9 @@ permissions = ["read"]
         let state = test_state();
         let app = actix_test::init_service(test_app(state)).await;
 
-        let req = actix_test::TestRequest::get().uri("/api/about").to_request();
+        let req = actix_test::TestRequest::get()
+            .uri("/api/about")
+            .to_request();
         assert_eq!(call_status(&app, req).await, 200);
     }
 
@@ -388,7 +390,9 @@ permissions = ["read"]
         let state = test_state();
         let app = actix_test::init_service(test_app(state)).await;
 
-        let req = actix_test::TestRequest::get().uri("/api/formats").to_request();
+        let req = actix_test::TestRequest::get()
+            .uri("/api/formats")
+            .to_request();
         assert_eq!(call_status(&app, req).await, 200);
     }
 
@@ -397,7 +401,9 @@ permissions = ["read"]
         let state = test_state();
         let app = actix_test::init_service(test_app(state)).await;
 
-        let req = actix_test::TestRequest::post().uri("/api/read").to_request();
+        let req = actix_test::TestRequest::post()
+            .uri("/api/read")
+            .to_request();
         assert_eq!(call_status(&app, req).await, 401);
     }
 
@@ -456,7 +462,11 @@ permissions = ["read"]
     #[actix_rt::test]
     async fn writer_can_write() {
         let state = test_state();
-        let token = insert_token(&state, "writer", vec!["read".to_string(), "write".to_string()]);
+        let token = insert_token(
+            &state,
+            "writer",
+            vec!["read".to_string(), "write".to_string()],
+        );
         let app = actix_test::init_service(test_app(state)).await;
 
         let req = actix_test::TestRequest::post()
@@ -495,7 +505,11 @@ permissions = ["read"]
     #[actix_rt::test]
     async fn writer_cannot_access_system() {
         let state = test_state();
-        let token = insert_token(&state, "writer", vec!["read".to_string(), "write".to_string()]);
+        let token = insert_token(
+            &state,
+            "writer",
+            vec!["read".to_string(), "write".to_string()],
+        );
         let app = actix_test::init_service(test_app(state)).await;
 
         let req = actix_test::TestRequest::post()

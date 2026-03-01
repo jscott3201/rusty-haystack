@@ -1,6 +1,6 @@
 //! Content negotiation — parse Accept header to pick codec, decode request body.
 
-use haystack_core::codecs::{codec_for, CodecError};
+use haystack_core::codecs::{CodecError, codec_for};
 use haystack_core::data::HGrid;
 
 /// Default MIME type when no Accept header is provided or no supported type is found.
@@ -75,20 +75,21 @@ pub fn parse_accept(accept_header: &str) -> &'static str {
 /// Falls back to `"text/zinc"` if the content type is not recognized.
 pub fn decode_request_grid(body: &str, content_type: &str) -> Result<HGrid, CodecError> {
     let mime = normalize_content_type(content_type);
-    let codec = codec_for(mime).unwrap_or_else(|| {
-        codec_for(DEFAULT_MIME).expect("default codec must exist")
-    });
+    let codec = codec_for(mime)
+        .unwrap_or_else(|| codec_for(DEFAULT_MIME).expect("default codec must exist"));
     codec.decode_grid(body)
 }
 
 /// Encode an HGrid for the response using the best Accept type.
 ///
 /// Returns `(body, content_type)`.
-pub fn encode_response_grid(grid: &HGrid, accept: &str) -> Result<(String, &'static str), CodecError> {
+pub fn encode_response_grid(
+    grid: &HGrid,
+    accept: &str,
+) -> Result<(String, &'static str), CodecError> {
     let mime = parse_accept(accept);
-    let codec = codec_for(mime).unwrap_or_else(|| {
-        codec_for(DEFAULT_MIME).expect("default codec must exist")
-    });
+    let codec = codec_for(mime)
+        .unwrap_or_else(|| codec_for(DEFAULT_MIME).expect("default codec must exist"));
     let body = codec.encode_grid(grid)?;
     // Return the static mime type string that matches what we used
     for supported in SUPPORTED {

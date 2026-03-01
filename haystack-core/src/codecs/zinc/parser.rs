@@ -145,8 +145,7 @@ impl<'a> ZincParser<'a> {
         }
 
         // Number, Date, Time, DateTime (starts with digit or '-' followed by digit)
-        let is_neg_num =
-            ch == '-' && self.peek_ahead(1).map_or(false, |c| c.is_ascii_digit());
+        let is_neg_num = ch == '-' && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit());
         if ch.is_ascii_digit() || is_neg_num {
             return self.read_number();
         }
@@ -199,7 +198,7 @@ impl<'a> ZincParser<'a> {
         self.src[self.pos..]
             .chars()
             .nth(offset)
-            .map_or(false, |c| c.is_alphanumeric())
+            .is_some_and(|c| c.is_alphanumeric())
     }
 
     // ── Number / Date / Time / DateTime ──
@@ -290,7 +289,13 @@ impl<'a> ZincParser<'a> {
         let start = self.pos;
         let mut first = true;
         while let Some(ch) = self.peek() {
-            if ch.is_alphabetic() || ch as u32 > 127 || ch == '_' || ch == '/' || ch == '%' || ch == '$' {
+            if ch.is_alphabetic()
+                || ch as u32 > 127
+                || ch == '_'
+                || ch == '/'
+                || ch == '%'
+                || ch == '$'
+            {
                 self.pos += ch.len_utf8();
                 first = false;
             } else if ch.is_ascii_digit() && !first {
@@ -359,7 +364,11 @@ impl<'a> ZincParser<'a> {
         self.skip_spaces();
         let tz_name = self.read_tz_name();
 
-        let tz = if tz_name.is_empty() { "UTC".to_string() } else { tz_name };
+        let tz = if tz_name.is_empty() {
+            "UTC".to_string()
+        } else {
+            tz_name
+        };
 
         Ok(Kind::DateTime(HDateTime::new(dt, tz)))
     }
@@ -1154,10 +1163,7 @@ mod tests {
 
     #[test]
     fn parse_string_unicode_escape() {
-        assert_eq!(
-            decode_scalar("\"\\u0041\"").unwrap(),
-            Kind::Str("A".into())
-        );
+        assert_eq!(decode_scalar("\"\\u0041\"").unwrap(), Kind::Str("A".into()));
     }
 
     #[test]
@@ -1171,10 +1177,7 @@ mod tests {
     #[test]
     fn roundtrip_string_escapes() {
         let s = "line1\nline2\ttab\\slash\"quote$dollar";
-        assert_eq!(
-            round_trip(&Kind::Str(s.into())),
-            Kind::Str(s.into())
-        );
+        assert_eq!(round_trip(&Kind::Str(s.into())), Kind::Str(s.into()));
     }
 
     // ── Refs ──
@@ -1269,10 +1272,7 @@ mod tests {
     #[test]
     fn parse_date() {
         let k = decode_scalar("2024-03-13").unwrap();
-        assert_eq!(
-            k,
-            Kind::Date(NaiveDate::from_ymd_opt(2024, 3, 13).unwrap())
-        );
+        assert_eq!(k, Kind::Date(NaiveDate::from_ymd_opt(2024, 3, 13).unwrap()));
     }
 
     #[test]
@@ -1286,10 +1286,7 @@ mod tests {
     #[test]
     fn parse_time() {
         let k = decode_scalar("08:12:05").unwrap();
-        assert_eq!(
-            k,
-            Kind::Time(NaiveTime::from_hms_opt(8, 12, 5).unwrap())
-        );
+        assert_eq!(k, Kind::Time(NaiveTime::from_hms_opt(8, 12, 5).unwrap()));
     }
 
     #[test]
@@ -1341,10 +1338,7 @@ mod tests {
         let k = decode_scalar("2024-06-15T12:00:00Z UTC").unwrap();
         if let Kind::DateTime(hdt) = &k {
             assert_eq!(hdt.tz_name, "UTC");
-            assert_eq!(
-                hdt.dt.offset(),
-                &FixedOffset::east_opt(0).unwrap()
-            );
+            assert_eq!(hdt.dt.offset(), &FixedOffset::east_opt(0).unwrap());
         } else {
             panic!("expected DateTime");
         }
@@ -1488,10 +1482,7 @@ mod tests {
         let k = decode_scalar("{dis:\"Main\" area:42}").unwrap();
         if let Kind::Dict(d) = &k {
             assert_eq!(d.get("dis"), Some(&Kind::Str("Main".into())));
-            assert_eq!(
-                d.get("area"),
-                Some(&Kind::Number(Number::unitless(42.0)))
-            );
+            assert_eq!(d.get("area"), Some(&Kind::Number(Number::unitless(42.0))));
         } else {
             panic!("expected Dict");
         }
@@ -1503,10 +1494,7 @@ mod tests {
         if let Kind::Dict(d) = &k {
             assert_eq!(d.get("site"), Some(&Kind::Marker));
             assert_eq!(d.get("dis"), Some(&Kind::Str("Main".into())));
-            assert_eq!(
-                d.get("area"),
-                Some(&Kind::Number(Number::unitless(42.0)))
-            );
+            assert_eq!(d.get("area"), Some(&Kind::Number(Number::unitless(42.0))));
         } else {
             panic!("expected Dict");
         }
@@ -1572,10 +1560,7 @@ mod tests {
         let zinc = "ver:\"3.0\" err dis:\"some error\"\nempty\n";
         let g = decode_grid(zinc).unwrap();
         assert!(g.is_err());
-        assert_eq!(
-            g.meta.get("dis"),
-            Some(&Kind::Str("some error".into()))
-        );
+        assert_eq!(g.meta.get("dis"), Some(&Kind::Str("some error".into())));
     }
 
     #[test]
@@ -1585,10 +1570,7 @@ mod tests {
         assert_eq!(g.num_cols(), 2);
         assert_eq!(g.cols[0].name, "name");
         assert_eq!(g.cols[1].name, "power");
-        assert_eq!(
-            g.cols[1].meta.get("unit"),
-            Some(&Kind::Str("kW".into()))
-        );
+        assert_eq!(g.cols[1].meta.get("unit"), Some(&Kind::Str("kW".into())));
     }
 
     #[test]
@@ -1597,18 +1579,12 @@ mod tests {
         let g = decode_grid(zinc).unwrap();
         assert_eq!(g.len(), 2);
         let r0 = g.row(0).unwrap();
-        assert_eq!(
-            r0.get("a"),
-            Some(&Kind::Number(Number::unitless(1.0)))
-        );
+        assert_eq!(r0.get("a"), Some(&Kind::Number(Number::unitless(1.0))));
         assert!(r0.missing("b"));
 
         let r1 = g.row(1).unwrap();
         assert!(r1.missing("a"));
-        assert_eq!(
-            r1.get("b"),
-            Some(&Kind::Number(Number::unitless(2.0)))
-        );
+        assert_eq!(r1.get("b"), Some(&Kind::Number(Number::unitless(2.0))));
     }
 
     #[test]
@@ -1675,10 +1651,7 @@ mod tests {
         let mut meta = HDict::new();
         meta.set("err", Kind::Marker);
         meta.set("dis", Kind::Str("Error occurred".into()));
-        meta.set(
-            "errTrace",
-            Kind::Str("stack trace here".into()),
-        );
+        meta.set("errTrace", Kind::Str("stack trace here".into()));
         let g = HGrid::from_parts(meta, vec![], vec![]);
 
         let encoded = crate::codecs::zinc::encode_grid(&g).unwrap();

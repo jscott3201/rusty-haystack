@@ -4,7 +4,7 @@ mod encoder;
 mod parser;
 
 pub use encoder::{encode_grid, encode_meta, encode_scalar, escape_str};
-pub use parser::{decode_grid, decode_scalar, ZincParser};
+pub use parser::{ZincParser, decode_grid, decode_scalar};
 
 use super::{Codec, CodecError};
 use crate::data::HGrid;

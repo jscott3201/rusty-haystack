@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
-use haystack_core::data::{HDict, HGrid, HCol};
-use haystack_core::kinds::{Kind, HRef, Number};
+use crate::error::ClientError;
 use crate::transport::Transport;
 use crate::transport::http::HttpTransport;
 use crate::transport::ws::WsTransport;
-use crate::error::ClientError;
+use haystack_core::data::{HCol, HDict, HGrid};
+use haystack_core::kinds::{HRef, Kind, Number};
 
 /// A client for communicating with a Haystack HTTP API server.
 ///
@@ -147,11 +147,7 @@ impl<T: Transport> HaystackClient<T> {
     /// Call the `watchSub` op to subscribe to a set of entity ids.
     ///
     /// `lease` is an optional lease duration (e.g. `"1min"`).
-    pub async fn watch_sub(
-        &self,
-        ids: &[&str],
-        lease: Option<&str>,
-    ) -> Result<HGrid, ClientError> {
+    pub async fn watch_sub(&self, ids: &[&str], lease: Option<&str>) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
             .map(|id| {
@@ -177,11 +173,7 @@ impl<T: Transport> HaystackClient<T> {
     }
 
     /// Call the `watchUnsub` op to unsubscribe from a watch.
-    pub async fn watch_unsub(
-        &self,
-        watch_id: &str,
-        ids: &[&str],
-    ) -> Result<HGrid, ClientError> {
+    pub async fn watch_unsub(&self, watch_id: &str, ids: &[&str]) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
             .map(|id| {
@@ -197,12 +189,7 @@ impl<T: Transport> HaystackClient<T> {
     }
 
     /// Call the `pointWrite` op to write a value to a writable point.
-    pub async fn point_write(
-        &self,
-        id: &str,
-        level: u8,
-        val: Kind,
-    ) -> Result<HGrid, ClientError> {
+    pub async fn point_write(&self, id: &str, level: u8, val: Kind) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("id", Kind::Ref(HRef::from_val(id)));
         row.set("level", Kind::Number(Number::unitless(level as f64)));
@@ -234,18 +221,10 @@ impl<T: Transport> HaystackClient<T> {
     /// Call the `hisWrite` op to write historical data for a point.
     ///
     /// `items` should be dicts with `ts` and `val` tags.
-    pub async fn his_write(
-        &self,
-        id: &str,
-        items: Vec<HDict>,
-    ) -> Result<HGrid, ClientError> {
+    pub async fn his_write(&self, id: &str, items: Vec<HDict>) -> Result<HGrid, ClientError> {
         let mut meta = HDict::new();
         meta.set("id", Kind::Ref(HRef::from_val(id)));
-        let grid = HGrid::from_parts(
-            meta,
-            vec![HCol::new("ts"), HCol::new("val")],
-            items,
-        );
+        let grid = HGrid::from_parts(meta, vec![HCol::new("ts"), HCol::new("val")], items);
         self.call("hisWrite", &grid).await
     }
 

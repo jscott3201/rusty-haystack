@@ -55,8 +55,8 @@ pub fn run_list(file: &str) {
         return;
     }
 
-    println!("{:<20} {}", "USERNAME", "PERMISSIONS");
-    println!("{:<20} {}", "--------", "-----------");
+    println!("{:<20} PERMISSIONS", "USERNAME");
+    println!("{:<20} -----------", "--------");
     let mut names: Vec<_> = config.users.keys().collect();
     names.sort();
     for name in names {

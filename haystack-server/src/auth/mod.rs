@@ -8,20 +8,19 @@ pub mod users;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
 use sha2::Sha256;
 use uuid::Uuid;
 
 use haystack_core::auth::{
-    derive_credentials, format_auth_info, format_www_authenticate, generate_nonce,
-    server_first_message, server_verify_final, ScramCredentials, ScramHandshake,
-    DEFAULT_ITERATIONS,
+    DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake, derive_credentials, format_auth_info,
+    format_www_authenticate, generate_nonce, server_first_message, server_verify_final,
 };
 
-use users::{load_users_from_str, load_users_from_toml, UserRecord};
+use users::{UserRecord, load_users_from_str, load_users_from_toml};
 
 /// An authenticated user with associated permissions.
 #[derive(Debug, Clone)]
@@ -131,7 +130,9 @@ impl AuthManager {
         // Lazy cleanup: remove expired handshakes before inserting.
         {
             let now = Instant::now();
-            self.handshakes.write().retain(|_, (_, created)| now.duration_since(*created) < HANDSHAKE_TTL);
+            self.handshakes
+                .write()
+                .retain(|_, (_, created)| now.duration_since(*created) < HANDSHAKE_TTL);
         }
 
         // Store handshake with a unique token and timestamp.

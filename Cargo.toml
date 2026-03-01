@@ -9,7 +9,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
+repository = "https://github.com/justinscott/rusty-haystack"
+homepage = "https://github.com/justinscott/rusty-haystack"
+keywords = ["haystack", "iot", "building-automation", "smart-buildings"]
+categories = ["encoding", "network-programming"]

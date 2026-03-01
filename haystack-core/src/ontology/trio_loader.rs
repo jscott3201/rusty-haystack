@@ -6,9 +6,9 @@ use crate::codecs::trio;
 use crate::data::HDict;
 use crate::kinds::Kind;
 
+use super::OntologyError;
 use super::def::Def;
 use super::lib::Lib;
-use super::OntologyError;
 
 /// Parse Trio text and extract defs grouped by library.
 ///
@@ -78,7 +78,7 @@ fn row_to_def(row: &HDict) -> Option<Def> {
     let tag_on = symbol_list(row, "tagOn");
 
     // Extract of
-    let of = row.get("of").and_then(|v| to_symbol_str(v));
+    let of = row.get("of").and_then(to_symbol_str);
 
     // Extract mandatory (presence of Marker)
     let mandatory = matches!(row.get("mandatory"), Some(Kind::Marker));

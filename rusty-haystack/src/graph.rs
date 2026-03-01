@@ -105,6 +105,10 @@ impl PyEntityGraph {
     }
 
     fn __repr__(&self) -> String {
-        format!("EntityGraph(len={}, version={})", self.inner.len(), self.inner.version())
+        format!(
+            "EntityGraph(len={}, version={})",
+            self.inner.len(),
+            self.inner.version()
+        )
     }
 }

@@ -1,11 +1,11 @@
 //! TOML-based user store for SCRAM authentication.
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use haystack_core::auth::{derive_credentials, ScramCredentials, DEFAULT_ITERATIONS};
+use haystack_core::auth::{DEFAULT_ITERATIONS, ScramCredentials, derive_credentials};
 
 /// A named role with a fixed set of permissions.
 #[derive(Debug, Clone)]
@@ -18,11 +18,7 @@ pub struct Role {
 pub fn admin_role() -> Role {
     Role {
         name: "admin".to_string(),
-        permissions: vec![
-            "read".to_string(),
-            "write".to_string(),
-            "admin".to_string(),
-        ],
+        permissions: vec!["read".to_string(), "write".to_string(), "admin".to_string()],
     }
 }
 
@@ -247,10 +243,7 @@ role = "viewer"
 
         let records = load_users_from_str(&toml_str).unwrap();
         assert_eq!(records.len(), 3);
-        assert_eq!(
-            records["alice"].permissions,
-            vec!["read", "write", "admin"]
-        );
+        assert_eq!(records["alice"].permissions, vec!["read", "write", "admin"]);
         assert_eq!(records["bob"].permissions, vec!["read", "write"]);
         assert_eq!(records["carol"].permissions, vec!["read"]);
     }

@@ -28,7 +28,7 @@ mod kind;
 pub use kind::Kind;
 
 mod units;
-pub use units::{unit_for, units_by_name, units_by_symbol, Unit};
+pub use units::{Unit, unit_for, units_by_name, units_by_symbol};
 
 mod tz;
 pub use tz::{tz_for, tz_map};

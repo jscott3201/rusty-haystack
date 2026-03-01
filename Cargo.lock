@@ -960,7 +960,7 @@ checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
 name = "haystack-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "haystack-client",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "haystack-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "futures-util",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "haystack-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "haystack-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "actix-http",
  "actix-rt",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "haystack-core",

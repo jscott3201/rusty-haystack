@@ -1,7 +1,7 @@
 // Python Kind type wrappers for Haystack scalar types.
 
-use pyo3::prelude::*;
 use pyo3::class::basic::CompareOp;
+use pyo3::prelude::*;
 use pyo3::types::{PyDateTime, PyTzInfo};
 use std::hash::{Hash, Hasher};
 
@@ -438,12 +438,8 @@ impl PyXStr {
 
     fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
         match op {
-            CompareOp::Eq => {
-                Ok(self.type_name == other.type_name && self.val == other.val)
-            }
-            CompareOp::Ne => {
-                Ok(self.type_name != other.type_name || self.val != other.val)
-            }
+            CompareOp::Eq => Ok(self.type_name == other.type_name && self.val == other.val),
+            CompareOp::Ne => Ok(self.type_name != other.type_name || self.val != other.val),
             _ => Ok(false),
         }
     }
@@ -546,9 +542,7 @@ impl PyHDateTime {
         let dt = offset
             .with_ymd_and_hms(year, month, day, hour, minute, second)
             .single()
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid datetime")
-            })?;
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid datetime"))?;
         Ok(Self {
             inner: kinds::HDateTime::new(dt, tz_name),
         })
@@ -611,9 +605,7 @@ impl PyHDateTime {
 
 impl PyHDateTime {
     pub fn from_core(dt: &kinds::HDateTime) -> Self {
-        Self {
-            inner: dt.clone(),
-        }
+        Self { inner: dt.clone() }
     }
 
     pub fn to_core(&self) -> kinds::HDateTime {

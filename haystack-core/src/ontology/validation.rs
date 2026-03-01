@@ -72,20 +72,51 @@ impl std::fmt::Display for FitIssue {
             FitIssue::MissingMarker { tag, spec } => {
                 write!(f, "missing mandatory marker '{tag}' for spec '{spec}'")
             }
-            FitIssue::WrongType { tag, expected, actual } => {
-                write!(f, "wrong type for '{tag}': expected {expected}, got {actual}")
+            FitIssue::WrongType {
+                tag,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "wrong type for '{tag}': expected {expected}, got {actual}"
+                )
             }
-            FitIssue::InvalidRef { tag, expected, actual } => {
-                write!(f, "invalid ref for '{tag}': expected {expected}, got {actual}")
+            FitIssue::InvalidRef {
+                tag,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "invalid ref for '{tag}': expected {expected}, got {actual}"
+                )
             }
             FitIssue::MissingChoice { tag, options } => {
-                write!(f, "missing choice for '{tag}': options are {}", options.join(", "))
+                write!(
+                    f,
+                    "missing choice for '{tag}': options are {}",
+                    options.join(", ")
+                )
             }
-            FitIssue::ConstraintViolation { tag, constraint, detail } => {
+            FitIssue::ConstraintViolation {
+                tag,
+                constraint,
+                detail,
+            } => {
                 write!(f, "constraint '{constraint}' violated on '{tag}': {detail}")
             }
-            FitIssue::InvalidChoice { tag, value, valid_options } => {
-                write!(f, "invalid choice for '{tag}': '{}' not in [{}]", value, valid_options.join(", "))
+            FitIssue::InvalidChoice {
+                tag,
+                value,
+                valid_options,
+            } => {
+                write!(
+                    f,
+                    "invalid choice for '{tag}': '{}' not in [{}]",
+                    value,
+                    valid_options.join(", ")
+                )
             }
         }
     }
@@ -93,7 +124,13 @@ impl std::fmt::Display for FitIssue {
 
 impl std::fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}] {}: {}", self.issue_type, self.entity.as_deref().unwrap_or("?"), self.detail)
+        write!(
+            f,
+            "[{}] {}: {}",
+            self.issue_type,
+            self.entity.as_deref().unwrap_or("?"),
+            self.detail
+        )
     }
 }
 
@@ -134,8 +171,7 @@ mod tests {
         let issue = ValidationIssue {
             entity: Some("site-1".to_string()),
             issue_type: "missing_marker".to_string(),
-            detail: "Entity claims 'ahu' but is missing mandatory marker 'equip'"
-                .to_string(),
+            detail: "Entity claims 'ahu' but is missing mandatory marker 'equip'".to_string(),
         };
         assert_eq!(issue.entity, Some("site-1".to_string()));
         assert_eq!(issue.issue_type, "missing_marker");

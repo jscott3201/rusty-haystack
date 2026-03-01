@@ -60,10 +60,7 @@ mod tests {
     #[test]
     fn register_and_decompose() {
         let mut idx = ConjunctIndex::new();
-        idx.register(
-            "hot-water",
-            vec!["hot".to_string(), "water".to_string()],
-        );
+        idx.register("hot-water", vec!["hot".to_string(), "water".to_string()]);
 
         let parts = idx.decompose("hot-water").unwrap();
         assert_eq!(parts, &["hot", "water"]);
@@ -72,10 +69,7 @@ mod tests {
     #[test]
     fn contains_check() {
         let mut idx = ConjunctIndex::new();
-        idx.register(
-            "hot-water",
-            vec!["hot".to_string(), "water".to_string()],
-        );
+        idx.register("hot-water", vec!["hot".to_string(), "water".to_string()]);
 
         assert!(idx.contains("hot-water"));
         assert!(!idx.contains("cold-water"));
@@ -93,10 +87,7 @@ mod tests {
         assert!(idx.is_empty());
         assert_eq!(idx.len(), 0);
 
-        idx.register(
-            "hot-water",
-            vec!["hot".to_string(), "water".to_string()],
-        );
+        idx.register("hot-water", vec!["hot".to_string(), "water".to_string()]);
         assert!(!idx.is_empty());
         assert_eq!(idx.len(), 1);
     }
@@ -106,11 +97,7 @@ mod tests {
         let mut idx = ConjunctIndex::new();
         idx.register(
             "ac-elec-meter",
-            vec![
-                "ac".to_string(),
-                "elec".to_string(),
-                "meter".to_string(),
-            ],
+            vec!["ac".to_string(), "elec".to_string(), "meter".to_string()],
         );
 
         let parts = idx.decompose("ac-elec-meter").unwrap();

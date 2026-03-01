@@ -83,7 +83,10 @@ mod tests {
         let mut row = HDict::new();
         row.set("dis", Kind::Str("Main Site".into()));
         row.set("site", Kind::Marker);
-        row.set("area", Kind::Number(Number::new(5000.0, Some("ft\u{00B2}".into()))));
+        row.set(
+            "area",
+            Kind::Number(Number::new(5000.0, Some("ft\u{00B2}".into()))),
+        );
         let g = HGrid::from_parts(HDict::new(), cols, vec![row]);
 
         let encoded = encode_grid(&g).unwrap();

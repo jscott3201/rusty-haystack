@@ -3,7 +3,7 @@
 //! All routes under `/api/system/` require the "admin" permission, enforced by
 //! the auth middleware in `app.rs`.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
@@ -116,16 +116,14 @@ pub async fn handle_restore(
         };
 
         if state.graph.contains(&ref_val) {
+            state.graph.update(&ref_val, row.clone()).map_err(|e| {
+                HaystackError::internal(format!("update failed for {ref_val}: {e}"))
+            })?;
+        } else {
             state
                 .graph
-                .update(&ref_val, row.clone())
-                .map_err(|e| {
-                    HaystackError::internal(format!("update failed for {ref_val}: {e}"))
-                })?;
-        } else {
-            state.graph.add(row.clone()).map_err(|e| {
-                HaystackError::internal(format!("add failed for {ref_val}: {e}"))
-            })?;
+                .add(row.clone())
+                .map_err(|e| HaystackError::internal(format!("add failed for {ref_val}: {e}")))?;
         }
 
         count += 1;
@@ -145,9 +143,9 @@ pub async fn handle_restore(
 
 #[cfg(test)]
 mod tests {
+    use actix_web::App;
     use actix_web::test as actix_test;
     use actix_web::web;
-    use actix_web::App;
 
     use haystack_core::codecs::codec_for;
     use haystack_core::data::{HCol, HDict, HGrid};
@@ -388,10 +386,7 @@ mod tests {
         let app = actix_test::init_service(
             App::new()
                 .app_data(state.clone())
-                .route(
-                    "/api/system/restore",
-                    web::post().to(super::handle_restore),
-                ),
+                .route("/api/system/restore", web::post().to(super::handle_restore)),
         )
         .await;
 
@@ -448,10 +443,7 @@ mod tests {
         let app = actix_test::init_service(
             App::new()
                 .app_data(state.clone())
-                .route(
-                    "/api/system/restore",
-                    web::post().to(super::handle_restore),
-                ),
+                .route("/api/system/restore", web::post().to(super::handle_restore)),
         )
         .await;
 
@@ -491,10 +483,7 @@ mod tests {
 
         // Verify it was updated
         let entity = state.graph.get("site-1").unwrap();
-        assert_eq!(
-            entity.get("dis"),
-            Some(&Kind::Str("Updated Site".into()))
-        );
+        assert_eq!(entity.get("dis"), Some(&Kind::Str("Updated Site".into())));
     }
 
     #[actix_web::test]
@@ -507,10 +496,7 @@ mod tests {
             App::new()
                 .app_data(state.clone())
                 .route("/api/system/backup", web::post().to(super::handle_backup))
-                .route(
-                    "/api/system/restore",
-                    web::post().to(super::handle_restore),
-                ),
+                .route("/api/system/restore", web::post().to(super::handle_restore)),
         )
         .await;
 
@@ -529,10 +515,7 @@ mod tests {
         let app2 = actix_test::init_service(
             App::new()
                 .app_data(state2.clone())
-                .route(
-                    "/api/system/restore",
-                    web::post().to(super::handle_restore),
-                ),
+                .route("/api/system/restore", web::post().to(super::handle_restore)),
         )
         .await;
 
@@ -559,10 +542,7 @@ mod tests {
         let app = actix_test::init_service(
             App::new()
                 .app_data(state.clone())
-                .route(
-                    "/api/system/restore",
-                    web::post().to(super::handle_restore),
-                ),
+                .route("/api/system/restore", web::post().to(super::handle_restore)),
         )
         .await;
 

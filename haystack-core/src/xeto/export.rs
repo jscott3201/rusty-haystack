@@ -259,13 +259,7 @@ mod tests {
     #[test]
     fn export_lib_with_pragma() {
         let spec = Spec::new("mylib::Thing", "mylib", "Thing");
-        let output = export_lib(
-            "mylib",
-            "2.0.0",
-            "My library",
-            &["sys".into()],
-            &[&spec],
-        );
+        let output = export_lib("mylib", "2.0.0", "My library", &["sys".into()], &[&spec]);
         assert!(output.contains("pragma: Lib"));
         assert!(output.contains("version: \"2.0.0\""));
         assert!(output.contains("doc: \"My library\""));
@@ -326,7 +320,10 @@ mod tests {
 
     #[test]
     fn format_meta_tag_escapes_strings() {
-        let result = format_meta_tag("doc", &Kind::Str("has \"quotes\" and \\backslash".to_string()));
+        let result = format_meta_tag(
+            "doc",
+            &Kind::Str("has \"quotes\" and \\backslash".to_string()),
+        );
         assert_eq!(result, r#"doc: "has \"quotes\" and \\backslash""#);
     }
 

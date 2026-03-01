@@ -12,7 +12,7 @@ pub fn run() {
         }
     };
 
-    println!("{:<20} {:<10} {}", "Name", "Version", "Defs");
+    println!("{:<20} {:<10} Defs", "Name", "Version");
     println!("{}", "-".repeat(50));
     let mut libs: Vec<_> = ns.libs().values().collect();
     libs.sort_by_key(|l| &l.name);

@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::filter;
@@ -9,7 +9,7 @@ use haystack_core::xeto;
 
 fn make_sample_entity(i: usize) -> HDict {
     let mut d = HDict::new();
-    d.set("id", Kind::Ref(HRef::from_val(&format!("p-{i}"))));
+    d.set("id", Kind::Ref(HRef::from_val(format!("p-{i}"))));
     d.set("dis", Kind::Str(format!("Point {i}")));
     d.set("site", Kind::Marker);
     d.set("equip", Kind::Marker);
@@ -51,11 +51,14 @@ fn make_mixed_type_grid() -> HGrid {
     let rows: Vec<HDict> = (0..100)
         .map(|i| {
             let mut d = HDict::new();
-            d.set("id", Kind::Ref(HRef::from_val(&format!("mixed-{i}"))));
+            d.set("id", Kind::Ref(HRef::from_val(format!("mixed-{i}"))));
             d.set("dis", Kind::Str(format!("Mixed row {i}")));
             d.set(
                 "temp",
-                Kind::Number(Number::new(68.0 + (i as f64) * 0.1, Some("\u{00b0}F".into()))),
+                Kind::Number(Number::new(
+                    68.0 + (i as f64) * 0.1,
+                    Some("\u{00b0}F".into()),
+                )),
             );
             d.set("active", Kind::Bool(i % 2 == 0));
             d.set("site", Kind::Marker);
@@ -172,7 +175,9 @@ fn filter_benchmarks(c: &mut Criterion) {
     });
 
     c.bench_function("filter_parse_complex", |b| {
-        b.iter(|| filter::parse_filter(black_box("site and equip and point and temp > 70\u{00b0}F")))
+        b.iter(|| {
+            filter::parse_filter(black_box("site and equip and point and temp > 70\u{00b0}F"))
+        })
     });
 
     let simple = filter::parse_filter("site").unwrap();
@@ -180,8 +185,7 @@ fn filter_benchmarks(c: &mut Criterion) {
         b.iter(|| filter::matches(black_box(&simple), black_box(&entity), None))
     });
 
-    let complex =
-        filter::parse_filter("site and equip and point and temp > 70\u{00b0}F").unwrap();
+    let complex = filter::parse_filter("site and equip and point and temp > 70\u{00b0}F").unwrap();
     c.bench_function("filter_eval_complex", |b| {
         b.iter(|| filter::matches(black_box(&complex), black_box(&entity), None))
     });
@@ -219,10 +223,7 @@ fn graph_benchmarks(c: &mut Criterion) {
             || {
                 counter += 1;
                 let mut d = HDict::new();
-                d.set(
-                    "id",
-                    Kind::Ref(HRef::from_val(&format!("bench-{counter}"))),
-                );
+                d.set("id", Kind::Ref(HRef::from_val(format!("bench-{counter}"))));
                 d.set("point", Kind::Marker);
                 d.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
                 d
@@ -329,10 +330,7 @@ fn graph_benchmarks(c: &mut Criterion) {
             handles.push(thread::spawn(move || {
                 for j in 0..10 {
                     let mut d = HDict::new();
-                    d.set(
-                        "id",
-                        Kind::Ref(HRef::from_val(&format!("w-{j}"))),
-                    );
+                    d.set("id", Kind::Ref(HRef::from_val(format!("w-{j}"))));
                     d.set("point", Kind::Marker);
                     d.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
                     let _ = writer.add(d);
@@ -350,7 +348,7 @@ fn ontology_benchmarks(c: &mut Criterion) {
     let ns = DefNamespace::load_standard().unwrap();
 
     c.bench_function("ontology_load_standard", |b| {
-        b.iter(|| DefNamespace::load_standard())
+        b.iter(DefNamespace::load_standard)
     });
 
     let mut entity = HDict::new();
@@ -387,14 +385,7 @@ fn xeto_benchmarks(c: &mut Criterion) {
 
     // Benchmark xeto::fitting::fits against "ahu" (resolved via DefNamespace)
     c.bench_function("xeto_fits_ahu", |b| {
-        b.iter(|| {
-            xeto::fitting::fits(
-                black_box(&ahu_entity),
-                black_box("ahu"),
-                &mut ns,
-                None,
-            )
-        })
+        b.iter(|| xeto::fitting::fits(black_box(&ahu_entity), black_box("ahu"), &mut ns, None))
     });
 
     // Benchmark fits with a missing marker (should fail fast)
@@ -433,23 +424,13 @@ fn xeto_benchmarks(c: &mut Criterion) {
     site_entity.set("dis", Kind::Str("Main Site".into()));
 
     c.bench_function("xeto_fits_site", |b| {
-        b.iter(|| {
-            xeto::fitting::fits(
-                black_box(&site_entity),
-                black_box("site"),
-                &mut ns,
-                None,
-            )
-        })
+        b.iter(|| xeto::fitting::fits(black_box(&site_entity), black_box("site"), &mut ns, None))
     });
 
     // Benchmark effective_slots on specs from the loaded namespace
     let specs_map = ns.specs_map().clone();
     // Find a spec with slots for effective_slots benchmarking
-    let spec_for_slots = specs_map
-        .values()
-        .find(|s| !s.slots.is_empty())
-        .cloned();
+    let spec_for_slots = specs_map.values().find(|s| !s.slots.is_empty()).cloned();
 
     if let Some(spec) = spec_for_slots {
         let spec_name = spec.qname.clone();

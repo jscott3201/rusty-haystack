@@ -1,6 +1,6 @@
 //! RDF export endpoints — Turtle and JSON-LD serialization of all entities.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 
 use crate::state::AppState;
 
@@ -14,9 +14,7 @@ pub async fn handle_turtle(state: web::Data<AppState>) -> HttpResponse {
             .unwrap_or_default()
     });
     let turtle = haystack_core::codecs::rdf::to_turtle(&entities);
-    HttpResponse::Ok()
-        .content_type("text/turtle")
-        .body(turtle)
+    HttpResponse::Ok().content_type("text/turtle").body(turtle)
 }
 
 /// GET /api/rdf/jsonld

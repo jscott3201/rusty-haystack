@@ -1,6 +1,6 @@
 //! The `export` and `import` ops — bulk data import/export.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::{Kind, Number};
@@ -72,10 +72,9 @@ pub async fn handle_import(
 
         if state.graph.contains(&ref_val) {
             // Update existing entity
-            state
-                .graph
-                .update(&ref_val, row.clone())
-                .map_err(|e| HaystackError::internal(format!("update failed for {ref_val}: {e}")))?;
+            state.graph.update(&ref_val, row.clone()).map_err(|e| {
+                HaystackError::internal(format!("update failed for {ref_val}: {e}"))
+            })?;
         } else {
             // Add new entity
             state
@@ -102,9 +101,9 @@ pub async fn handle_import(
 
 #[cfg(test)]
 mod tests {
+    use actix_web::App;
     use actix_web::test as actix_test;
     use actix_web::web;
-    use actix_web::App;
 
     use haystack_core::data::{HCol, HDict, HGrid};
     use haystack_core::graph::{EntityGraph, SharedGraph};
@@ -284,10 +283,7 @@ mod tests {
 
         // Verify the entity was updated
         let entity = state.graph.get("site-1").unwrap();
-        assert_eq!(
-            entity.get("dis"),
-            Some(&Kind::Str("Updated Site".into()))
-        );
+        assert_eq!(entity.get("dis"), Some(&Kind::Str("Updated Site".into())));
     }
 
     #[actix_web::test]

@@ -1,7 +1,7 @@
 // Python wrappers for Haystack data structures: HDict, HGrid, HList, HCol.
 
-use pyo3::prelude::*;
 use pyo3::class::basic::CompareOp;
+use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use haystack_core::data;
@@ -83,10 +83,7 @@ impl PyHDict {
     }
 
     fn values(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
-        self.inner
-            .iter()
-            .map(|(_, v)| kind_to_py(py, v))
-            .collect()
+        self.inner.iter().map(|(_, v)| kind_to_py(py, v)).collect()
     }
 
     fn items(&self, py: Python<'_>) -> PyResult<Vec<(String, PyObject)>> {
@@ -154,9 +151,7 @@ impl PyHDict {
 
 impl PyHDict {
     pub fn from_core(d: &data::HDict) -> Self {
-        Self {
-            inner: d.clone(),
-        }
+        Self { inner: d.clone() }
     }
 
     pub fn to_core(&self) -> data::HDict {
@@ -315,9 +310,7 @@ impl PyHGrid {
 
 impl PyHGrid {
     pub fn from_core(g: &data::HGrid) -> Self {
-        Self {
-            inner: g.clone(),
-        }
+        Self { inner: g.clone() }
     }
 
     pub fn to_core(&self) -> data::HGrid {
@@ -427,9 +420,7 @@ impl PyHList {
 
 impl PyHList {
     pub fn from_core(l: &data::HList) -> Self {
-        Self {
-            inner: l.clone(),
-        }
+        Self { inner: l.clone() }
     }
 
     pub fn to_core(&self) -> data::HList {

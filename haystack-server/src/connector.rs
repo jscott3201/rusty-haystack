@@ -155,7 +155,10 @@ mod tests {
         entity.set("site", Kind::Marker);
         entity.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
         entity.set("equipRef", Kind::Ref(HRef::from_val("equip-1")));
-        entity.set("floorRef", Kind::Ref(HRef::new("floor-1", Some("Floor 1".to_string()))));
+        entity.set(
+            "floorRef",
+            Kind::Ref(HRef::new("floor-1", Some("Floor 1".to_string()))),
+        );
 
         prefix_refs(&mut entity, "r1-");
 

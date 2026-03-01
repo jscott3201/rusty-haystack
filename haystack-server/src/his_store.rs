@@ -23,12 +23,18 @@ pub struct HisStore {
     items: RwLock<HashMap<String, Vec<HisItem>>>,
 }
 
-impl HisStore {
-    /// Create a new empty history store.
-    pub fn new() -> Self {
+impl Default for HisStore {
+    fn default() -> Self {
         Self {
             items: RwLock::new(HashMap::new()),
         }
+    }
+}
+
+impl HisStore {
+    /// Create a new empty history store.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Write history items for a given point ID.

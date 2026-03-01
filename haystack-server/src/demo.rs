@@ -38,10 +38,14 @@ pub fn demo_entities() -> Vec<HDict> {
         for vav_num in 1..=3 {
             let vav_id = format!("demo-vav-{ahu_num}-{vav_num:02}");
             let floor_id = &floor_ids[vav_num - 1];
-            entities.push(make_vav(&vav_id, ahu_num, vav_num, site_id, floor_id, ahu_id));
+            entities.push(make_vav(
+                &vav_id, ahu_num, vav_num, site_id, floor_id, ahu_id,
+            ));
 
             // ── Points (4 per VAV) ──
-            entities.push(make_zone_air_temp_sensor(&vav_id, site_id, floor_id, ahu_id));
+            entities.push(make_zone_air_temp_sensor(
+                &vav_id, site_id, floor_id, ahu_id,
+            ));
             entities.push(make_zone_air_temp_sp(&vav_id, site_id, floor_id, ahu_id));
             entities.push(make_damper_cmd(&vav_id, site_id, floor_id, ahu_id));
             entities.push(make_occ_sensor(&vav_id, site_id, floor_id, ahu_id));
@@ -56,7 +60,10 @@ fn make_site(id: &str) -> HDict {
     d.set("id", Kind::Ref(HRef::new(id, Some("Demo Building".into()))));
     d.set("site", Kind::Marker);
     d.set("dis", Kind::Str("Demo Building".into()));
-    d.set("area", Kind::Number(Number::new(50000.0, Some("ft\u{00b2}".into()))));
+    d.set(
+        "area",
+        Kind::Number(Number::new(50000.0, Some("ft\u{00b2}".into()))),
+    );
     d.set("geoCity", Kind::Str("Richmond".into()));
     d.set("geoState", Kind::Str("VA".into()));
     d.set("tz", Kind::Str("New_York".into()));
@@ -105,12 +112,7 @@ fn make_vav(
     d
 }
 
-fn make_zone_air_temp_sensor(
-    vav_id: &str,
-    site_id: &str,
-    floor_id: &str,
-    _ahu_id: &str,
-) -> HDict {
+fn make_zone_air_temp_sensor(vav_id: &str, site_id: &str, floor_id: &str, _ahu_id: &str) -> HDict {
     let mut d = HDict::new();
     let pt_id = format!("{vav_id}-zat");
     let dis = format!("{} Zone Air Temp", vav_dis(vav_id));
@@ -134,12 +136,7 @@ fn make_zone_air_temp_sensor(
     d
 }
 
-fn make_zone_air_temp_sp(
-    vav_id: &str,
-    site_id: &str,
-    floor_id: &str,
-    _ahu_id: &str,
-) -> HDict {
+fn make_zone_air_temp_sp(vav_id: &str, site_id: &str, floor_id: &str, _ahu_id: &str) -> HDict {
     let mut d = HDict::new();
     let pt_id = format!("{vav_id}-zatsp");
     let dis = format!("{} Zone Air Temp SP", vav_dis(vav_id));
@@ -162,12 +159,7 @@ fn make_zone_air_temp_sp(
     d
 }
 
-fn make_damper_cmd(
-    vav_id: &str,
-    site_id: &str,
-    floor_id: &str,
-    _ahu_id: &str,
-) -> HDict {
+fn make_damper_cmd(vav_id: &str, site_id: &str, floor_id: &str, _ahu_id: &str) -> HDict {
     let mut d = HDict::new();
     let pt_id = format!("{vav_id}-dmpr");
     let dis = format!("{} Damper Cmd", vav_dis(vav_id));
@@ -178,10 +170,7 @@ fn make_damper_cmd(
     d.set("writable", Kind::Marker);
     d.set("kind", Kind::Str("Number".into()));
     d.set("unit", Kind::Str("%".into()));
-    d.set(
-        "curVal",
-        Kind::Number(Number::new(85.0, Some("%".into()))),
-    );
+    d.set("curVal", Kind::Number(Number::new(85.0, Some("%".into()))));
     d.set("dis", Kind::Str(dis));
     d.set("siteRef", Kind::Ref(HRef::from_val(site_id)));
     d.set("floorRef", Kind::Ref(HRef::from_val(floor_id)));
@@ -189,12 +178,7 @@ fn make_damper_cmd(
     d
 }
 
-fn make_occ_sensor(
-    vav_id: &str,
-    site_id: &str,
-    floor_id: &str,
-    _ahu_id: &str,
-) -> HDict {
+fn make_occ_sensor(vav_id: &str, site_id: &str, floor_id: &str, _ahu_id: &str) -> HDict {
     let mut d = HDict::new();
     let pt_id = format!("{vav_id}-occ");
     let dis = format!("{} Occ", vav_dis(vav_id));
@@ -245,7 +229,10 @@ mod tests {
         assert_eq!(site.get("dis"), Some(&Kind::Str("Demo Building".into())));
         assert_eq!(
             site.get("area"),
-            Some(&Kind::Number(Number::new(50000.0, Some("ft\u{00b2}".into()))))
+            Some(&Kind::Number(Number::new(
+                50000.0,
+                Some("ft\u{00b2}".into())
+            )))
         );
     }
 
@@ -291,10 +278,7 @@ mod tests {
             );
             match pt.get("kind") {
                 Some(Kind::Str(s)) => {
-                    assert!(
-                        s == "Number" || s == "Bool",
-                        "unexpected kind value: {s}"
-                    );
+                    assert!(s == "Number" || s == "Bool", "unexpected kind value: {s}");
                 }
                 other => panic!("expected kind to be a Str, got {:?}", other),
             }

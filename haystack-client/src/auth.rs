@@ -3,12 +3,12 @@
 //! Performs the three-phase Haystack auth handshake (HELLO, SCRAM, BEARER)
 //! against a Haystack server, returning the auth token on success.
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::Client;
 
-use haystack_core::auth;
 use crate::error::ClientError;
+use haystack_core::auth;
 
 /// Perform SCRAM SHA-256 authentication handshake against a Haystack server.
 ///
@@ -116,19 +116,18 @@ pub async fn authenticate(
     let (auth_token, server_final_b64) = parse_auth_info(&auth_info)?;
 
     // Verify the server signature from the server-final-message
-    let server_final_bytes = BASE64
-        .decode(&server_final_b64)
-        .map_err(|e| ClientError::AuthFailed(format!("invalid base64 in server-final data: {}", e)))?;
-    let server_final_msg = String::from_utf8(server_final_bytes)
-        .map_err(|e| ClientError::AuthFailed(format!("invalid UTF-8 in server-final data: {}", e)))?;
-    let server_sig_b64 = server_final_msg
-        .strip_prefix("v=")
-        .ok_or_else(|| {
-            ClientError::AuthFailed("server-final message missing v= prefix".to_string())
-        })?;
-    let received_server_sig = BASE64
-        .decode(server_sig_b64)
-        .map_err(|e| ClientError::AuthFailed(format!("invalid base64 in server signature: {}", e)))?;
+    let server_final_bytes = BASE64.decode(&server_final_b64).map_err(|e| {
+        ClientError::AuthFailed(format!("invalid base64 in server-final data: {}", e))
+    })?;
+    let server_final_msg = String::from_utf8(server_final_bytes).map_err(|e| {
+        ClientError::AuthFailed(format!("invalid UTF-8 in server-final data: {}", e))
+    })?;
+    let server_sig_b64 = server_final_msg.strip_prefix("v=").ok_or_else(|| {
+        ClientError::AuthFailed("server-final message missing v= prefix".to_string())
+    })?;
+    let received_server_sig = BASE64.decode(server_sig_b64).map_err(|e| {
+        ClientError::AuthFailed(format!("invalid base64 in server signature: {}", e))
+    })?;
 
     if received_server_sig != expected_server_sig {
         return Err(ClientError::AuthFailed(
@@ -166,9 +165,8 @@ fn parse_www_authenticate(header: &str) -> Result<(String, String), ClientError>
     let handshake_token = handshake_token.ok_or_else(|| {
         ClientError::AuthFailed("missing handshakeToken in WWW-Authenticate".to_string())
     })?;
-    let data = data.ok_or_else(|| {
-        ClientError::AuthFailed("missing data in WWW-Authenticate".to_string())
-    })?;
+    let data = data
+        .ok_or_else(|| ClientError::AuthFailed("missing data in WWW-Authenticate".to_string()))?;
 
     Ok((handshake_token, data))
 }

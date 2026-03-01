@@ -4,10 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::ontology::{DefNamespace, Lib};
+use crate::xeto::XetoError;
 use crate::xeto::parser::parse_xeto;
 use crate::xeto::resolver::XetoResolver;
-use crate::xeto::spec::{spec_from_def, Spec};
-use crate::xeto::XetoError;
+use crate::xeto::spec::{Spec, spec_from_def};
 
 /// Load a Xeto library from source text.
 ///
@@ -26,10 +26,7 @@ pub fn load_xeto_source(
 ///
 /// Reads all .xeto files in the directory, concatenates them (pragma from
 /// the first file that has one), and processes as a single library.
-pub fn load_xeto_dir(
-    dir: &Path,
-    ns: &DefNamespace,
-) -> Result<(String, Lib, Vec<Spec>), XetoError> {
+pub fn load_xeto_dir(dir: &Path, ns: &DefNamespace) -> Result<(String, Lib, Vec<Spec>), XetoError> {
     let mut all_source = String::new();
     let mut lib_name: Option<String> = None;
 
@@ -37,7 +34,7 @@ pub fn load_xeto_dir(
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| XetoError::Load(format!("cannot read directory: {e}")))?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "xeto"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "xeto"))
         .collect();
     entries.sort_by_key(|e| e.file_name());
 

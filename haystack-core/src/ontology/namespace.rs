@@ -7,13 +7,13 @@ use crate::data::HDict;
 use crate::kinds::Kind;
 use crate::xeto::Spec;
 
+use super::OntologyError;
 use super::conjunct::ConjunctIndex;
 use super::def::{Def, DefKind};
 use super::lib::Lib;
 use super::taxonomy::TaxonomyTree;
 use super::trio_loader::load_trio;
 use super::validation::{FitIssue, ValidationIssue};
-use super::OntologyError;
 
 /// Tracks how a library was loaded.
 #[derive(Debug, Clone)]
@@ -392,13 +392,11 @@ impl DefNamespace {
     /// List all specs, optionally filtered by library.
     pub fn specs(&self, lib: Option<&str>) -> Vec<&Spec> {
         match lib {
-            Some(lib_name) => {
-                self.spec_libs.get(lib_name)
-                    .map(|qnames| qnames.iter()
-                        .filter_map(|q| self.specs.get(q))
-                        .collect())
-                    .unwrap_or_default()
-            }
+            Some(lib_name) => self
+                .spec_libs
+                .get(lib_name)
+                .map(|qnames| qnames.iter().filter_map(|q| self.specs.get(q)).collect())
+                .unwrap_or_default(),
             None => self.specs.values().collect(),
         }
     }
@@ -420,19 +418,24 @@ impl DefNamespace {
 
     /// Export a library to Xeto source text.
     pub fn export_lib_xeto(&self, lib_name: &str) -> Result<String, String> {
-        let lib = self.libs().get(lib_name)
+        let lib = self
+            .libs()
+            .get(lib_name)
             .ok_or_else(|| format!("library '{}' not found", lib_name))?;
         let specs: Vec<&crate::xeto::Spec> = self.specs(Some(lib_name));
         Ok(crate::xeto::export::export_lib(
-            lib_name, &lib.version, &lib.doc, &lib.depends, &specs,
+            lib_name,
+            &lib.version,
+            &lib.doc,
+            &lib.depends,
+            &specs,
         ))
     }
 
     /// Save a library to a file on disk as Xeto text.
     pub fn save_lib(&self, lib_name: &str, path: &std::path::Path) -> Result<(), String> {
         let xeto_text = self.export_lib_xeto(lib_name)?;
-        std::fs::write(path, xeto_text)
-            .map_err(|e| format!("failed to write {:?}: {}", path, e))
+        std::fs::write(path, xeto_text).map_err(|e| format!("failed to write {:?}: {}", path, e))
     }
 
     /// Load a Xeto library from source text and register all specs.
@@ -441,8 +444,7 @@ impl DefNamespace {
         source: &str,
         lib_name: &str,
     ) -> Result<Vec<String>, crate::xeto::XetoError> {
-        let (lib, specs) =
-            crate::xeto::loader::load_xeto_source(source, lib_name, self)?;
+        let (lib, specs) = crate::xeto::loader::load_xeto_source(source, lib_name, self)?;
         let qnames: Vec<String> = specs.iter().map(|s| s.qname.clone()).collect();
         self.register_lib(lib);
         for spec in specs {
@@ -457,8 +459,7 @@ impl DefNamespace {
         &mut self,
         dir: &std::path::Path,
     ) -> Result<(String, Vec<String>), crate::xeto::XetoError> {
-        let (name, lib, specs) =
-            crate::xeto::loader::load_xeto_dir(dir, self)?;
+        let (name, lib, specs) = crate::xeto::loader::load_xeto_dir(dir, self)?;
         let qnames: Vec<String> = specs.iter().map(|s| s.qname.clone()).collect();
         self.register_lib(lib);
         for spec in specs {
@@ -474,7 +475,10 @@ impl DefNamespace {
         // Check for dependents
         for (name, lib) in &self.libs {
             if name != lib_name && lib.depends.contains(&lib_name.to_string()) {
-                return Err(format!("cannot unload '{}': library '{}' depends on it", lib_name, name));
+                return Err(format!(
+                    "cannot unload '{}': library '{}' depends on it",
+                    lib_name, name
+                ));
             }
         }
         // Check if bundled
@@ -738,9 +742,9 @@ depends:[^lib:ph]
         let issues = ns.validate_entity(&entity);
         assert!(!issues.is_empty());
 
-        let has_issue = issues.iter().any(|i| {
-            i.issue_type == "missing_marker" && i.detail.contains("equip")
-        });
+        let has_issue = issues
+            .iter()
+            .any(|i| i.issue_type == "missing_marker" && i.detail.contains("equip"));
         assert!(has_issue);
     }
 
@@ -836,13 +840,17 @@ depends:[^lib:ph]
     fn unload_with_dependent_fails() {
         let mut ns = DefNamespace::new();
         ns.register_lib(crate::ontology::Lib {
-            name: "base".into(), version: "1.0".into(),
-            doc: String::new(), depends: vec![],
+            name: "base".into(),
+            version: "1.0".into(),
+            doc: String::new(),
+            depends: vec![],
             defs: std::collections::HashMap::new(),
         });
         ns.register_lib(crate::ontology::Lib {
-            name: "child".into(), version: "1.0".into(),
-            doc: String::new(), depends: vec!["base".into()],
+            name: "child".into(),
+            version: "1.0".into(),
+            doc: String::new(),
+            depends: vec!["base".into()],
             defs: std::collections::HashMap::new(),
         });
         ns.set_lib_source("base", LibSource::Xeto("...".into()));

@@ -1,6 +1,6 @@
 //! The `nav` op — navigate a project for entity discovery.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
@@ -38,13 +38,11 @@ pub async fn handle(
         let request_grid = content::decode_request_grid(&body, content_type)
             .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
 
-        request_grid
-            .row(0)
-            .and_then(|row| match row.get("navId") {
-                Some(Kind::Str(s)) if !s.is_empty() => Some(s.clone()),
-                Some(Kind::Ref(r)) => Some(r.val.clone()),
-                _ => None,
-            })
+        request_grid.row(0).and_then(|row| match row.get("navId") {
+            Some(Kind::Str(s)) if !s.is_empty() => Some(s.clone()),
+            Some(Kind::Ref(r)) => Some(r.val.clone()),
+            _ => None,
+        })
     };
 
     let result_grid = match nav_id {

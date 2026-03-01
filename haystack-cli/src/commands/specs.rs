@@ -18,13 +18,16 @@ pub fn run(lib: Option<&str>) {
         return;
     }
 
-    println!("{:<30} {:<15} {:<30} {}", "QName", "Lib", "Base", "Slots");
+    println!("{:<30} {:<15} {:<30} Slots", "QName", "Lib", "Base");
     println!("{}", "-".repeat(80));
     let mut sorted: Vec<_> = specs;
     sorted.sort_by_key(|s| &s.qname);
     for spec in sorted {
         let base = spec.base.as_deref().unwrap_or("-");
         let slot_count = spec.slots.len();
-        println!("{:<30} {:<15} {:<30} {}", spec.qname, spec.lib, base, slot_count);
+        println!(
+            "{:<30} {:<15} {:<30} {}",
+            spec.qname, spec.lib, base, slot_count
+        );
     }
 }

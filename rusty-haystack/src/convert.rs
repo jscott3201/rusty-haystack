@@ -26,10 +26,7 @@ pub fn kind_to_py(py: Python<'_>, kind: &Kind) -> PyResult<PyObject> {
             .into_any()
             .unbind()),
         Kind::Str(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
-        Kind::Ref(r) => Ok(PyRef_::from_core(r)
-            .into_pyobject(py)?
-            .into_any()
-            .unbind()),
+        Kind::Ref(r) => Ok(PyRef_::from_core(r).into_pyobject(py)?.into_any().unbind()),
         Kind::Date(d) => {
             let py_date = PyDate::new(
                 py,
@@ -54,22 +51,13 @@ pub fn kind_to_py(py: Python<'_>, kind: &Kind) -> PyResult<PyObject> {
             .into_pyobject(py)?
             .into_any()
             .unbind()),
-        Kind::Uri(u) => Ok(PyUri::from_core(u)
-            .into_pyobject(py)?
-            .into_any()
-            .unbind()),
+        Kind::Uri(u) => Ok(PyUri::from_core(u).into_pyobject(py)?.into_any().unbind()),
         Kind::Symbol(s) => Ok(PySymbol::from_core(s)
             .into_pyobject(py)?
             .into_any()
             .unbind()),
-        Kind::Coord(c) => Ok(PyCoord::from_core(c)
-            .into_pyobject(py)?
-            .into_any()
-            .unbind()),
-        Kind::XStr(x) => Ok(PyXStr::from_core(x)
-            .into_pyobject(py)?
-            .into_any()
-            .unbind()),
+        Kind::Coord(c) => Ok(PyCoord::from_core(c).into_pyobject(py)?.into_any().unbind()),
+        Kind::XStr(x) => Ok(PyXStr::from_core(x).into_pyobject(py)?.into_any().unbind()),
         Kind::List(items) => {
             let hlist = haystack_core::data::HList::from_vec(items.clone());
             Ok(PyHList::from_core(&hlist)
@@ -77,14 +65,8 @@ pub fn kind_to_py(py: Python<'_>, kind: &Kind) -> PyResult<PyObject> {
                 .into_any()
                 .unbind())
         }
-        Kind::Dict(d) => Ok(PyHDict::from_core(d)
-            .into_pyobject(py)?
-            .into_any()
-            .unbind()),
-        Kind::Grid(g) => Ok(PyHGrid::from_core(g)
-            .into_pyobject(py)?
-            .into_any()
-            .unbind()),
+        Kind::Dict(d) => Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()),
+        Kind::Grid(g) => Ok(PyHGrid::from_core(g).into_pyobject(py)?.into_any().unbind()),
     }
 }
 
@@ -169,9 +151,8 @@ pub fn py_to_kind(obj: &Bound<'_, PyAny>) -> PyResult<Kind> {
         let year: i32 = obj.getattr("year")?.extract()?;
         let month: u32 = obj.getattr("month")?.extract()?;
         let day: u32 = obj.getattr("day")?.extract()?;
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid date")
-        })?;
+        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid date"))?;
         return Ok(Kind::Date(date));
     }
 
@@ -182,9 +163,7 @@ pub fn py_to_kind(obj: &Bound<'_, PyAny>) -> PyResult<Kind> {
         let second: u32 = obj.getattr("second")?.extract()?;
         let micro: u32 = obj.getattr("microsecond")?.extract()?;
         let time = chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micro)
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid time")
-            })?;
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid time"))?;
         return Ok(Kind::Time(time));
     }
 

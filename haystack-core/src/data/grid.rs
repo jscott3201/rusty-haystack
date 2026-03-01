@@ -116,27 +116,23 @@ mod tests {
     use crate::kinds::{Kind, Number};
 
     fn sample_grid() -> HGrid {
-        let cols = vec![
-            HCol::new("id"),
-            HCol::new("dis"),
-            HCol::new("area"),
-        ];
+        let cols = vec![HCol::new("id"), HCol::new("dis"), HCol::new("area")];
 
         let mut row1 = HDict::new();
-        row1.set(
-            "id",
-            Kind::Ref(crate::kinds::HRef::from_val("site-1")),
-        );
+        row1.set("id", Kind::Ref(crate::kinds::HRef::from_val("site-1")));
         row1.set("dis", Kind::Str("Site One".into()));
-        row1.set("area", Kind::Number(Number::new(4500.0, Some("ft\u{00B2}".into()))));
+        row1.set(
+            "area",
+            Kind::Number(Number::new(4500.0, Some("ft\u{00B2}".into()))),
+        );
 
         let mut row2 = HDict::new();
-        row2.set(
-            "id",
-            Kind::Ref(crate::kinds::HRef::from_val("site-2")),
-        );
+        row2.set("id", Kind::Ref(crate::kinds::HRef::from_val("site-2")));
         row2.set("dis", Kind::Str("Site Two".into()));
-        row2.set("area", Kind::Number(Number::new(3200.0, Some("ft\u{00B2}".into()))));
+        row2.set(
+            "area",
+            Kind::Number(Number::new(3200.0, Some("ft\u{00B2}".into()))),
+        );
 
         HGrid::from_parts(HDict::new(), cols, vec![row1, row2])
     }

@@ -344,7 +344,10 @@ impl XetoLexer {
         }
 
         // Fractional part
-        if !self.at_end() && self.peek() == '.' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
+        if !self.at_end()
+            && self.peek() == '.'
+            && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())
+        {
             text.push(self.advance()); // '.'
             while !self.at_end() && self.peek().is_ascii_digit() {
                 text.push(self.advance());

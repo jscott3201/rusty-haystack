@@ -5,6 +5,9 @@ use crate::data::HDict;
 use crate::kinds::{HRef, Kind};
 use crate::ontology::DefNamespace;
 
+/// Callback type that resolves a `Ref` to the target entity dict.
+type ResolveRef<'a> = Option<&'a dyn Fn(&HRef) -> Option<HDict>>;
+
 /// Evaluate a filter against an entity dict.
 ///
 /// `resolve_ref` is an optional callback that resolves a `Ref` to the target
@@ -12,11 +15,7 @@ use crate::ontology::DefNamespace;
 ///
 /// `namespace` is an optional ontology namespace used for SpecMatch evaluation
 /// (e.g. `ph::Ahu`). If `None`, SpecMatch always returns false.
-pub fn matches(
-    node: &FilterNode,
-    entity: &HDict,
-    resolve_ref: Option<&dyn Fn(&HRef) -> Option<HDict>>,
-) -> bool {
+pub fn matches(node: &FilterNode, entity: &HDict, resolve_ref: ResolveRef<'_>) -> bool {
     matches_with_ns(node, entity, resolve_ref, None)
 }
 
@@ -24,18 +23,16 @@ pub fn matches(
 pub fn matches_with_ns(
     node: &FilterNode,
     entity: &HDict,
-    resolve_ref: Option<&dyn Fn(&HRef) -> Option<HDict>>,
+    resolve_ref: ResolveRef<'_>,
     namespace: Option<&DefNamespace>,
 ) -> bool {
     match node {
         FilterNode::Has(path) => resolve_path(path, entity, resolve_ref).is_some(),
         FilterNode::Missing(path) => resolve_path(path, entity, resolve_ref).is_none(),
-        FilterNode::Cmp { path, op, val } => {
-            match resolve_path(path, entity, resolve_ref) {
-                Some(actual) => compare(&actual, op, val),
-                None => false,
-            }
-        }
+        FilterNode::Cmp { path, op, val } => match resolve_path(path, entity, resolve_ref) {
+            Some(actual) => compare(&actual, op, val),
+            None => false,
+        },
         FilterNode::And(left, right) => {
             matches_with_ns(left, entity, resolve_ref, namespace)
                 && matches_with_ns(right, entity, resolve_ref, namespace)
@@ -48,11 +45,7 @@ pub fn matches_with_ns(
             match namespace {
                 Some(ns) => {
                     // Extract simple type name: "ph::Ahu" → "ahu", "ph.equips::Ahu" → "ahu"
-                    let type_name = spec
-                        .rsplit("::")
-                        .next()
-                        .unwrap_or(spec)
-                        .to_lowercase();
+                    let type_name = spec.rsplit("::").next().unwrap_or(spec).to_lowercase();
                     ns.fits(entity, &type_name)
                 }
                 None => false,
@@ -66,11 +59,7 @@ pub fn matches_with_ns(
 // Note: Unlike the Python reference which raises ValueError when resolve_ref
 // is None for multi-segment paths, we silently return false. This is intentional:
 // filters should evaluate to false for unresolvable paths rather than crashing.
-fn resolve_path(
-    path: &Path,
-    entity: &HDict,
-    resolve_ref: Option<&dyn Fn(&HRef) -> Option<HDict>>,
-) -> Option<Kind> {
+fn resolve_path(path: &Path, entity: &HDict, resolve_ref: ResolveRef<'_>) -> Option<Kind> {
     if path.is_single() {
         return entity.get(path.first()).cloned();
     }
@@ -143,11 +132,11 @@ mod tests {
         d.set("id", Kind::Ref(HRef::from_val("site-1")));
         d.set("site", Kind::Marker);
         d.set("dis", Kind::Str("Main Site".into()));
-        d.set("area", Kind::Number(Number::new(4500.0, Some("ft²".into()))));
         d.set(
-            "geoCity",
-            Kind::Str("Richmond".into()),
+            "area",
+            Kind::Number(Number::new(4500.0, Some("ft²".into()))),
         );
+        d.set("geoCity", Kind::Str("Richmond".into()));
         d
     }
 

@@ -31,7 +31,7 @@ pub fn decode_grid(input: &str) -> Result<HGrid, CodecError> {
         }
     }
 
-    let cols: Vec<HCol> = col_names.iter().map(|n| HCol::new(n)).collect();
+    let cols: Vec<HCol> = col_names.iter().map(HCol::new).collect();
     Ok(HGrid::from_parts(HDict::new(), cols, records))
 }
 
@@ -67,13 +67,8 @@ fn parse_records(input: &str) -> Result<Vec<HDict>, CodecError> {
 
         // In multiline string mode
         if multiline_name.is_some() {
-            if line.starts_with("  ") || line.starts_with('\t') {
+            if let Some(content) = line.strip_prefix("  ").or_else(|| line.strip_prefix('\t')) {
                 // Indented continuation line
-                let content = if line.starts_with("  ") {
-                    &line[2..]
-                } else {
-                    &line[1..]
-                };
                 multiline_lines.push(content.to_string());
                 continue;
             } else {
@@ -191,7 +186,10 @@ mod tests {
         assert_eq!(row.get("site"), Some(&Kind::Marker));
         assert_eq!(
             row.get("area"),
-            Some(&Kind::Number(Number::new(3702.0, Some("ft\u{00B2}".into()))))
+            Some(&Kind::Number(Number::new(
+                3702.0,
+                Some("ft\u{00B2}".into())
+            )))
         );
     }
 
@@ -244,10 +242,7 @@ mod tests {
         assert_eq!(grid.len(), 1);
 
         let row = grid.row(0).unwrap();
-        assert_eq!(
-            row.get("doc"),
-            Some(&Kind::Str("Line A\nLine B".into()))
-        );
+        assert_eq!(row.get("doc"), Some(&Kind::Str("Line A\nLine B".into())));
     }
 
     #[test]
@@ -257,10 +252,7 @@ mod tests {
         assert_eq!(grid.len(), 1);
 
         let row = grid.row(0).unwrap();
-        assert_eq!(
-            row.get("doc"),
-            Some(&Kind::Str("Last line".into()))
-        );
+        assert_eq!(row.get("doc"), Some(&Kind::Str("Last line".into())));
     }
 
     #[test]
@@ -297,10 +289,7 @@ mod tests {
         assert_eq!(grid.len(), 1);
 
         let row = grid.row(0).unwrap();
-        assert_eq!(
-            row.get("id"),
-            Some(&Kind::Ref(HRef::from_val("site-1")))
-        );
+        assert_eq!(row.get("id"), Some(&Kind::Ref(HRef::from_val("site-1"))));
         assert_eq!(
             row.get("siteRef"),
             Some(&Kind::Ref(HRef::from_val("alpha")))
@@ -404,13 +393,13 @@ floorRef: @floor1
         let site = grid.row(0).unwrap();
         assert_eq!(site.get("dis"), Some(&Kind::Str("Alpha Office".into())));
         assert_eq!(site.get("site"), Some(&Kind::Marker));
-        assert_eq!(
-            site.get("id"),
-            Some(&Kind::Ref(HRef::from_val("alpha")))
-        );
+        assert_eq!(site.get("id"), Some(&Kind::Ref(HRef::from_val("alpha"))));
         assert_eq!(
             site.get("area"),
-            Some(&Kind::Number(Number::new(120000.0, Some("ft\u{00B2}".into()))))
+            Some(&Kind::Number(Number::new(
+                120000.0,
+                Some("ft\u{00B2}".into())
+            )))
         );
 
         let floor = grid.row(1).unwrap();
@@ -453,7 +442,10 @@ floorRef: @floor1
         let mut row1 = HDict::new();
         row1.set("dis", Kind::Str("My Site".into()));
         row1.set("site", Kind::Marker);
-        row1.set("area", Kind::Number(Number::new(1000.0, Some("ft\u{00B2}".into()))));
+        row1.set(
+            "area",
+            Kind::Number(Number::new(1000.0, Some("ft\u{00B2}".into()))),
+        );
         row1.set("id", Kind::Ref(HRef::from_val("site-1")));
 
         let mut row2 = HDict::new();
@@ -471,7 +463,10 @@ floorRef: @floor1
         assert_eq!(r0.get("site"), Some(&Kind::Marker));
         assert_eq!(
             r0.get("area"),
-            Some(&Kind::Number(Number::new(1000.0, Some("ft\u{00B2}".into()))))
+            Some(&Kind::Number(Number::new(
+                1000.0,
+                Some("ft\u{00B2}".into())
+            )))
         );
         assert_eq!(r0.get("id"), Some(&Kind::Ref(HRef::from_val("site-1"))));
 

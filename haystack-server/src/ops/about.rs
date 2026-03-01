@@ -5,9 +5,9 @@
 //! - Authenticated (BEARER): returns the server about grid
 
 use actix_web::http::StatusCode;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 
-use haystack_core::auth::{parse_auth_header, AuthHeader};
+use haystack_core::auth::{AuthHeader, parse_auth_header};
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
 
@@ -129,10 +129,7 @@ pub async fn handle_close(req: HttpRequest, state: web::Data<AppState>) -> HttpR
 fn respond_about_grid(accept: &str) -> HttpResponse {
     let mut row = HDict::new();
     row.set("haystackVersion", Kind::Str("4.0".to_string()));
-    row.set(
-        "serverName",
-        Kind::Str("rusty-haystack".to_string()),
-    );
+    row.set("serverName", Kind::Str("rusty-haystack".to_string()));
     row.set("serverVersion", Kind::Str("0.1.0".to_string()));
     row.set("productName", Kind::Str("rusty-haystack".to_string()));
     row.set(

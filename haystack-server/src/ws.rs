@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use parking_lot::RwLock;
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -104,10 +104,7 @@ fn handle_ws_request(req: &WsRequest, username: &str, state: &AppState) -> Strin
         "watchSub" => handle_watch_sub(req, username, state),
         "watchPoll" => handle_watch_poll(req, username, state),
         "watchUnsub" => handle_watch_unsub(req, username, state),
-        other => WsResponse::error(
-            req.req_id.clone(),
-            format!("unknown op: {other}"),
-        ),
+        other => WsResponse::error(req.req_id.clone(), format!("unknown op: {other}")),
     };
     // Serialization of WsResponse should never fail in practice.
     serde_json::to_string(&resp).unwrap_or_else(|e| {
@@ -136,7 +133,10 @@ fn handle_watch_sub(req: &WsRequest, username: &str, state: &AppState) -> WsResp
         .collect();
 
     let graph_version = state.graph.version();
-    let watch_id = match state.watches.subscribe(username, ids.clone(), graph_version) {
+    let watch_id = match state
+        .watches
+        .subscribe(username, ids.clone(), graph_version)
+    {
         Ok(wid) => wid,
         Err(e) => return WsResponse::error(req.req_id.clone(), e),
     };
@@ -155,22 +155,16 @@ fn handle_watch_poll(req: &WsRequest, username: &str, state: &AppState) -> WsRes
     let watch_id = match &req.watch_id {
         Some(wid) => wid.clone(),
         None => {
-            return WsResponse::error(
-                req.req_id.clone(),
-                "watchPoll requires 'watchId'",
-            );
+            return WsResponse::error(req.req_id.clone(), "watchPoll requires 'watchId'");
         }
     };
 
     match state.watches.poll(&watch_id, username, &state.graph) {
         Some(changed) => {
-            let rows: Vec<Value> = changed.iter().map(|e| encode_entity(e)).collect();
+            let rows: Vec<Value> = changed.iter().map(encode_entity).collect();
             WsResponse::ok(req.req_id.clone(), rows, Some(watch_id))
         }
-        None => WsResponse::error(
-            req.req_id.clone(),
-            format!("watch not found: {watch_id}"),
-        ),
+        None => WsResponse::error(req.req_id.clone(), format!("watch not found: {watch_id}")),
     }
 }
 
@@ -179,10 +173,7 @@ fn handle_watch_unsub(req: &WsRequest, username: &str, state: &AppState) -> WsRe
     let watch_id = match &req.watch_id {
         Some(wid) => wid.clone(),
         None => {
-            return WsResponse::error(
-                req.req_id.clone(),
-                "watchUnsub requires 'watchId'",
-            );
+            return WsResponse::error(req.req_id.clone(), "watchUnsub requires 'watchId'");
         }
     };
 
@@ -205,10 +196,7 @@ fn handle_watch_unsub(req: &WsRequest, username: &str, state: &AppState) -> WsRe
     }
 
     if !state.watches.unsubscribe(&watch_id, username) {
-        return WsResponse::error(
-            req.req_id.clone(),
-            format!("watch not found: {watch_id}"),
-        );
+        return WsResponse::error(req.req_id.clone(), format!("watch not found: {watch_id}"));
     }
     WsResponse::ok(req.req_id.clone(), vec![], None)
 }
@@ -239,13 +227,21 @@ impl WatchManager {
     /// Subscribe to changes on a set of entity IDs.
     ///
     /// Returns the watch ID, or an error if a growth cap would be exceeded.
-    pub fn subscribe(&self, username: &str, ids: Vec<String>, graph_version: u64) -> Result<String, String> {
+    pub fn subscribe(
+        &self,
+        username: &str,
+        ids: Vec<String>,
+        graph_version: u64,
+    ) -> Result<String, String> {
         let mut watches = self.watches.write();
         if watches.len() >= MAX_WATCHES {
             return Err("maximum number of watches reached".to_string());
         }
         if ids.len() > MAX_ENTITY_IDS_PER_WATCH {
-            return Err(format!("too many entity IDs (max {})", MAX_ENTITY_IDS_PER_WATCH));
+            return Err(format!(
+                "too many entity IDs (max {})",
+                MAX_ENTITY_IDS_PER_WATCH
+            ));
         }
         let watch_id = Uuid::new_v4().to_string();
         let watch = Watch {
@@ -286,10 +282,8 @@ impl WatchManager {
 
         // Graph reads happen without the WatchManager write lock held.
         let changes = graph.changes_since(last_version);
-        let changed_refs: std::collections::HashSet<&str> = changes
-            .iter()
-            .map(|d| d.ref_val.as_str())
-            .collect();
+        let changed_refs: std::collections::HashSet<&str> =
+            changes.iter().map(|d| d.ref_val.as_str()).collect();
 
         Some(
             entity_ids
@@ -364,6 +358,11 @@ impl WatchManager {
     pub fn len(&self) -> usize {
         self.watches.read().len()
     }
+
+    /// Return whether there are no active watches.
+    pub fn is_empty(&self) -> bool {
+        self.watches.read().is_empty()
+    }
 }
 
 impl Default for WatchManager {
@@ -413,10 +412,7 @@ pub async fn ws_handler(
                     let response_text = match serde_json::from_str::<WsRequest>(&text) {
                         Ok(ws_req) => handle_ws_request(&ws_req, &username, &state),
                         Err(e) => {
-                            let err = WsResponse::error(
-                                None,
-                                format!("invalid request: {e}"),
-                            );
+                            let err = WsResponse::error(None, format!("invalid request: {e}"));
                             serde_json::to_string(&err).unwrap()
                         }
                     };
@@ -466,7 +462,9 @@ mod tests {
         let graph = make_graph_with_entity("site-1");
         let wm = WatchManager::new();
         let version = graph.version();
-        let watch_id = wm.subscribe("admin", vec!["site-1".into()], version).unwrap();
+        let watch_id = wm
+            .subscribe("admin", vec!["site-1".into()], version)
+            .unwrap();
 
         let changes = wm.poll(&watch_id, "admin", &graph).unwrap();
         assert!(changes.is_empty());
@@ -477,7 +475,9 @@ mod tests {
         let graph = make_graph_with_entity("site-1");
         let wm = WatchManager::new();
         let version = graph.version();
-        let watch_id = wm.subscribe("admin", vec!["site-1".into()], version).unwrap();
+        let watch_id = wm
+            .subscribe("admin", vec!["site-1".into()], version)
+            .unwrap();
 
         // Modify the entity
         let mut changes = HDict::new();
@@ -500,7 +500,9 @@ mod tests {
         let graph = make_graph_with_entity("site-1");
         let wm = WatchManager::new();
         let version = graph.version();
-        let watch_id = wm.subscribe("admin", vec!["site-1".into()], version).unwrap();
+        let watch_id = wm
+            .subscribe("admin", vec!["site-1".into()], version)
+            .unwrap();
 
         // Different user cannot poll the watch
         assert!(wm.poll(&watch_id, "other-user", &graph).is_none());
@@ -527,11 +529,13 @@ mod tests {
     #[test]
     fn remove_ids_selective() {
         let wm = WatchManager::new();
-        let watch_id = wm.subscribe(
-            "admin",
-            vec!["site-1".into(), "site-2".into(), "site-3".into()],
-            0,
-        ).unwrap();
+        let watch_id = wm
+            .subscribe(
+                "admin",
+                vec!["site-1".into(), "site-2".into(), "site-3".into()],
+                0,
+            )
+            .unwrap();
 
         // Remove only site-2
         assert!(wm.remove_ids(&watch_id, "admin", &["site-2".into()]));
@@ -552,11 +556,9 @@ mod tests {
     #[test]
     fn remove_ids_wrong_owner() {
         let wm = WatchManager::new();
-        let watch_id = wm.subscribe(
-            "admin",
-            vec!["site-1".into(), "site-2".into()],
-            0,
-        ).unwrap();
+        let watch_id = wm
+            .subscribe("admin", vec!["site-1".into(), "site-2".into()], 0)
+            .unwrap();
 
         // Different user cannot remove IDs
         assert!(!wm.remove_ids(&watch_id, "other-user", &["site-1".into()]));
@@ -569,11 +571,9 @@ mod tests {
     #[test]
     fn remove_ids_leaves_watch_alive() {
         let wm = WatchManager::new();
-        let watch_id = wm.subscribe(
-            "admin",
-            vec!["site-1".into(), "site-2".into()],
-            0,
-        ).unwrap();
+        let watch_id = wm
+            .subscribe("admin", vec!["site-1".into(), "site-2".into()], 0)
+            .unwrap();
 
         // Remove all IDs selectively — watch still exists with empty entity set
         assert!(wm.remove_ids(&watch_id, "admin", &["site-1".into(), "site-2".into()]));
@@ -588,11 +588,9 @@ mod tests {
     #[test]
     fn unsubscribe_full_removal() {
         let wm = WatchManager::new();
-        let watch_id = wm.subscribe(
-            "admin",
-            vec!["site-1".into(), "site-2".into()],
-            0,
-        ).unwrap();
+        let watch_id = wm
+            .subscribe("admin", vec!["site-1".into(), "site-2".into()], 0)
+            .unwrap();
 
         // Full unsubscribe removes the watch entirely
         assert!(wm.unsubscribe(&watch_id, "admin"));

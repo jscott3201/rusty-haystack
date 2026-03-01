@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::net::{TcpListener, TcpStream};
 use std::sync::OnceLock;
 
@@ -24,7 +24,7 @@ fn build_test_graph(n: usize) -> SharedGraph {
     // Create 10 sites
     for i in 0..10 {
         let mut d = HDict::new();
-        d.set("id", Kind::Ref(HRef::from_val(&format!("site-{i}"))));
+        d.set("id", Kind::Ref(HRef::from_val(format!("site-{i}"))));
         d.set("site", Kind::Marker);
         d.set("dis", Kind::Str(format!("Site {i}")));
         d.set(
@@ -38,7 +38,7 @@ fn build_test_graph(n: usize) -> SharedGraph {
     for i in 0..n {
         let site_idx = i % 10;
         let mut d = HDict::new();
-        d.set("id", Kind::Ref(HRef::from_val(&format!("p-{i}"))));
+        d.set("id", Kind::Ref(HRef::from_val(format!("p-{i}"))));
         d.set("point", Kind::Marker);
         d.set("his", Kind::Marker);
         d.set("sensor", Kind::Marker);
@@ -46,11 +46,14 @@ fn build_test_graph(n: usize) -> SharedGraph {
         d.set("dis", Kind::Str(format!("Point {i}")));
         d.set(
             "siteRef",
-            Kind::Ref(HRef::from_val(&format!("site-{site_idx}"))),
+            Kind::Ref(HRef::from_val(format!("site-{site_idx}"))),
         );
         d.set(
             "curVal",
-            Kind::Number(Number::new(70.0 + (i as f64) * 0.01, Some("\u{00b0}F".into()))),
+            Kind::Number(Number::new(
+                70.0 + (i as f64) * 0.01,
+                Some("\u{00b0}F".into()),
+            )),
         );
         d.set("kind", Kind::Str("Number".into()));
         graph.add(d).unwrap();
@@ -261,9 +264,7 @@ fn watch_benchmarks(c: &mut Criterion) {
     // watch_poll_no_changes: subscribe once, poll repeatedly (no changes expected)
     let poll_client = server.connect_http();
     let poll_ids: Vec<&str> = watch_ids.iter().map(|s| s.as_str()).collect();
-    let sub_grid = rt.block_on(async {
-        poll_client.watch_sub(&poll_ids, None).await.unwrap()
-    });
+    let sub_grid = rt.block_on(async { poll_client.watch_sub(&poll_ids, None).await.unwrap() });
     let watch_id = match sub_grid.meta.get("watchId") {
         Some(Kind::Str(s)) => s.clone(),
         _ => panic!("watchSub did not return a watchId in grid meta"),
@@ -295,9 +296,7 @@ fn concurrent_benchmarks(c: &mut Criterion) {
                 let mut handles = Vec::new();
                 for (i, client) in clients_10.iter().enumerate() {
                     let id = format!("p-{}", i * 100);
-                    handles.push(async move {
-                        client.read_by_ids(&[id.as_str()]).await.unwrap()
-                    });
+                    handles.push(async move { client.read_by_ids(&[id.as_str()]).await.unwrap() });
                 }
                 for result in join_all(handles).await {
                     black_box(result);
@@ -314,9 +313,7 @@ fn concurrent_benchmarks(c: &mut Criterion) {
                 let mut handles = Vec::new();
                 for (i, client) in clients_50.iter().enumerate() {
                     let id = format!("p-{}", i % 1000);
-                    handles.push(async move {
-                        client.read_by_ids(&[id.as_str()]).await.unwrap()
-                    });
+                    handles.push(async move { client.read_by_ids(&[id.as_str()]).await.unwrap() });
                 }
                 for result in join_all(handles).await {
                     black_box(result);

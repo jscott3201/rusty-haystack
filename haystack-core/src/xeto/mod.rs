@@ -1,17 +1,17 @@
 // Xeto schema language support -- lexer, parser, spec resolution, and fitting.
 
-pub mod lexer;
 pub mod ast;
-pub mod parser;
-pub mod spec;
-pub mod resolver;
-pub mod fitting;
-pub mod loader;
-pub mod export;
 pub mod bundled;
+pub mod export;
+pub mod fitting;
+pub mod lexer;
+pub mod loader;
+pub mod parser;
+pub mod resolver;
+pub mod spec;
 
 pub use ast::{LibPragma, SlotDef, SpecDef, XetoFile};
-pub use fitting::{fits, fits_explain, EntityResolver};
+pub use fitting::{EntityResolver, fits, fits_explain};
 pub use lexer::{Token, TokenType, XetoLexer};
 pub use parser::parse_xeto;
 pub use resolver::XetoResolver;

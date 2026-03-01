@@ -54,10 +54,7 @@ pub fn run(file: &str, format: Option<&str>) {
     let issues = graph.validate();
 
     if issues.is_empty() {
-        println!(
-            "Validation passed: {} entities, 0 issues",
-            graph.len()
-        );
+        println!("Validation passed: {} entities, 0 issues", graph.len());
     } else {
         println!(
             "Validation found {} issues in {} entities:",

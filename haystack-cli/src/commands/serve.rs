@@ -1,10 +1,16 @@
 use haystack_core::graph::{EntityGraph, SharedGraph};
 use haystack_core::ontology::DefNamespace;
-use haystack_server::auth::users::load_users_from_toml;
-use haystack_server::auth::AuthManager;
 use haystack_server::HaystackServer;
+use haystack_server::auth::AuthManager;
+use haystack_server::auth::users::load_users_from_toml;
 
-pub fn run(port: u16, file: Option<&str>, users_file: Option<&str>, host: Option<&str>, demo: bool) {
+pub fn run(
+    port: u16,
+    file: Option<&str>,
+    users_file: Option<&str>,
+    host: Option<&str>,
+    demo: bool,
+) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let ns = DefNamespace::load_standard().unwrap_or_else(|e| {
@@ -68,10 +74,7 @@ pub fn run(port: u16, file: Option<&str>, users_file: Option<&str>, host: Option
         };
 
         let bind_host = host.unwrap_or("0.0.0.0");
-        eprintln!(
-            "Starting Haystack HTTP server on {}:{}",
-            bind_host, port
-        );
+        eprintln!("Starting Haystack HTTP server on {}:{}", bind_host, port);
 
         HaystackServer::new(graph)
             .with_namespace(ns)

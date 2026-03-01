@@ -59,7 +59,7 @@ impl RefAdjacency {
         match self.forward.get(&entity_id) {
             Some(edges) => edges
                 .iter()
-                .filter(|(rt, _)| ref_type.map_or(true, |t| rt == t))
+                .filter(|(rt, _)| ref_type.is_none_or(|t| rt == t))
                 .map(|(_, target)| target.clone())
                 .collect(),
             None => Vec::new(),
@@ -72,7 +72,7 @@ impl RefAdjacency {
         match self.reverse.get(target_ref_val) {
             Some(edges) => edges
                 .iter()
-                .filter(|(rt, _)| ref_type.map_or(true, |t| rt == t))
+                .filter(|(rt, _)| ref_type.is_none_or(|t| rt == t))
                 .map(|(_, sid)| *sid)
                 .collect(),
             None => Vec::new(),

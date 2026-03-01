@@ -3,6 +3,11 @@ name = "haystack-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Core types, codecs, and data structures for Project Haystack"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

@@ -1,6 +1,6 @@
 //! Federation HTTP endpoints — status and sync for remote connectors.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::{Kind, Number};
@@ -90,11 +90,7 @@ pub async fn handle_sync(
 
     let grid = HGrid::from_parts(
         HDict::new(),
-        vec![
-            HCol::new("name"),
-            HCol::new("result"),
-            HCol::new("ok"),
-        ],
+        vec![HCol::new("name"), HCol::new("result"), HCol::new("ok")],
         rows,
     );
 

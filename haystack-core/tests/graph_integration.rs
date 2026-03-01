@@ -62,7 +62,8 @@ fn build_sample_graph() -> EntityGraph {
 
     g.add(make_point("temp-1", "ahu-1", "Zone Temp 1")).unwrap();
     g.add(make_point("temp-2", "ahu-1", "Zone Temp 2")).unwrap();
-    g.add(make_point("temp-3", "boiler-1", "Supply Temp")).unwrap();
+    g.add(make_point("temp-3", "boiler-1", "Supply Temp"))
+        .unwrap();
 
     g
 }
@@ -95,9 +96,7 @@ fn load_entities_and_filter() {
 fn filter_with_comparison() {
     let g = build_sample_graph();
 
-    let results = g
-        .read_all("geoCity == \"Richmond\"", 0)
-        .unwrap();
+    let results = g.read_all("geoCity == \"Richmond\"", 0).unwrap();
     assert_eq!(results.len(), 1);
     let entity = results[0];
     assert_eq!(entity.id().unwrap().val, "site-1");
@@ -193,11 +192,7 @@ fn grid_round_trip() {
 #[test]
 fn from_grid_with_all_entities() {
     // Build a grid manually.
-    let cols = vec![
-        HCol::new("id"),
-        HCol::new("site"),
-        HCol::new("dis"),
-    ];
+    let cols = vec![HCol::new("id"), HCol::new("site"), HCol::new("dis")];
     let mut row1 = HDict::new();
     row1.set("id", Kind::Ref(HRef::from_val("s1")));
     row1.set("site", Kind::Marker);
@@ -212,7 +207,10 @@ fn from_grid_with_all_entities() {
     let g = EntityGraph::from_grid(&grid, None).unwrap();
 
     assert_eq!(g.len(), 2);
-    assert_eq!(g.get("s1").unwrap().get("dis"), Some(&Kind::Str("Site One".into())));
+    assert_eq!(
+        g.get("s1").unwrap().get("dis"),
+        Some(&Kind::Str("Site One".into()))
+    );
 }
 
 // ── Change tracking ──
@@ -340,9 +338,9 @@ depends:[^lib:ph]
     // validate: should find issue with ahu-2.
     let issues = g.validate();
     assert!(!issues.is_empty());
-    let has_ahu2_issue = issues.iter().any(|i| {
-        i.entity.as_deref() == Some("ahu-2") && i.detail.contains("equip")
-    });
+    let has_ahu2_issue = issues
+        .iter()
+        .any(|i| i.entity.as_deref() == Some("ahu-2") && i.detail.contains("equip"));
     assert!(has_ahu2_issue);
 }
 
@@ -512,9 +510,7 @@ fn filter_with_path_traversal() {
     assert_eq!(results.len(), 3);
 
     // Comparison through path traversal
-    let results = g
-        .read_all("siteRef->geoCity == \"Richmond\"", 0)
-        .unwrap();
+    let results = g.read_all("siteRef->geoCity == \"Richmond\"", 0).unwrap();
     // ahu-1 and boiler-1 point to site-1 (Richmond)
     assert_eq!(results.len(), 2);
 }
@@ -550,7 +546,7 @@ fn shared_graph_bulk_concurrent_writes() {
         handles.push(thread::spawn(move || {
             for i in 0..25 {
                 let mut d = HDict::new();
-                d.set("id", Kind::Ref(HRef::from_val(&format!("e-{t}-{i}"))));
+                d.set("id", Kind::Ref(HRef::from_val(format!("e-{t}-{i}"))));
                 d.set("site", Kind::Marker);
                 sg_clone.add(d).unwrap();
             }
@@ -648,11 +644,7 @@ fn shared_graph_read_closure() {
     sg.add(site).unwrap();
 
     // Use the read closure API
-    let dis = sg.read(|g| {
-        g.get("site-1")
-            .and_then(|e| e.get("dis"))
-            .cloned()
-    });
+    let dis = sg.read(|g| g.get("site-1").and_then(|e| e.get("dis")).cloned());
     assert_eq!(dis, Some(Kind::Str("Test".into())));
 }
 

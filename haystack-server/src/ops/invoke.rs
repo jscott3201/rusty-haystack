@@ -3,7 +3,7 @@
 //! Parses `id` and `action` columns from the request grid, resolves
 //! the entity from the graph, and dispatches to the ActionRegistry.
 
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::kinds::Kind;
 
@@ -44,7 +44,7 @@ pub async fn handle(
         _ => {
             return Err(HaystackError::bad_request(
                 "request row must have an 'id' column with a Ref value",
-            ))
+            ));
         }
     };
 
@@ -53,7 +53,7 @@ pub async fn handle(
         _ => {
             return Err(HaystackError::bad_request(
                 "request row must have an 'action' column with a Str value",
-            ))
+            ));
         }
     };
 
@@ -72,7 +72,7 @@ pub async fn handle(
     let result_grid = state
         .actions
         .invoke(&entity, action, &args)
-        .map_err(|e| HaystackError::bad_request(e))?;
+        .map_err(HaystackError::bad_request)?;
 
     let (encoded, ct) = content::encode_response_grid(&result_grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;

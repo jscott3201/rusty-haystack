@@ -310,9 +310,7 @@ mod tests {
         let sg_writer = sg.clone();
         handles.push(thread::spawn(move || {
             for i in 5..15 {
-                sg_writer
-                    .add(make_site(&format!("site-{i}")))
-                    .unwrap();
+                sg_writer.add(make_site(&format!("site-{i}"))).unwrap();
             }
         }));
 

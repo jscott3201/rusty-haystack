@@ -13,7 +13,14 @@ pub fn run_about(url: &str, username: &str, password: &str, format: &str) {
     });
 }
 
-pub fn run_read(url: &str, username: &str, password: &str, filter: &str, limit: Option<usize>, format: &str) {
+pub fn run_read(
+    url: &str,
+    username: &str,
+    password: &str,
+    filter: &str,
+    limit: Option<usize>,
+    format: &str,
+) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let client = connect(url, username, password).await;
@@ -37,7 +44,14 @@ pub fn run_nav(url: &str, username: &str, password: &str, nav_id: Option<&str>, 
     });
 }
 
-pub fn run_his_read(url: &str, username: &str, password: &str, id: &str, range: &str, format: &str) {
+pub fn run_his_read(
+    url: &str,
+    username: &str,
+    password: &str,
+    id: &str,
+    range: &str,
+    format: &str,
+) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let client = connect(url, username, password).await;
@@ -85,7 +99,11 @@ pub fn run_specs(url: &str, username: &str, password: &str, lib: Option<&str>, f
     });
 }
 
-async fn connect(url: &str, username: &str, password: &str) -> HaystackClient<haystack_client::transport::http::HttpTransport> {
+async fn connect(
+    url: &str,
+    username: &str,
+    password: &str,
+) -> HaystackClient<haystack_client::transport::http::HttpTransport> {
     HaystackClient::connect(url, username, password)
         .await
         .unwrap_or_else(|e| {
