@@ -128,12 +128,8 @@ fn required_permission(path: &str) -> Option<&'static str> {
 
     // Write operations
     match path {
-        "/api/pointWrite"
-        | "/api/hisWrite"
-        | "/api/invokeAction"
-        | "/api/loadLib"
-        | "/api/unloadLib"
-        | "/api/import" => return Some("write"),
+        "/api/pointWrite" | "/api/hisWrite" | "/api/invokeAction" | "/api/loadLib"
+        | "/api/unloadLib" | "/api/import" => return Some("write"),
         _ => {}
     }
 

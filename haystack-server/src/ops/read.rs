@@ -161,9 +161,10 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
         } else if let Some(connector) = state.federation.owner_of(ref_val) {
             // Found in federation cache — return cached entity.
             let cached = connector.cached_entities();
-            if let Some(entity) = cached.iter().find(|e| {
-                matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *ref_val)
-            }) {
+            if let Some(entity) = cached
+                .iter()
+                .find(|e| matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *ref_val))
+            {
                 for name in entity.tag_names() {
                     if seen.insert(name.to_string()) {
                         col_set.push(name.to_string());

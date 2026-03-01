@@ -377,8 +377,7 @@ pub fn extract_client_nonce(client_first_b64: &str) -> Result<String, AuthError>
     let bytes = BASE64
         .decode(client_first_b64)
         .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-    let msg = String::from_utf8(bytes)
-        .map_err(|e| AuthError::HandshakeFailed(e.to_string()))?;
+    let msg = String::from_utf8(bytes).map_err(|e| AuthError::HandshakeFailed(e.to_string()))?;
     // Strip GS2 header "n,," prefix
     let bare = msg
         .strip_prefix("n,,")
@@ -421,7 +420,10 @@ pub fn parse_auth_header(header: &str) -> Result<AuthHeader, AuthError> {
             .map_err(|e| AuthError::Base64Error(e.to_string()))?;
         let username = String::from_utf8(username_bytes)
             .map_err(|e| AuthError::InvalidHeader(e.to_string()))?;
-        Ok(AuthHeader::Hello { username, data: data_val })
+        Ok(AuthHeader::Hello {
+            username,
+            data: data_val,
+        })
     } else if let Some(rest) = header.strip_prefix("SCRAM ") {
         let mut handshake_token = None;
         let mut data = None;

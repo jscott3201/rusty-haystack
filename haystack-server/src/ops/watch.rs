@@ -94,9 +94,10 @@ pub async fn handle_sub(
             // Federated entity — look up in the connector's cache and register
             // the ID for remote watch tracking.
             let cached = connector.cached_entities();
-            if let Some(entity) = cached.iter().find(|e| {
-                matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *id)
-            }) {
+            if let Some(entity) = cached
+                .iter()
+                .find(|e| matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *id))
+            {
                 for name in entity.tag_names() {
                     if seen.insert(name.to_string()) {
                         col_set.push(name.to_string());

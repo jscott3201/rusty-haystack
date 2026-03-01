@@ -64,9 +64,7 @@ pub async fn handle(
             let grid = connector
                 .proxy_invoke_action(ref_val, action, args)
                 .await
-                .map_err(|e| {
-                    HaystackError::internal(format!("federation proxy error: {e}"))
-                })?;
+                .map_err(|e| HaystackError::internal(format!("federation proxy error: {e}")))?;
             let (encoded, ct) = content::encode_response_grid(&grid, accept)
                 .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
             return Ok(HttpResponse::Ok().content_type(ct).body(encoded));

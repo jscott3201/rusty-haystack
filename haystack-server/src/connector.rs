@@ -1,8 +1,8 @@
 //! Connector for fetching entities from a remote Haystack server.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -278,10 +278,7 @@ impl Connector {
     // better abstraction over ConnectorClient that exposes typed ops.
     async fn connect_remote(
         &self,
-    ) -> Result<
-        HaystackClient<haystack_client::transport::http::HttpTransport>,
-        String,
-    > {
+    ) -> Result<HaystackClient<haystack_client::transport::http::HttpTransport>, String> {
         HaystackClient::connect(
             &self.config.url,
             &self.config.username,
@@ -292,11 +289,7 @@ impl Connector {
     }
 
     /// Proxy a hisRead request to the remote server.
-    pub async fn proxy_his_read(
-        &self,
-        prefixed_id: &str,
-        range: &str,
-    ) -> Result<HGrid, String> {
+    pub async fn proxy_his_read(&self, prefixed_id: &str, range: &str) -> Result<HGrid, String> {
         let id = self.strip_id(prefixed_id);
         let client = self.connect_remote().await?;
         client
@@ -348,8 +341,10 @@ impl Connector {
 
         // Build a single-row grid with columns from the entity.
         let col_names: Vec<String> = stripped.tag_names().map(|s| s.to_string()).collect();
-        let cols: Vec<haystack_core::data::HCol> =
-            col_names.iter().map(|n| haystack_core::data::HCol::new(n.as_str())).collect();
+        let cols: Vec<haystack_core::data::HCol> = col_names
+            .iter()
+            .map(|n| haystack_core::data::HCol::new(n.as_str()))
+            .collect();
         let grid = HGrid::from_parts(HDict::new(), cols, vec![stripped]);
 
         let client = self.connect_remote().await?;
@@ -385,11 +380,7 @@ impl Connector {
             loop {
                 match connector.sync().await {
                     Ok(count) => {
-                        log::debug!(
-                            "Synced {} entities from {}",
-                            count,
-                            connector.config.name
-                        );
+                        log::debug!("Synced {} entities from {}", count, connector.config.name);
                     }
                     Err(e) => {
                         log::error!("Sync failed for {}: {}", connector.config.name, e);
@@ -617,8 +608,14 @@ mod tests {
         let config: ConnectorConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.ws_url, Some("wss://remote:8443/api/ws".to_string()));
         assert_eq!(config.sync_interval_secs, Some(30));
-        assert_eq!(config.client_cert, Some("/etc/certs/client.pem".to_string()));
-        assert_eq!(config.client_key, Some("/etc/certs/client-key.pem".to_string()));
+        assert_eq!(
+            config.client_cert,
+            Some("/etc/certs/client.pem".to_string())
+        );
+        assert_eq!(
+            config.client_key,
+            Some("/etc/certs/client-key.pem".to_string())
+        );
         assert_eq!(config.ca_cert, Some("/etc/certs/ca.pem".to_string()));
     }
 

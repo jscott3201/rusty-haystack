@@ -8,6 +8,6 @@ name = "rusty_haystack"
 crate-type = ["cdylib"]
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.4.0", path = "../haystack-core" }
+haystack-core = { package = "rusty-haystack-core", version = "0.4.1", path = "../haystack-core" }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 chrono = "0.4"

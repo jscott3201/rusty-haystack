@@ -3,8 +3,8 @@
 //! These tests use Actix Web's test infrastructure with pre-populated
 //! federation caches — no real remote servers are involved.
 
-use actix_web::{web, App};
 use actix_web::test as actix_test;
+use actix_web::{App, web};
 
 use haystack_core::codecs;
 use haystack_core::data::{HCol, HDict, HGrid};
@@ -70,7 +70,10 @@ fn make_site(id: &str) -> HDict {
     d.set("id", Kind::Ref(HRef::from_val(id)));
     d.set("site", Kind::Marker);
     d.set("dis", Kind::Str(format!("Site {id}")));
-    d.set("area", Kind::Number(Number::new(4500.0, Some("ft\u{b2}".into()))));
+    d.set(
+        "area",
+        Kind::Number(Number::new(4500.0, Some("ft\u{b2}".into()))),
+    );
     d
 }
 
@@ -112,26 +115,28 @@ fn read_id_grid(id: &str) -> HGrid {
 #[actix_web::test]
 async fn federation_status_with_connectors() {
     let mut fed = Federation::new();
-    fed.add(connector_config("Remote A", "http://remote-a:8080/api", Some("ra-")));
-    fed.add(connector_config("Remote B", "http://remote-b:8080/api", Some("rb-")));
+    fed.add(connector_config(
+        "Remote A",
+        "http://remote-a:8080/api",
+        Some("ra-"),
+    ));
+    fed.add(connector_config(
+        "Remote B",
+        "http://remote-b:8080/api",
+        Some("rb-"),
+    ));
 
     // Populate cache for Remote A with 2 entities.
-    fed.connectors[0].update_cache(vec![
-        make_site("ra-site-1"),
-        make_site("ra-site-2"),
-    ]);
+    fed.connectors[0].update_cache(vec![make_site("ra-site-1"), make_site("ra-site-2")]);
     // Populate cache for Remote B with 1 entity.
-    fed.connectors[1].update_cache(vec![
-        make_site("rb-site-1"),
-    ]);
+    fed.connectors[1].update_cache(vec![make_site("rb-site-1")]);
 
     let state = test_app_state_with_federation(fed);
 
-    let app = actix_test::init_service(
-        App::new()
-            .app_data(state.clone())
-            .route("/api/federation/status", web::get().to(ops::federation::handle_status)),
-    )
+    let app = actix_test::init_service(App::new().app_data(state.clone()).route(
+        "/api/federation/status",
+        web::get().to(ops::federation::handle_status),
+    ))
     .await;
 
     let req = actix_test::TestRequest::get()
@@ -148,9 +153,18 @@ async fn federation_status_with_connectors() {
 
     // Should have 5 columns.
     assert!(grid.col("name").is_some(), "missing 'name' column");
-    assert!(grid.col("entityCount").is_some(), "missing 'entityCount' column");
-    assert!(grid.col("transport").is_some(), "missing 'transport' column");
-    assert!(grid.col("connected").is_some(), "missing 'connected' column");
+    assert!(
+        grid.col("entityCount").is_some(),
+        "missing 'entityCount' column"
+    );
+    assert!(
+        grid.col("transport").is_some(),
+        "missing 'transport' column"
+    );
+    assert!(
+        grid.col("connected").is_some(),
+        "missing 'connected' column"
+    );
     assert!(grid.col("lastSync").is_some(), "missing 'lastSync' column");
 
     // Should have 2 rows (one per connector).
@@ -178,11 +192,10 @@ async fn federation_status_with_connectors() {
 async fn federation_status_no_connectors() {
     let state = test_app_state();
 
-    let app = actix_test::init_service(
-        App::new()
-            .app_data(state.clone())
-            .route("/api/federation/status", web::get().to(ops::federation::handle_status)),
-    )
+    let app = actix_test::init_service(App::new().app_data(state.clone()).route(
+        "/api/federation/status",
+        web::get().to(ops::federation::handle_status),
+    ))
     .await;
 
     let req = actix_test::TestRequest::get()
@@ -212,7 +225,11 @@ async fn federation_status_no_connectors() {
 #[actix_web::test]
 async fn filter_read_merges_federated_entities() {
     let mut fed = Federation::new();
-    fed.add(connector_config("Remote A", "http://remote-a:8080/api", Some("ra-")));
+    fed.add(connector_config(
+        "Remote A",
+        "http://remote-a:8080/api",
+        Some("ra-"),
+    ));
 
     // Populate federation cache with a remote site.
     fed.connectors[0].update_cache(vec![make_site("ra-site-1")]);
@@ -248,7 +265,11 @@ async fn filter_read_merges_federated_entities() {
     let grid = decode_grid_zinc(body_str);
 
     // Should have both local and federated entities.
-    assert_eq!(grid.rows.len(), 2, "expected 2 rows (1 local + 1 federated)");
+    assert_eq!(
+        grid.rows.len(),
+        2,
+        "expected 2 rows (1 local + 1 federated)"
+    );
 
     // Collect the IDs from the result.
     let ids: Vec<String> = grid
@@ -260,15 +281,25 @@ async fn filter_read_merges_federated_entities() {
         })
         .collect();
 
-    assert!(ids.contains(&"local-site-1".to_string()), "missing local entity");
-    assert!(ids.contains(&"ra-site-1".to_string()), "missing federated entity");
+    assert!(
+        ids.contains(&"local-site-1".to_string()),
+        "missing local entity"
+    );
+    assert!(
+        ids.contains(&"ra-site-1".to_string()),
+        "missing federated entity"
+    );
 }
 
 /// Test 4: ID read returns a federated entity by its prefixed ID.
 #[actix_web::test]
 async fn id_read_returns_federated_entity() {
     let mut fed = Federation::new();
-    fed.add(connector_config("Remote A", "http://remote-a:8080/api", Some("ra-")));
+    fed.add(connector_config(
+        "Remote A",
+        "http://remote-a:8080/api",
+        Some("ra-"),
+    ));
 
     // Populate cache with a known entity.
     fed.connectors[0].update_cache(vec![make_site("ra-site-1")]);
@@ -318,7 +349,11 @@ async fn id_read_returns_federated_entity() {
 #[actix_web::test]
 async fn id_read_prefers_local_over_federated() {
     let mut fed = Federation::new();
-    fed.add(connector_config("Remote A", "http://remote-a:8080/api", Some("ra-")));
+    fed.add(connector_config(
+        "Remote A",
+        "http://remote-a:8080/api",
+        Some("ra-"),
+    ));
 
     // Put entity with id "shared-1" in federation cache.
     let mut fed_entity = HDict::new();
@@ -375,18 +410,18 @@ async fn id_read_prefers_local_over_federated() {
 #[actix_web::test]
 async fn sync_one_nonexistent_connector() {
     let mut fed = Federation::new();
-    fed.add(connector_config("Remote A", "http://remote-a:8080/api", Some("ra-")));
+    fed.add(connector_config(
+        "Remote A",
+        "http://remote-a:8080/api",
+        Some("ra-"),
+    ));
 
     let state = test_app_state_with_federation(fed);
 
-    let app = actix_test::init_service(
-        App::new()
-            .app_data(state.clone())
-            .route(
-                "/api/federation/sync/{name}",
-                web::post().to(ops::federation::handle_sync_one),
-            ),
-    )
+    let app = actix_test::init_service(App::new().app_data(state.clone()).route(
+        "/api/federation/sync/{name}",
+        web::post().to(ops::federation::handle_sync_one),
+    ))
     .await;
 
     let req = actix_test::TestRequest::post()

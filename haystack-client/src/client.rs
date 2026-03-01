@@ -59,9 +59,8 @@ impl HaystackClient<HttpTransport> {
         let mut builder = reqwest::Client::builder().identity(identity);
 
         if let Some(ref ca) = tls.ca_cert_pem {
-            let cert = reqwest::Certificate::from_pem(ca).map_err(|e| {
-                ClientError::Connection(format!("invalid CA certificate: {e}"))
-            })?;
+            let cert = reqwest::Certificate::from_pem(ca)
+                .map_err(|e| ClientError::Connection(format!("invalid CA certificate: {e}")))?;
             builder = builder.add_root_certificate(cert);
         }
 
@@ -69,8 +68,7 @@ impl HaystackClient<HttpTransport> {
             .build()
             .map_err(|e| ClientError::Connection(format!("TLS client build failed: {e}")))?;
 
-        let auth_token =
-            crate::auth::authenticate(&client, url, username, password).await?;
+        let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
         let transport = HttpTransport::new(url, auth_token);
         Ok(Self { transport })
     }

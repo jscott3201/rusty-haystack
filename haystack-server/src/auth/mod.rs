@@ -16,9 +16,9 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use haystack_core::auth::{
-    DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake, derive_credentials,
-    extract_client_nonce, format_auth_info, format_www_authenticate, generate_nonce,
-    server_first_message, server_verify_final,
+    DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake, derive_credentials, extract_client_nonce,
+    format_auth_info, format_www_authenticate, generate_nonce, server_first_message,
+    server_verify_final,
 };
 
 use users::{UserRecord, load_users_from_str, load_users_from_toml};
@@ -131,8 +131,9 @@ impl AuthManager {
 
         // Extract client nonce from client-first-message, or generate one
         let client_nonce = match client_first_b64 {
-            Some(data) => extract_client_nonce(data)
-                .map_err(|e| format!("invalid client-first data: {e}"))?,
+            Some(data) => {
+                extract_client_nonce(data).map_err(|e| format!("invalid client-first data: {e}"))?
+            }
             None => generate_nonce(),
         };
 

@@ -33,8 +33,8 @@ impl TlsConfig {
         key_path: &str,
         ca_path: Option<&str>,
     ) -> Result<Self, String> {
-        let client_cert_pem = std::fs::read(cert_path)
-            .map_err(|e| format!("reading cert '{cert_path}': {e}"))?;
+        let client_cert_pem =
+            std::fs::read(cert_path).map_err(|e| format!("reading cert '{cert_path}': {e}"))?;
         let client_key_pem =
             std::fs::read(key_path).map_err(|e| format!("reading key '{key_path}': {e}"))?;
         let ca_cert_pem = if let Some(ca) = ca_path {

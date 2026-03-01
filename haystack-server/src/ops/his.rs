@@ -213,17 +213,13 @@ pub async fn handle_write(
             let grid = connector
                 .proxy_his_write(&id, items)
                 .await
-                .map_err(|e| {
-                    HaystackError::internal(format!("federation proxy error: {e}"))
-                })?;
+                .map_err(|e| HaystackError::internal(format!("federation proxy error: {e}")))?;
 
             let (encoded, ct) = content::encode_response_grid(&grid, accept)
                 .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
             return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
         }
-        return Err(HaystackError::not_found(format!(
-            "entity not found: {id}"
-        )));
+        return Err(HaystackError::not_found(format!("entity not found: {id}")));
     }
 
     // Parse rows into HisItems.

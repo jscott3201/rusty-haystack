@@ -56,9 +56,7 @@ pub async fn handle(
                 connector
                     .proxy_point_write(&ref_val, level as u8, &val)
                     .await
-                    .map_err(|e| {
-                        HaystackError::internal(format!("federation proxy error: {e}"))
-                    })?;
+                    .map_err(|e| HaystackError::internal(format!("federation proxy error: {e}")))?;
                 continue;
             }
             return Err(HaystackError::not_found(format!(
