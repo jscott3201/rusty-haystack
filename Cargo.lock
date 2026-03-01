@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-cli"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "clap",
  "rusty-haystack-client",
@@ -2094,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-client"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "base64",
  "futures-util",
@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-core"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "base64",
  "chrono",
@@ -2136,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-server"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "actix-http",
  "actix-rt",

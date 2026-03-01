@@ -9,6 +9,9 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lib]
+name = "haystack_server"
+
 [dependencies]
 haystack-core = { package = "rusty-haystack-core", path = "../haystack-core" }
 haystack-client = { package = "rusty-haystack-client", path = "../haystack-client" }
