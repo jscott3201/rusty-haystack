@@ -421,6 +421,11 @@ impl EntityGraph {
         self.entities.contains_key(ref_val)
     }
 
+    /// Returns references to all entities in the graph.
+    pub fn all(&self) -> Vec<&HDict> {
+        self.entities.values().collect()
+    }
+
     // ── Internal indexing ──
 
     /// Add tag bitmap entries for an entity.

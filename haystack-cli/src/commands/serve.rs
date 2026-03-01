@@ -10,7 +10,10 @@ pub fn run(
     users_file: Option<&str>,
     host: Option<&str>,
     demo: bool,
+    federation_file: Option<&str>,
 ) {
+    env_logger::init();
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let ns = DefNamespace::load_standard().unwrap_or_else(|e| {
@@ -73,12 +76,24 @@ pub fn run(
             AuthManager::empty()
         };
 
+        let federation = if let Some(ff) = federation_file {
+            let fed = haystack_server::Federation::from_toml_file(ff).unwrap_or_else(|e| {
+                eprintln!("Error loading federation config: {}", e);
+                std::process::exit(1);
+            });
+            eprintln!("Loaded {} federation connectors", fed.connector_count());
+            fed
+        } else {
+            haystack_server::Federation::new()
+        };
+
         let bind_host = host.unwrap_or("0.0.0.0");
         eprintln!("Starting Haystack HTTP server on {}:{}", bind_host, port);
 
         HaystackServer::new(graph)
             .with_namespace(ns)
             .with_auth(auth)
+            .with_federation(federation)
             .host(bind_host)
             .port(port)
             .run()

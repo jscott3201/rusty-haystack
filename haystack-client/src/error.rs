@@ -6,6 +6,8 @@ pub enum ClientError {
     ServerError(String),
     #[error("transport error: {0}")]
     Transport(String),
+    #[error("connection error: {0}")]
+    Connection(String),
     #[error("codec error: {0}")]
     Codec(String),
     #[error("connection closed")]

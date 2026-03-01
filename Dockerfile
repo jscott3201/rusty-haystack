@@ -15,7 +15,7 @@ RUN mkdir -p rusty-haystack/src && \
     printf '[package]\nname = "rusty-haystack"\nversion = "0.1.0"\nedition = "2024"\n\n[lib]\nname = "rusty_haystack"\ncrate-type = ["cdylib"]\n\n[dependencies]\npyo3 = { version = "0.24", features = ["extension-module"] }\n' > rusty-haystack/Cargo.toml && \
     echo '' > rusty-haystack/src/lib.rs
 
-RUN cargo build --release -p haystack-cli && \
+RUN cargo build --release -p rusty-haystack-cli && \
     strip target/release/haystack
 
 # Runtime stage

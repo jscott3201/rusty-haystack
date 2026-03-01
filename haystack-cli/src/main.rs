@@ -48,6 +48,9 @@ enum Commands {
         /// Load a demo building automation dataset
         #[arg(long)]
         demo: bool,
+        /// TOML file with federation connector configuration
+        #[arg(long)]
+        federation: Option<String>,
     },
     /// Validate entities in a file against the standard Haystack ontology
     Validate {
@@ -267,12 +270,14 @@ fn main() {
             users,
             host,
             demo,
+            federation,
         } => commands::serve::run(
             port,
             file.as_deref(),
             users.as_deref(),
             host.as_deref(),
             demo,
+            federation.as_deref(),
         ),
         Commands::Validate { file, format } => commands::validate::run(&file, format.as_deref()),
         Commands::Info { def } => commands::info::run(def.as_deref()),

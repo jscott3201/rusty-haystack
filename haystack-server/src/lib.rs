@@ -12,3 +12,4 @@ pub mod state;
 pub mod ws;
 
 pub use app::HaystackServer;
+pub use federation::Federation;

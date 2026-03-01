@@ -16,8 +16,9 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use haystack_core::auth::{
-    DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake, derive_credentials, format_auth_info,
-    format_www_authenticate, generate_nonce, server_first_message, server_verify_final,
+    DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake, derive_credentials,
+    extract_client_nonce, format_auth_info, format_www_authenticate, generate_nonce,
+    server_first_message, server_verify_final,
 };
 
 use users::{UserRecord, load_users_from_str, load_users_from_toml};
@@ -111,17 +112,29 @@ impl AuthManager {
 
     /// Handle a HELLO request: look up user, create SCRAM handshake.
     ///
+    /// `client_first_b64` is the optional base64-encoded client-first-message
+    /// containing the client nonce. If absent, the server generates a nonce
+    /// (but the handshake will fail if the client expects its own nonce).
+    ///
     /// Returns the `WWW-Authenticate` header value for the 401 response.
     /// Unknown users receive a fake but plausible challenge to prevent
     /// username enumeration.
-    pub fn handle_hello(&self, username: &str) -> Result<String, String> {
+    pub fn handle_hello(
+        &self,
+        username: &str,
+        client_first_b64: Option<&str>,
+    ) -> Result<String, String> {
         let credentials = match self.users.get(username) {
             Some(user_record) => user_record.credentials.clone(),
             None => self.fake_credentials(username),
         };
 
-        // Generate client nonce stand-in (server extracts from client-first)
-        let client_nonce = generate_nonce();
+        // Extract client nonce from client-first-message, or generate one
+        let client_nonce = match client_first_b64 {
+            Some(data) => extract_client_nonce(data)
+                .map_err(|e| format!("invalid client-first data: {e}"))?,
+            None => generate_nonce(),
+        };
 
         // Create server-first-message
         let (handshake, server_first_b64) =
@@ -283,7 +296,7 @@ permissions = ["read"]
         let mgr = make_test_manager();
         // Unknown users now get a plausible SCRAM challenge instead of an
         // error, preventing username enumeration.
-        let result = mgr.handle_hello("nonexistent");
+        let result = mgr.handle_hello("nonexistent", None);
         assert!(result.is_ok());
         let www_auth = result.unwrap();
         assert!(www_auth.contains("SCRAM"));
@@ -293,7 +306,7 @@ permissions = ["read"]
     #[test]
     fn hello_known_user_succeeds() {
         let mgr = make_test_manager();
-        let result = mgr.handle_hello("admin");
+        let result = mgr.handle_hello("admin", None);
         assert!(result.is_ok());
         let www_auth = result.unwrap();
         assert!(www_auth.contains("SCRAM"));
@@ -303,8 +316,8 @@ permissions = ["read"]
     #[test]
     fn hello_known_and_unknown_users_look_similar() {
         let mgr = make_test_manager();
-        let known = mgr.handle_hello("admin").unwrap();
-        let unknown = mgr.handle_hello("nonexistent").unwrap();
+        let known = mgr.handle_hello("admin", None).unwrap();
+        let unknown = mgr.handle_hello("nonexistent", None).unwrap();
 
         // Both responses must have the same structural format so that an
         // attacker cannot distinguish real from fake users.

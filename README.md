@@ -14,11 +14,12 @@ A high-performance Rust implementation of the [Project Haystack](https://project
 - **Entity graph** — in-memory graph with filter queries, ref traversal, changelog, and concurrent read/write via `SharedGraph`
 - **Haystack ontology** — bundled `ph`, `phScience`, `phIoT`, `phIct` definitions with subtype checking and entity validation
 - **Xeto type system** — spec parsing, structural fitting, slot resolution with inheritance, and library management
-- **HTTP server** — Actix Web 4 with 30+ API endpoints, SCRAM SHA-256 authentication, WebSocket watches, and federation
-- **HTTP/WS client** — async client with SCRAM handshake, pluggable transport (HTTP + WebSocket)
-- **CLI** — import, export, serve, validate, info, client queries, and user management
+- **HTTP server** — Actix Web 4 with 30+ API endpoints, SCRAM SHA-256 authentication, WebSocket watches
+- **Federation** — aggregate entities from multiple remote Haystack servers with background sync, write forwarding, history fan-out, watch federation, WebSocket-first transport, and mTLS support
+- **HTTP/WS client** — async client with SCRAM handshake, pluggable transport (HTTP + WebSocket), mTLS
+- **CLI** — import, export, serve, validate, info, client queries, user management, and federation config
 - **Python bindings** — PyO3 module with full type coverage (`import rusty_haystack`)
-- **Docker** — multi-stage Alpine image for deployment
+- **Docker** — multi-stage Alpine image with a [5-container federation demo](demo/FederatedDemo.md)
 
 ## Performance
 
@@ -38,7 +39,7 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 
 ### Prerequisites
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.93+ (edition 2024)
 - cargo
 
 ### Build
@@ -77,14 +78,25 @@ docker build -t rusty-haystack .
 docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 ```
 
+### Federation Demo
+
+Run a 5-container federation cluster (1 lead + 4 building nodes):
+
+```sh
+cd demo
+docker compose up --build
+```
+
+See [demo/FederatedDemo.md](demo/FederatedDemo.md) for details.
+
 ## Workspace Structure
 
 | Crate | Description |
 |-------|-------------|
 | [`haystack-core`](haystack-core/) | Core library: kinds, data (HGrid/HDict/HCol), codecs, filter, ontology, xeto, graph, auth |
-| [`haystack-server`](haystack-server/) | Actix Web HTTP API server with 30+ endpoints, SCRAM auth, WebSocket, watches |
-| [`haystack-client`](haystack-client/) | Async HTTP + WebSocket client with SCRAM handshake |
-| [`haystack-cli`](haystack-cli/) | CLI binary: import, export, serve, validate, info, client, user |
+| [`haystack-server`](haystack-server/) | Actix Web HTTP API server with 30+ endpoints, SCRAM auth, WebSocket, watches, federation |
+| [`haystack-client`](haystack-client/) | Async HTTP + WebSocket client with SCRAM handshake, mTLS |
+| [`haystack-cli`](haystack-cli/) | CLI binary: import, export, serve, validate, info, client, user, federation |
 | [`rusty-haystack`](rusty-haystack/) | PyO3 Python bindings (requires maturin) |
 
 ## Documentation
@@ -97,6 +109,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | [Client Library](docs/client.md) | HaystackClient API, transports, authentication |
 | [CLI Reference](docs/cli.md) | All commands, flags, and examples |
 | [Python Bindings](docs/python.md) | Module overview, classes, functions, examples |
+| [Federation](docs/federation.md) | Federation setup, TOML config, transport, sync, write proxying |
 | [Configuration](docs/configuration.md) | Server config, users TOML, permissions, Docker |
 
 ## License

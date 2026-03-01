@@ -1,0 +1,35 @@
+# Federation config for the lead node.
+# Connects to 4 remote nodes on the internal Docker network.
+# Each node uses --demo data (36 entities), prefixed by building name.
+
+[connectors.building-a]
+name = "Building A"
+url = "http://node-1:8080/api"
+username = "federation"
+password = "federation"
+id_prefix = "bldg-a-"
+sync_interval_secs = 15
+
+[connectors.building-b]
+name = "Building B"
+url = "http://node-2:8080/api"
+username = "federation"
+password = "federation"
+id_prefix = "bldg-b-"
+sync_interval_secs = 15
+
+[connectors.building-c]
+name = "Building C"
+url = "http://node-3:8080/api"
+username = "federation"
+password = "federation"
+id_prefix = "bldg-c-"
+sync_interval_secs = 15
+
+[connectors.building-d]
+name = "Building D"
+url = "http://node-4:8080/api"
+username = "federation"
+password = "federation"
+id_prefix = "bldg-d-"
+sync_interval_secs = 15

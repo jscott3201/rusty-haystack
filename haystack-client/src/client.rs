@@ -30,6 +30,50 @@ impl HaystackClient<HttpTransport> {
         let transport = HttpTransport::new(url, auth_token);
         Ok(Self { transport })
     }
+
+    /// Connect to a Haystack server via HTTP with mutual TLS (mTLS) client
+    /// certificate authentication, then perform SCRAM authentication.
+    ///
+    /// Builds a custom `reqwest::Client` configured with the provided TLS
+    /// identity (client certificate + key) and optional CA certificate, then
+    /// runs the standard SCRAM handshake over that client.
+    ///
+    /// # Arguments
+    /// * `url` - The server API root (e.g. `https://localhost:8443/api`)
+    /// * `username` - The username to authenticate as
+    /// * `password` - The user's plaintext password
+    /// * `tls` - The mTLS configuration (cert, key, optional CA)
+    pub async fn connect_with_tls(
+        url: &str,
+        username: &str,
+        password: &str,
+        tls: &crate::tls::TlsConfig,
+    ) -> Result<Self, ClientError> {
+        // Combine cert + key into a single PEM buffer for reqwest::Identity
+        let mut combined_pem = tls.client_cert_pem.clone();
+        combined_pem.extend_from_slice(&tls.client_key_pem);
+
+        let identity = reqwest::Identity::from_pem(&combined_pem)
+            .map_err(|e| ClientError::Connection(format!("invalid client certificate: {e}")))?;
+
+        let mut builder = reqwest::Client::builder().identity(identity);
+
+        if let Some(ref ca) = tls.ca_cert_pem {
+            let cert = reqwest::Certificate::from_pem(ca).map_err(|e| {
+                ClientError::Connection(format!("invalid CA certificate: {e}"))
+            })?;
+            builder = builder.add_root_certificate(cert);
+        }
+
+        let client = builder
+            .build()
+            .map_err(|e| ClientError::Connection(format!("TLS client build failed: {e}")))?;
+
+        let auth_token =
+            crate::auth::authenticate(&client, url, username, password).await?;
+        let transport = HttpTransport::new(url, auth_token);
+        Ok(Self { transport })
+    }
 }
 
 impl HaystackClient<WsTransport> {

@@ -83,12 +83,31 @@ pub async fn handle_sub(
 
     for id in &ids {
         if let Some(entity) = state.graph.get(id) {
+            // Local entity — include directly.
             for name in entity.tag_names() {
                 if seen.insert(name.to_string()) {
                     col_set.push(name.to_string());
                 }
             }
             rows.push(entity);
+        } else if let Some(connector) = state.federation.owner_of(id) {
+            // Federated entity — look up in the connector's cache and register
+            // the ID for remote watch tracking.
+            let cached = connector.cached_entities();
+            if let Some(entity) = cached.iter().find(|e| {
+                matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *id)
+            }) {
+                for name in entity.tag_names() {
+                    if seen.insert(name.to_string()) {
+                        col_set.push(name.to_string());
+                    }
+                }
+                rows.push(entity.clone());
+            }
+            connector.add_remote_watch(id);
+            // TODO: For real-time push, establish a WS watch subscription on
+            // the remote server. Currently the background sync loop keeps the
+            // cache fresh and watchPoll detects changes from cache updates.
         }
     }
 
@@ -231,6 +250,13 @@ pub async fn handle_unsub(
             return Err(HaystackError::not_found(format!(
                 "watch not found: {watch_id}"
             )));
+        }
+
+        // Remove remote watch tracking for any federated IDs being unsubscribed.
+        for id in &ids {
+            if let Some(connector) = state.federation.owner_of(id) {
+                connector.remove_remote_watch(id);
+            }
         }
     }
 

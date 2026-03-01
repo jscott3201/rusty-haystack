@@ -24,6 +24,7 @@ haystack serve [OPTIONS]
 | `--file` | `-f` | Load entities from file at startup | |
 | `--users` | `-u` | TOML file with user credentials for SCRAM auth | |
 | `--demo` | | Load a demo building automation dataset | |
+| `--federation` | | TOML file with federation connector configuration | |
 
 Examples:
 
@@ -36,6 +37,9 @@ haystack serve --file data/entities.zinc --users users.toml --port 9090
 
 # Custom host binding
 haystack serve --demo --host 127.0.0.1 --port 8080
+
+# With federation
+haystack serve --file entities.zinc --users users.toml --federation federation.toml
 ```
 
 ### `import`

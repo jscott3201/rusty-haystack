@@ -92,6 +92,9 @@ impl HaystackServer {
             federation: self.federation,
         });
 
+        // Start federation background sync tasks
+        let _sync_handles = state.federation.start_background_sync();
+
         log::info!("Starting haystack-server on {}:{}", self.host, self.port);
 
         HttpServer::new(move || {
@@ -118,6 +121,11 @@ fn required_permission(path: &str) -> Option<&'static str> {
         return Some("admin");
     }
 
+    // Federation sync (exact and per-connector)
+    if path.starts_with("/api/federation/sync") {
+        return Some("write");
+    }
+
     // Write operations
     match path {
         "/api/pointWrite"
@@ -125,8 +133,7 @@ fn required_permission(path: &str) -> Option<&'static str> {
         | "/api/invokeAction"
         | "/api/loadLib"
         | "/api/unloadLib"
-        | "/api/import"
-        | "/api/federation/sync" => return Some("write"),
+        | "/api/import" => return Some("write"),
         _ => {}
     }
 
@@ -257,6 +264,14 @@ mod tests {
         assert_eq!(required_permission("/api/invokeAction"), Some("write"));
         assert_eq!(required_permission("/api/import"), Some("write"));
         assert_eq!(required_permission("/api/federation/sync"), Some("write"));
+    }
+
+    #[test]
+    fn required_permission_federation_sync_named() {
+        assert_eq!(
+            required_permission("/api/federation/sync/building-a"),
+            Some("write")
+        );
     }
 
     #[test]

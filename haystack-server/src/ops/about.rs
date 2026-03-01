@@ -47,9 +47,9 @@ pub async fn handle(req: HttpRequest, state: web::Data<AppState>) -> HttpRespons
         }
         Some(header) => {
             match parse_auth_header(header) {
-                Ok(AuthHeader::Hello { username }) => {
+                Ok(AuthHeader::Hello { username, data }) => {
                     // HELLO phase: create handshake and return challenge
-                    match state.auth.handle_hello(&username) {
+                    match state.auth.handle_hello(&username, data.as_deref()) {
                         Ok(www_auth) => HttpResponse::Unauthorized()
                             .insert_header(("WWW-Authenticate", www_auth))
                             .body(""),

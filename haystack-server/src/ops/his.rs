@@ -69,6 +69,20 @@ pub async fn handle_read(
         }
     };
 
+    // Check if entity is local; if not, try federation proxy.
+    if !state.graph.contains(&id)
+        && let Some(connector) = state.federation.owner_of(&id)
+    {
+        let grid = connector
+            .proxy_his_read(&id, range_str)
+            .await
+            .map_err(|e| HaystackError::internal(format!("federation proxy error: {e}")))?;
+
+        let (encoded, ct) = content::encode_response_grid(&grid, accept)
+            .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
+        return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
+    }
+
     // Parse range into (start, end) pair of DateTime<FixedOffset>.
     let (start, end) = parse_range(range_str)
         .map_err(|e| HaystackError::bad_request(format!("hisRead: bad range: {e}")))?;
@@ -190,6 +204,27 @@ pub async fn handle_write(
             ));
         }
     };
+
+    // Check federation: if entity is not in local graph, proxy to remote.
+    if !state.graph.contains(&id) {
+        if let Some(connector) = state.federation.owner_of(&id) {
+            // Forward the raw rows (with ts/val) to the remote server.
+            let items: Vec<HDict> = request_grid.rows.to_vec();
+            let grid = connector
+                .proxy_his_write(&id, items)
+                .await
+                .map_err(|e| {
+                    HaystackError::internal(format!("federation proxy error: {e}"))
+                })?;
+
+            let (encoded, ct) = content::encode_response_grid(&grid, accept)
+                .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
+            return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
+        }
+        return Err(HaystackError::not_found(format!(
+            "entity not found: {id}"
+        )));
+    }
 
     // Parse rows into HisItems.
     let mut items = Vec::with_capacity(request_grid.len());

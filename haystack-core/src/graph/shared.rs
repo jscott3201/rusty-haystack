@@ -83,6 +83,11 @@ impl SharedGraph {
         self.read(|g| g.is_empty())
     }
 
+    /// Return all entities as owned clones.
+    pub fn all_entities(&self) -> Vec<HDict> {
+        self.read(|g| g.all().into_iter().cloned().collect())
+    }
+
     /// Check if an entity with the given ref value exists.
     pub fn contains(&self, ref_val: &str) -> bool {
         self.read(|g| g.contains(ref_val))

@@ -56,7 +56,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::scope("/federation")
                     .route("/status", web::get().to(federation::handle_status))
-                    .route("/sync", web::post().to(federation::handle_sync)),
+                    .route("/sync", web::post().to(federation::handle_sync))
+                    .route("/sync/{name}", web::post().to(federation::handle_sync_one)),
             ),
     );
 }

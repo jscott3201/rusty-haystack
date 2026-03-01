@@ -4,7 +4,7 @@ use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::filter::{matches, parse_filter};
-use haystack_core::kinds::Kind;
+use haystack_core::kinds::{HRef, Kind};
 
 use crate::content;
 use crate::error::HaystackError;
@@ -72,28 +72,48 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
     };
 
     let effective_limit = if limit == 0 { usize::MAX } else { limit };
+    let is_wildcard = filter == "*";
 
     // Read from local graph.
-    let local_grid = state
-        .graph
-        .read_filter(filter, limit)
-        .map_err(|e| HaystackError::bad_request(format!("filter error: {e}")))?;
+    let mut results: Vec<HDict> = if is_wildcard {
+        // Wildcard: return all entities from the graph.
+        state.graph.all_entities()
+    } else {
+        let local_grid = state
+            .graph
+            .read_filter(filter, limit)
+            .map_err(|e| HaystackError::bad_request(format!("filter error: {e}")))?;
+        local_grid.rows
+    };
 
-    let mut results: Vec<HDict> = local_grid.rows;
+    // Apply limit to local results.
+    if results.len() > effective_limit {
+        results.truncate(effective_limit);
+    }
 
     // Merge federated entities if we have not yet hit the limit.
     if results.len() < effective_limit {
         let federated = state.federation.all_cached_entities();
         if !federated.is_empty() {
-            let ast = parse_filter(filter)
-                .map_err(|e| HaystackError::bad_request(format!("filter error: {e}")))?;
-
-            for entity in federated {
-                if results.len() >= effective_limit {
-                    break;
-                }
-                if matches(&ast, &entity, None) {
+            if is_wildcard {
+                // Wildcard: include all federated entities up to the limit.
+                for entity in federated {
+                    if results.len() >= effective_limit {
+                        break;
+                    }
                     results.push(entity);
+                }
+            } else {
+                let ast = parse_filter(filter)
+                    .map_err(|e| HaystackError::bad_request(format!("filter error: {e}")))?;
+
+                for entity in federated {
+                    if results.len() >= effective_limit {
+                        break;
+                    }
+                    if matches(&ast, &entity, None) {
+                        results.push(entity);
+                    }
                 }
             }
         }
@@ -138,14 +158,31 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
                 }
             }
             results.push(entity);
+        } else if let Some(connector) = state.federation.owner_of(ref_val) {
+            // Found in federation cache — return cached entity.
+            let cached = connector.cached_entities();
+            if let Some(entity) = cached.iter().find(|e| {
+                matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *ref_val)
+            }) {
+                for name in entity.tag_names() {
+                    if seen.insert(name.to_string()) {
+                        col_set.push(name.to_string());
+                    }
+                }
+                results.push(entity.clone());
+            } else {
+                // Connector owns it but entity not in cache (shouldn't normally happen).
+                let mut missing = HDict::new();
+                missing.set("id", Kind::Ref(HRef::from_val(ref_val.as_str())));
+                if seen.insert("id".to_string()) {
+                    col_set.push("id".to_string());
+                }
+                results.push(missing);
+            }
         } else {
-            // Entity not found: add empty row with just the id marker
-            // (per Haystack spec, missing entities are still returned)
+            // Not found anywhere — return missing entity row.
             let mut missing = HDict::new();
-            missing.set(
-                "id",
-                Kind::Ref(haystack_core::kinds::HRef::from_val(ref_val.as_str())),
-            );
+            missing.set("id", Kind::Ref(HRef::from_val(ref_val.as_str())));
             if seen.insert("id".to_string()) {
                 col_set.push("id".to_string());
             }

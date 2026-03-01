@@ -57,6 +57,25 @@ pub async fn handle(
         }
     };
 
+    // Check federation: if entity is not in local graph, proxy to remote.
+    if !state.graph.contains(ref_val) {
+        if let Some(connector) = state.federation.owner_of(ref_val) {
+            let args = row.clone();
+            let grid = connector
+                .proxy_invoke_action(ref_val, action, args)
+                .await
+                .map_err(|e| {
+                    HaystackError::internal(format!("federation proxy error: {e}"))
+                })?;
+            let (encoded, ct) = content::encode_response_grid(&grid, accept)
+                .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
+            return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
+        }
+        return Err(HaystackError::not_found(format!(
+            "entity not found: {ref_val}"
+        )));
+    }
+
     // Resolve entity from the graph
     let entity = state
         .graph

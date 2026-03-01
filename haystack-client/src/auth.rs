@@ -37,11 +37,13 @@ pub async fn authenticate(
     // -----------------------------------------------------------------------
     // Phase 1: HELLO
     // -----------------------------------------------------------------------
-    // Send GET /api/about with Authorization: HELLO username=<base64(username)>
+    // Send GET /api/about with Authorization: HELLO username=<base64(username)>, data=<client_first>
     let username_b64 = BASE64.encode(username.as_bytes());
-    let hello_header = format!("HELLO username={}", username_b64);
-
-    let (client_nonce, _client_first_b64) = auth::client_first_message(username);
+    let (client_nonce, client_first_b64) = auth::client_first_message(username);
+    let hello_header = format!(
+        "HELLO username={}, data={}",
+        username_b64, client_first_b64
+    );
 
     let hello_resp = client
         .get(&about_url)

@@ -14,7 +14,7 @@ haystack-core          (foundation — no workspace deps)
     +-- rusty-haystack     (PyO3 Python bindings, core only)
 ```
 
-`haystack-core` is the foundation. Every other crate depends on it directly. `haystack-server` also depends on `haystack-client` (for federation sync). `haystack-cli` ties everything together into a single binary.
+`haystack-core` is the foundation. Every other crate depends on it directly. `haystack-server` also depends on `haystack-client` (for [federation](federation.md) sync). `haystack-cli` ties everything together into a single binary.
 
 ## Core Abstractions
 

@@ -70,6 +70,20 @@ pub async fn handle_import(
             }
         };
 
+        // Check federation: if entity is owned by a remote connector, proxy import.
+        if let Some(connector) = state.federation.owner_of(&ref_val) {
+            connector
+                .proxy_import(row)
+                .await
+                .map_err(|e| {
+                    HaystackError::internal(format!(
+                        "federation import failed for {ref_val}: {e}"
+                    ))
+                })?;
+            count += 1;
+            continue;
+        }
+
         if state.graph.contains(&ref_val) {
             // Update existing entity
             state.graph.update(&ref_val, row.clone()).map_err(|e| {

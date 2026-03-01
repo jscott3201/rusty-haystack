@@ -71,6 +71,8 @@ pub struct ScramHandshake {
 pub enum AuthHeader {
     Hello {
         username: String,
+        /// Base64-encoded client-first-message (contains the client nonce).
+        data: Option<String>,
     },
     Scram {
         handshake_token: String,
@@ -367,6 +369,31 @@ pub fn server_verify_final(
     Ok(handshake.server_signature.clone())
 }
 
+/// Extract the client nonce from a base64-encoded client-first-message.
+///
+/// The client-first-message format is `n,,n=<username>,r=<client_nonce>`.
+/// Returns the raw nonce string.
+pub fn extract_client_nonce(client_first_b64: &str) -> Result<String, AuthError> {
+    let bytes = BASE64
+        .decode(client_first_b64)
+        .map_err(|e| AuthError::Base64Error(e.to_string()))?;
+    let msg = String::from_utf8(bytes)
+        .map_err(|e| AuthError::HandshakeFailed(e.to_string()))?;
+    // Strip GS2 header "n,," prefix
+    let bare = msg
+        .strip_prefix("n,,")
+        .ok_or_else(|| AuthError::HandshakeFailed("missing GS2 header in client-first".into()))?;
+    // Parse n=<user>,r=<nonce>
+    for part in bare.split(',') {
+        if let Some(nonce) = part.strip_prefix("r=") {
+            return Ok(nonce.to_string());
+        }
+    }
+    Err(AuthError::HandshakeFailed(
+        "missing r= nonce in client-first-message".into(),
+    ))
+}
+
 /// Parse a Haystack `Authorization` header value.
 ///
 /// Supported formats:
@@ -377,16 +404,24 @@ pub fn parse_auth_header(header: &str) -> Result<AuthHeader, AuthError> {
     let header = header.trim();
 
     if let Some(rest) = header.strip_prefix("HELLO ") {
-        let username_b64 = rest
-            .trim()
-            .strip_prefix("username=")
+        let mut username_b64_val = None;
+        let mut data_val = None;
+        for part in rest.split(',') {
+            let part = part.trim();
+            if let Some(val) = part.strip_prefix("username=") {
+                username_b64_val = Some(val.trim().to_string());
+            } else if let Some(val) = part.strip_prefix("data=") {
+                data_val = Some(val.trim().to_string());
+            }
+        }
+        let username_b64 = username_b64_val
             .ok_or_else(|| AuthError::InvalidHeader("missing username= in HELLO".into()))?;
         let username_bytes = BASE64
-            .decode(username_b64.trim())
+            .decode(&username_b64)
             .map_err(|e| AuthError::Base64Error(e.to_string()))?;
         let username = String::from_utf8(username_bytes)
             .map_err(|e| AuthError::InvalidHeader(e.to_string()))?;
-        Ok(AuthHeader::Hello { username })
+        Ok(AuthHeader::Hello { username, data: data_val })
     } else if let Some(rest) = header.strip_prefix("SCRAM ") {
         let mut handshake_token = None;
         let mut data = None;
@@ -498,6 +533,7 @@ mod tests {
             parsed,
             AuthHeader::Hello {
                 username: "user".to_string(),
+                data: None,
             }
         );
     }
@@ -557,7 +593,7 @@ mod tests {
         let hello_header = format!("HELLO username={}", username_b64);
         let parsed = parse_auth_header(&hello_header).unwrap();
         match &parsed {
-            AuthHeader::Hello { username: u } => assert_eq!(u, username),
+            AuthHeader::Hello { username: u, .. } => assert_eq!(u, username),
             _ => panic!("expected Hello variant"),
         }
 

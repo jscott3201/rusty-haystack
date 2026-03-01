@@ -77,7 +77,7 @@ Read entities by filter or by ID.
 - Filter mode: `filter` column (Str), optional `limit` column (Number)
 - ID mode: `id` column (Ref) — one row per entity
 
-Includes results from federated remote connectors.
+Includes results from [federated](federation.md) remote connectors. In filter mode, local results are returned first, then matching federated entities up to the limit. In ID mode, if an entity is not found locally but is owned by a federated connector, the cached entity is returned from the connector's cache.
 
 **Response**: grid with all matched entities.
 
@@ -133,6 +133,8 @@ Range formats:
 - `"YYYY-MM-DD"` — single date (midnight to midnight)
 - `"YYYY-MM-DD,YYYY-MM-DD"` — start (inclusive) to end (exclusive midnight)
 
+**Federation**: If the entity is not in the local graph but is owned by a federated connector, the request is proxied to the remote server. The ID prefix is stripped before forwarding.
+
 **Response grid columns**: `ts` (DateTime), `val` (varies)
 
 #### POST `/api/export`
@@ -151,9 +153,9 @@ Export all entities as JSON-LD. Returns `application/ld+json` content type.
 
 #### GET `/api/federation/status`
 
-Federation connector status.
+Federation connector status. See [Federation](federation.md) for full setup and usage details.
 
-**Response grid columns**: `name` (Str), `entityCount` (Number)
+**Response grid columns**: `name` (Str), `entityCount` (Number), `transport` (Str — `"http"` or `"ws"`), `connected` (Bool), `lastSync` (DateTime or Null)
 
 ### Watch Operations (read permission)
 
@@ -187,17 +189,23 @@ Write a value to a writable point.
 
 **Request grid**: `id` (Ref), `level` (Number, 1-17, default 17), `val` (varies). Target entity must have `writable` marker.
 
+**Federation**: If the entity is not in the local graph but is owned by a federated connector, the write is proxied to the remote server.
+
 #### POST `/api/hisWrite`
 
 Write historical data.
 
 **Request grid meta**: `id` (Ref). Rows: `ts` (DateTime), `val` (varies).
 
+**Federation**: If the entity is not in the local graph but is owned by a federated connector, the write is proxied to the remote server.
+
 #### POST `/api/invokeAction`
 
 Invoke an action on an entity.
 
 **Request grid**: `id` (Ref), `action` (Str), plus additional columns for action arguments.
+
+**Federation**: If the entity is not in the local graph but is owned by a federated connector, the action is proxied to the remote server.
 
 **Response**: grid returned by the action handler.
 
@@ -206,6 +214,8 @@ Invoke an action on an entity.
 Bulk import entities. Updates existing entities (by ID), adds new ones.
 
 **Request grid**: rows with `id` (Ref) and entity tags.
+
+**Federation**: If an entity's ID is owned by a federated connector, that entity is proxied to the remote server's `import` op (ID prefix stripped). Local and federated entities can be mixed in the same request.
 
 **Response grid**: `count` (Number) of imported entities.
 
@@ -243,7 +253,15 @@ Validate entities against the ontology.
 
 #### POST `/api/federation/sync`
 
-Synchronize all federated remote connectors.
+Synchronize all federated remote connectors. See [Federation](federation.md) for full setup and usage details.
+
+**Response grid columns**: `name` (Str), `result` (Str), `ok` (Bool)
+
+#### POST `/api/federation/sync/{name}`
+
+Synchronize a single federated connector by name. See [Federation](federation.md) for details.
+
+**Path parameter**: `name` — the connector's display name (URL-encoded if it contains spaces).
 
 **Response grid columns**: `name` (Str), `result` (Str), `ok` (Bool)
 
@@ -362,5 +380,5 @@ Authorization: BEARER authToken=<token>
 |------------|-----------|
 | (none) | `GET /api/about`, `GET /api/ops`, `GET /api/formats` |
 | read | `read`, `nav`, `defs`, `libs`, `specs`, `spec`, `hisRead`, `export`, `watchSub`, `watchPoll`, `watchUnsub`, `close`, `rdf/*`, `federation/status` |
-| write | `pointWrite`, `hisWrite`, `invokeAction`, `import`, `loadLib`, `unloadLib`, `exportLib`, `validate`, `federation/sync` |
+| write | `pointWrite`, `hisWrite`, `invokeAction`, `import`, `loadLib`, `unloadLib`, `exportLib`, `validate`, `federation/sync`, `federation/sync/{name}` |
 | admin | `system/status`, `system/backup`, `system/restore` |

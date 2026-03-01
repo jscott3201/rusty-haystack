@@ -1,0 +1,11 @@
+# Demo users for federation demo.
+# admin/admin — full access on the lead node
+# federation/federation — read-only for inter-node sync
+
+[users.admin]
+password_hash = "g4jZqiZjg+GvonO8pbBedw==:100000:KI+14J0dKlktPn261PD8pTsyj0rUAVV9jxOzHdkyJrw=:hZdpZyBvFB/2lorWYoE0Xp9SJTWId/vBP9m1kq18bLg="
+permissions = ["read", "write", "admin"]
+
+[users.federation]
+password_hash = "MUybXgXTn+aMeAoeIQau9w==:100000:iaaVKzzM/HjEvDJeDGuin45xQnlc7/jSs5dwMBScVgs=:gPYXuLnD14lCdoJ/CI5sfEnKJbrgkf9jf2p2SBC/hNc="
+permissions = ["read"]

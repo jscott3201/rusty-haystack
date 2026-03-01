@@ -13,10 +13,11 @@ name = "haystack"
 path = "src/main.rs"
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.3.2", path = "../haystack-core" }
-haystack-server = { package = "rusty-haystack-server", version = "0.3.2", path = "../haystack-server" }
-haystack-client = { package = "rusty-haystack-client", version = "0.3.2", path = "../haystack-client" }
+haystack-core = { package = "rusty-haystack-core", version = "0.4.0", path = "../haystack-core" }
+haystack-server = { package = "rusty-haystack-server", version = "0.4.0", path = "../haystack-server" }
+haystack-client = { package = "rusty-haystack-client", version = "0.4.0", path = "../haystack-client" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+env_logger = "0.11"

@@ -49,6 +49,23 @@ pub async fn handle(
             )));
         }
 
+        // Check federation: if entity is not in local graph, proxy to remote.
+        if !state.graph.contains(&ref_val) {
+            if let Some(connector) = state.federation.owner_of(&ref_val) {
+                let val = row.get("val").cloned().unwrap_or(Kind::Null);
+                connector
+                    .proxy_point_write(&ref_val, level as u8, &val)
+                    .await
+                    .map_err(|e| {
+                        HaystackError::internal(format!("federation proxy error: {e}"))
+                    })?;
+                continue;
+            }
+            return Err(HaystackError::not_found(format!(
+                "entity not found: {ref_val}"
+            )));
+        }
+
         // Check that the target entity has the `writable` marker tag
         let entity = state
             .graph
