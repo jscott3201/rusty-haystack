@@ -959,89 +959,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
-name = "haystack-cli"
-version = "0.2.3"
-dependencies = [
- "clap",
- "haystack-client",
- "haystack-core",
- "haystack-server",
- "serde",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "haystack-client"
-version = "0.2.3"
-dependencies = [
- "base64",
- "futures-util",
- "haystack-core",
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "url",
-]
-
-[[package]]
-name = "haystack-core"
-version = "0.2.3"
-dependencies = [
- "base64",
- "chrono",
- "criterion",
- "dashmap",
- "hmac",
- "parking_lot",
- "pbkdf2",
- "proptest",
- "rand 0.9.2",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "slotmap",
- "smallvec",
- "subtle",
- "test-case",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "haystack-server"
-version = "0.2.3"
-dependencies = [
- "actix-http",
- "actix-rt",
- "actix-web",
- "actix-ws",
- "base64",
- "chrono",
- "criterion",
- "env_logger",
- "futures-util",
- "haystack-client",
- "haystack-core",
- "hmac",
- "log",
- "parking_lot",
- "rand 0.9.2",
- "serde",
- "serde_json",
- "sha2",
- "time",
- "tokio",
- "toml",
- "uuid",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2155,11 +2072,94 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack"
-version = "0.2.3"
+version = "0.2.9"
 dependencies = [
  "chrono",
- "haystack-core",
  "pyo3",
+ "rusty-haystack-core",
+]
+
+[[package]]
+name = "rusty-haystack-cli"
+version = "0.2.9"
+dependencies = [
+ "clap",
+ "rusty-haystack-client",
+ "rusty-haystack-core",
+ "rusty-haystack-server",
+ "serde",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "rusty-haystack-client"
+version = "0.2.9"
+dependencies = [
+ "base64",
+ "futures-util",
+ "log",
+ "reqwest",
+ "rusty-haystack-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
+name = "rusty-haystack-core"
+version = "0.2.9"
+dependencies = [
+ "base64",
+ "chrono",
+ "criterion",
+ "dashmap",
+ "hmac",
+ "parking_lot",
+ "pbkdf2",
+ "proptest",
+ "rand 0.9.2",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "slotmap",
+ "smallvec",
+ "subtle",
+ "test-case",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rusty-haystack-server"
+version = "0.2.9"
+dependencies = [
+ "actix-http",
+ "actix-rt",
+ "actix-web",
+ "actix-ws",
+ "base64",
+ "chrono",
+ "criterion",
+ "env_logger",
+ "futures-util",
+ "hmac",
+ "log",
+ "parking_lot",
+ "rand 0.9.2",
+ "rusty-haystack-client",
+ "rusty-haystack-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "toml",
+ "uuid",
 ]
 
 [[package]]

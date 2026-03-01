@@ -1,5 +1,5 @@
 [package]
-name = "haystack-cli"
+name = "rusty-haystack-cli"
 version.workspace = true
 edition.workspace = true
 description = "CLI tool for importing, exporting, serving, and querying Project Haystack data"
@@ -13,9 +13,9 @@ name = "haystack"
 path = "src/main.rs"
 
 [dependencies]
-haystack-core = { path = "../haystack-core" }
-haystack-server = { path = "../haystack-server" }
-haystack-client = { path = "../haystack-client" }
+haystack-core = { package = "rusty-haystack-core", path = "../haystack-core" }
+haystack-server = { package = "rusty-haystack-server", path = "../haystack-server" }
+haystack-client = { package = "rusty-haystack-client", path = "../haystack-client" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
