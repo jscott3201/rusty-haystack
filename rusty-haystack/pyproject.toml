@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rusty-haystack"
-version = "0.3.1"
+version = "0.3.2"
 description = "Fast Python bindings for Project Haystack — types, codecs (Zinc/Trio/JSON), filters, ontology, and Xeto support powered by Rust"
 readme = "README.md"
 requires-python = ">=3.11"
