@@ -525,6 +525,7 @@ pub struct PyHDateTime {
 impl PyHDateTime {
     #[new]
     #[pyo3(signature = (year, month, day, hour, minute, second, offset_seconds, tz_name))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         year: i32,
         month: u32,
@@ -567,7 +568,7 @@ impl PyHDateTime {
             chrono::Timelike::hour(dt) as u8,
             chrono::Timelike::minute(dt) as u8,
             chrono::Timelike::second(dt) as u8,
-            (chrono::Timelike::nanosecond(dt) / 1000) as u32,
+            chrono::Timelike::nanosecond(dt) / 1000,
             Some(&tz_obj),
         )
     }

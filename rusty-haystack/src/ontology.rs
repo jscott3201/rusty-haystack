@@ -213,7 +213,7 @@ impl PyDefNamespace {
     fn unload_lib(&mut self, name: &str) -> PyResult<()> {
         self.inner
             .unload_lib(name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     /// Get a spec by qualified name (e.g. "ph::Ahu").
@@ -236,6 +236,6 @@ impl PyDefNamespace {
     fn export_lib_xeto(&self, name: &str) -> PyResult<String> {
         self.inner
             .export_lib_xeto(name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 }

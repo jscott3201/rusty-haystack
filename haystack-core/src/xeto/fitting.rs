@@ -230,30 +230,26 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 
         // minVal / maxVal for Numbers
         if let Kind::Number(num) = val {
-            if let Some(Kind::Number(min)) = slot.meta.get("minVal") {
-                if num.val < min.val {
-                    issues.push(FitIssue::ConstraintViolation {
-                        tag: slot.name.clone(),
-                        constraint: "minVal".into(),
-                        detail: format!("{} < {}", num.val, min.val),
-                    });
-                }
+            if let Some(Kind::Number(min)) = slot.meta.get("minVal") && num.val < min.val {
+                issues.push(FitIssue::ConstraintViolation {
+                    tag: slot.name.clone(),
+                    constraint: "minVal".into(),
+                    detail: format!("{} < {}", num.val, min.val),
+                });
             }
-            if let Some(Kind::Number(max)) = slot.meta.get("maxVal") {
-                if num.val > max.val {
-                    issues.push(FitIssue::ConstraintViolation {
-                        tag: slot.name.clone(),
-                        constraint: "maxVal".into(),
-                        detail: format!("{} > {}", num.val, max.val),
-                    });
-                }
+            if let Some(Kind::Number(max)) = slot.meta.get("maxVal") && num.val > max.val {
+                issues.push(FitIssue::ConstraintViolation {
+                    tag: slot.name.clone(),
+                    constraint: "maxVal".into(),
+                    detail: format!("{} > {}", num.val, max.val),
+                });
             }
             // unitless constraint
-            if slot.meta.contains_key("unitless") && num.unit.is_some() {
+            if slot.meta.contains_key("unitless") && let Some(unit) = &num.unit {
                 issues.push(FitIssue::ConstraintViolation {
                     tag: slot.name.clone(),
                     constraint: "unitless".into(),
-                    detail: format!("expected no unit, got '{}'", num.unit.as_ref().unwrap()),
+                    detail: format!("expected no unit, got '{}'", unit),
                 });
             }
             // unit constraint
@@ -280,23 +276,19 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 
         // minSize / maxSize / nonEmpty / pattern for Strings
         if let Kind::Str(s) = val {
-            if let Some(Kind::Number(min)) = slot.meta.get("minSize") {
-                if (s.len() as f64) < min.val {
-                    issues.push(FitIssue::ConstraintViolation {
-                        tag: slot.name.clone(),
-                        constraint: "minSize".into(),
-                        detail: format!("length {} < {}", s.len(), min.val),
-                    });
-                }
+            if let Some(Kind::Number(min)) = slot.meta.get("minSize") && (s.len() as f64) < min.val {
+                issues.push(FitIssue::ConstraintViolation {
+                    tag: slot.name.clone(),
+                    constraint: "minSize".into(),
+                    detail: format!("length {} < {}", s.len(), min.val),
+                });
             }
-            if let Some(Kind::Number(max)) = slot.meta.get("maxSize") {
-                if (s.len() as f64) > max.val {
-                    issues.push(FitIssue::ConstraintViolation {
-                        tag: slot.name.clone(),
-                        constraint: "maxSize".into(),
-                        detail: format!("length {} > {}", s.len(), max.val),
-                    });
-                }
+            if let Some(Kind::Number(max)) = slot.meta.get("maxSize") && (s.len() as f64) > max.val {
+                issues.push(FitIssue::ConstraintViolation {
+                    tag: slot.name.clone(),
+                    constraint: "maxSize".into(),
+                    detail: format!("length {} > {}", s.len(), max.val),
+                });
             }
             if slot.meta.contains_key("nonEmpty") && s.trim().is_empty() {
                 issues.push(FitIssue::ConstraintViolation {
@@ -329,23 +321,19 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 
         // minSize / maxSize for Lists
         if let Kind::List(items) = val {
-            if let Some(Kind::Number(min)) = slot.meta.get("minSize") {
-                if (items.len() as f64) < min.val {
-                    issues.push(FitIssue::ConstraintViolation {
-                        tag: slot.name.clone(),
-                        constraint: "minSize".into(),
-                        detail: format!("list length {} < {}", items.len(), min.val),
-                    });
-                }
+            if let Some(Kind::Number(min)) = slot.meta.get("minSize") && (items.len() as f64) < min.val {
+                issues.push(FitIssue::ConstraintViolation {
+                    tag: slot.name.clone(),
+                    constraint: "minSize".into(),
+                    detail: format!("list length {} < {}", items.len(), min.val),
+                });
             }
-            if let Some(Kind::Number(max)) = slot.meta.get("maxSize") {
-                if (items.len() as f64) > max.val {
-                    issues.push(FitIssue::ConstraintViolation {
-                        tag: slot.name.clone(),
-                        constraint: "maxSize".into(),
-                        detail: format!("list length {} > {}", items.len(), max.val),
-                    });
-                }
+            if let Some(Kind::Number(max)) = slot.meta.get("maxSize") && (items.len() as f64) > max.val {
+                issues.push(FitIssue::ConstraintViolation {
+                    tag: slot.name.clone(),
+                    constraint: "maxSize".into(),
+                    detail: format!("list length {} > {}", items.len(), max.val),
+                });
             }
         }
     }
@@ -423,10 +411,8 @@ fn traverse_refs(
             continue;
         }
         if let Some(target) = resolver(&ref_val) {
-            if transitive {
-                if let Some(Kind::Ref(next)) = target.get(ref_tag) {
-                    queue.push(next.clone());
-                }
+            if transitive && let Some(Kind::Ref(next)) = target.get(ref_tag) {
+                queue.push(next.clone());
             }
             results.push(target);
         }

@@ -194,14 +194,14 @@ async fn auth_middleware(
                     match user {
                         Some(auth_user) => {
                             // Check permission for the requested path
-                            if let Some(required) = required_permission(&path) {
-                                if !AuthManager::check_permission(&auth_user, required) {
-                                    return Err(crate::error::HaystackError::forbidden(format!(
-                                        "user '{}' lacks '{}' permission",
-                                        auth_user.username, required
-                                    ))
-                                    .into());
-                                }
+                            if let Some(required) = required_permission(&path)
+                                && !AuthManager::check_permission(&auth_user, required)
+                            {
+                                return Err(crate::error::HaystackError::forbidden(format!(
+                                    "user '{}' lacks '{}' permission",
+                                    auth_user.username, required
+                                ))
+                                .into());
                             }
 
                             // Inject AuthUser into request extensions

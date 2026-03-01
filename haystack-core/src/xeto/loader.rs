@@ -47,12 +47,11 @@ pub fn load_xeto_dir(dir: &Path, ns: &DefNamespace) -> Result<(String, Lib, Vec<
             .map_err(|e| XetoError::Load(format!("cannot read {:?}: {e}", entry.path())))?;
 
         // Try to extract lib name from pragma if we haven't found one yet
-        if lib_name.is_none() {
-            if let Ok(xf) = parse_xeto(&content) {
-                if let Some(ref pragma) = xf.pragma {
-                    lib_name = Some(pragma.name.clone());
-                }
-            }
+        if lib_name.is_none()
+            && let Ok(xf) = parse_xeto(&content)
+            && let Some(ref pragma) = xf.pragma
+        {
+            lib_name = Some(pragma.name.clone());
         }
 
         all_source.push_str(&content);
@@ -117,18 +116,18 @@ fn load_from_ast(
         let mut resolved = spec_from_def(spec_def, lib_name);
 
         // Resolve base type name
-        if let Some(ref base) = resolved.base {
-            if let Some(resolved_name) = resolver.resolve(base, lib_name) {
-                resolved.base = Some(resolved_name);
-            }
+        if let Some(ref base) = resolved.base
+            && let Some(resolved_name) = resolver.resolve(base, lib_name)
+        {
+            resolved.base = Some(resolved_name);
         }
 
         // Resolve slot type_refs
         for slot in &mut resolved.slots {
-            if let Some(ref type_ref) = slot.type_ref {
-                if let Some(resolved_name) = resolver.resolve(type_ref, lib_name) {
-                    slot.type_ref = Some(resolved_name);
-                }
+            if let Some(ref type_ref) = slot.type_ref
+                && let Some(resolved_name) = resolver.resolve(type_ref, lib_name)
+            {
+                slot.type_ref = Some(resolved_name);
             }
         }
 

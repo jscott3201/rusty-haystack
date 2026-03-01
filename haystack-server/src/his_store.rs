@@ -85,15 +85,11 @@ impl HisStore {
         series
             .iter()
             .filter(|item| {
-                if let Some(ref s) = start {
-                    if item.ts < *s {
-                        return false;
-                    }
+                if let Some(ref s) = start && item.ts < *s {
+                    return false;
                 }
-                if let Some(ref e) = end {
-                    if item.ts > *e {
-                        return false;
-                    }
+                if let Some(ref e) = end && item.ts > *e {
+                    return false;
                 }
                 true
             })

@@ -55,10 +55,8 @@ impl TagBitmapIndex {
         let bit = 1u64 << (entity_id % 64);
 
         for tag in tags {
-            if let Some(bm) = self.bitmaps.get_mut(tag.as_str()) {
-                if word_idx < bm.len() {
-                    bm[word_idx] &= !bit;
-                }
+            if let Some(bm) = self.bitmaps.get_mut(tag.as_str()) && word_idx < bm.len() {
+                bm[word_idx] &= !bit;
             }
         }
     }

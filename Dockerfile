@@ -1,5 +1,5 @@
 # Multi-stage build for haystack CLI + server
-FROM rust:1.87-alpine AS builder
+FROM rust:1.93-alpine AS builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
 

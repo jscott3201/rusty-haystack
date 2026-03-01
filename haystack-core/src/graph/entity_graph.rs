@@ -238,12 +238,11 @@ impl EntityGraph {
                 if results.len() >= effective_limit {
                     break;
                 }
-                if let Some(ref_val) = self.reverse_id.get(&eid) {
-                    if let Some(entity) = self.entities.get(ref_val) {
-                        if matches_with_ns(&ast, entity, Some(&resolver), ns) {
-                            results.push(entity);
-                        }
-                    }
+                if let Some(ref_val) = self.reverse_id.get(&eid)
+                    && let Some(entity) = self.entities.get(ref_val)
+                    && matches_with_ns(&ast, entity, Some(&resolver), ns)
+                {
+                    results.push(entity);
                 }
             }
         } else {
@@ -317,17 +316,15 @@ impl EntityGraph {
                 if name == "id" {
                     continue;
                 }
-                if let Kind::Ref(r) = val {
-                    if !self.entities.contains_key(&r.val) {
-                        issues.push(ValidationIssue {
-                            entity: entity_ref.map(|s| s.to_string()),
-                            issue_type: "dangling_ref".to_string(),
-                            detail: format!(
-                                "tag '{}' references '{}' which does not exist in the graph",
-                                name, r.val
-                            ),
-                        });
-                    }
+                if let Kind::Ref(r) = val && !self.entities.contains_key(&r.val) {
+                    issues.push(ValidationIssue {
+                        entity: entity_ref.map(|s| s.to_string()),
+                        issue_type: "dangling_ref".to_string(),
+                        detail: format!(
+                            "tag '{}' references '{}' which does not exist in the graph",
+                            name, r.val
+                        ),
+                    });
                 }
             }
         }

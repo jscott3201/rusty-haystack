@@ -99,10 +99,10 @@ impl Spec {
             return Vec::new();
         }
         let mut inherited: Vec<Slot> = Vec::new();
-        if let Some(ref base_name) = self.base {
-            if let Some(base_spec) = specs.get(base_name) {
-                inherited = base_spec.collect_effective_slots(specs, visited);
-            }
+        if let Some(ref base_name) = self.base
+            && let Some(base_spec) = specs.get(base_name)
+        {
+            inherited = base_spec.collect_effective_slots(specs, visited);
         }
         let own_names: std::collections::HashSet<&str> =
             self.slots.iter().map(|s| s.name.as_str()).collect();

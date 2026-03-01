@@ -44,28 +44,22 @@ impl XetoResolver {
         }
 
         // 2. Current library's own specs
-        if let Some(specs) = self.lib_specs.get(context_lib) {
-            if specs.contains(name) {
-                return Some(format!("{}::{}", context_lib, name));
-            }
+        if let Some(specs) = self.lib_specs.get(context_lib) && specs.contains(name) {
+            return Some(format!("{}::{}", context_lib, name));
         }
 
         // 3. Declared dependencies
         if let Some(deps) = self.lib_depends.get(context_lib) {
             for dep in deps {
-                if let Some(specs) = self.lib_specs.get(dep.as_str()) {
-                    if specs.contains(name) {
-                        return Some(format!("{}::{}", dep, name));
-                    }
+                if let Some(specs) = self.lib_specs.get(dep.as_str()) && specs.contains(name) {
+                    return Some(format!("{}::{}", dep, name));
                 }
             }
         }
 
         // 4. sys builtins
-        if let Some(specs) = self.lib_specs.get("sys") {
-            if specs.contains(name) {
-                return Some(format!("sys::{}", name));
-            }
+        if let Some(specs) = self.lib_specs.get("sys") && specs.contains(name) {
+            return Some(format!("sys::{}", name));
         }
 
         // 5. All known libraries (fallback)

@@ -86,10 +86,10 @@ pub fn resolve_permissions(entry: &UserEntry) -> Vec<String> {
     if let Some(ref perms) = entry.permissions {
         return perms.clone();
     }
-    if let Some(ref role_name) = entry.role {
-        if let Some(role) = builtin_role(role_name) {
-            return role.permissions;
-        }
+    if let Some(ref role_name) = entry.role
+        && let Some(role) = builtin_role(role_name)
+    {
+        return role.permissions;
     }
     Vec::new()
 }

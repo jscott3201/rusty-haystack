@@ -109,10 +109,9 @@ pub async fn handle_close(req: HttpRequest, state: web::Data<AppState>) -> HttpR
             .headers()
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
+            && let Ok(AuthHeader::Bearer { auth_token }) = parse_auth_header(auth_header)
         {
-            if let Ok(AuthHeader::Bearer { auth_token }) = parse_auth_header(auth_header) {
-                state.auth.revoke_token(&auth_token);
-            }
+            state.auth.revoke_token(&auth_token);
         }
         log::info!("User {} logged out", user.username);
     }

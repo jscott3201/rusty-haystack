@@ -187,13 +187,11 @@ impl DefNamespace {
         };
 
         for parent in &is_ {
-            if let Some(parent_def) = self.defs.get(parent) {
-                if parent_def.kind() == DefKind::Choice {
-                    self.choice_index
-                        .entry(parent.clone())
-                        .or_default()
-                        .push(symbol.to_string());
-                }
+            if let Some(parent_def) = self.defs.get(parent) && parent_def.kind() == DefKind::Choice {
+                self.choice_index
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(symbol.to_string());
             }
         }
     }
