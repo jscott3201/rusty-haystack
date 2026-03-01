@@ -7,7 +7,7 @@
 | Platform | macOS (Darwin 25.4.0, arm64) |
 | CPU | Apple M2 |
 | Memory | 8 GB |
-| Rust | 1.87.0 (17067e9ac 2025-05-09) |
+| Rust | 1.93.1 |
 | Profile | release (optimized) |
 | Framework | Criterion 0.5 |
 | Date | 2026-03-01 |
@@ -165,6 +165,63 @@ Real HTTP benchmarks against a live server (actix-web) with 1000 pre-loaded enti
 
 ---
 
+## Federation Operations (haystack-server)
+
+Federation benchmarks using 3 in-process servers: 1 lead server with 2 federated remotes (10,000 entities each, 20,200 total across federation). Remote servers run with SCRAM SHA-256 auth enabled. Proxy operations (hisRead, hisWrite, pointWrite) include a full SCRAM handshake + HTTP round-trip to the owning remote.
+
+### Sync — Fetch All Entities from Remotes
+
+| Benchmark | Mean | Description |
+|-----------|------|-------------|
+| `read_all_10k_from_remote` | 42.1 ms | Read all 10,100 entities from one remote |
+| `read_all_20k_both_remotes` | 64.9 ms | Read all entities from both remotes concurrently |
+
+**Observations:**
+- Single remote sync (10k entities): ~42ms (~240k entities/sec)
+- Concurrent dual-remote sync: ~65ms (only ~1.5x single, good parallelism)
+
+### Federated Reads — Cache-Based Merging
+
+| Benchmark | Mean | Req/sec | Description |
+|-----------|------|---------|-------------|
+| `read_by_id` | 6.13 ms | 163 | Read single federated entity by prefixed ID |
+| `filter_site` | 13.65 ms | 73 | Filter `site and dis=="Site 5"` across federation |
+| `filter_all_points_20k` | 81.7 ms | 12 | Filter all 20k federated points |
+| `nav_root` | 47.4 us | 21,097 | Navigation tree root (local only) |
+
+**Observations:**
+- Federated read-by-id (~6.1ms) is ~55x slower than local read-by-id (~111us) due to federation cache search + Zinc encoding of merged results
+- Filtering 20k federated entities: ~82ms (~245k entities/sec filtering throughput)
+- Nav root is fast (~47us) since it doesn't traverse federated caches
+
+### Federated Write Proxy — Persistent Connection to Remote
+
+| Benchmark | Mean | Req/sec | Description |
+|-----------|------|---------|-------------|
+| `his_read_proxied_1000` | 3.89 ms | 257 | hisRead 1000 items, proxied through lead to remote |
+| `his_write_proxied_100` | 503 us | 1,988 | hisWrite 100 items, proxied through lead to remote |
+| `point_write_proxied` | 145 us | 6,897 | pointWrite, proxied through lead to remote |
+
+**Observations:**
+- Proxy operations reuse the persistent authenticated connection (no per-request SCRAM handshake)
+- hisRead (1000 items): ~3.9ms, dominated by timestamp serialization (~257 req/sec)
+- hisWrite (100 items): ~503us (~2.0k req/sec, ~5us per item)
+- pointWrite: ~145us (~6.9k req/sec), comparable to local HTTP operations
+
+### Federated Concurrent Load
+
+| Benchmark | Mean | Effective Req/sec | Description |
+|-----------|------|-------------------|-------------|
+| `concurrent_reads_50` | 111.7 ms | 448 | 50 parallel federated read-by-id requests |
+| `concurrent_filter_50` | 229.6 ms | 218 | 50 parallel federated filter reads (`siteRef==@ra-site-N`) |
+
+**Observations:**
+- 50 concurrent federated reads: ~112ms total (~2.2ms effective per request, ~448 effective req/sec)
+- 50 concurrent filter reads: ~230ms total (~4.6ms effective per request, ~218 effective req/sec)
+- Good parallelism — 50 concurrent reads take only ~16.6x the time of a single read
+
+---
+
 ## Summary
 
 | Category | Highlight | Throughput |
@@ -181,3 +238,9 @@ Real HTTP benchmarks against a live server (actix-web) with 1000 pre-loaded enti
 | HTTP watch poll | 42.6us per request | ~23.5k req/sec |
 | Concurrent reads (50) | 910us total | ~54.9k effective req/sec |
 | History read (1000 items) | 2.336ms per request | ~428 req/sec |
+| Fed. sync (10k entities) | 42.1ms per remote | ~240k entities/sec |
+| Fed. read by ID | 6.13ms per request | ~163 req/sec |
+| Fed. filter (20k entities) | 81.7ms per request | ~12 req/sec |
+| Fed. proxy hisRead (1000) | 3.89ms per request | ~257 req/sec |
+| Fed. proxy pointWrite | 145us per request | ~6.9k req/sec |
+| Fed. concurrent reads (50) | 111.7ms total | ~448 effective req/sec |

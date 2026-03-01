@@ -31,6 +31,50 @@ impl ConnectorClient {
             ConnectorClient::Ws(c) => c.call(op, req).await.map_err(|e| e.to_string()),
         }
     }
+
+    /// Read historical data for a point.
+    async fn his_read(&self, id: &str, range: &str) -> Result<HGrid, String> {
+        match self {
+            ConnectorClient::Http(c) => c.his_read(id, range).await.map_err(|e| e.to_string()),
+            ConnectorClient::Ws(c) => c.his_read(id, range).await.map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Write historical data for a point.
+    async fn his_write(&self, id: &str, items: Vec<HDict>) -> Result<HGrid, String> {
+        match self {
+            ConnectorClient::Http(c) => c.his_write(id, items).await.map_err(|e| e.to_string()),
+            ConnectorClient::Ws(c) => c.his_write(id, items).await.map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Write a value to a writable point.
+    async fn point_write(&self, id: &str, level: u8, val: Kind) -> Result<HGrid, String> {
+        match self {
+            ConnectorClient::Http(c) => c
+                .point_write(id, level, val)
+                .await
+                .map_err(|e| e.to_string()),
+            ConnectorClient::Ws(c) => c
+                .point_write(id, level, val)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Invoke an action on an entity.
+    async fn invoke_action(&self, id: &str, action: &str, args: HDict) -> Result<HGrid, String> {
+        match self {
+            ConnectorClient::Http(c) => c
+                .invoke_action(id, action, args)
+                .await
+                .map_err(|e| e.to_string()),
+            ConnectorClient::Ws(c) => c
+                .invoke_action(id, action, args)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
 }
 
 /// Transport protocol used by a connector.
@@ -272,30 +316,36 @@ impl Connector {
         }
     }
 
-    /// Create a fresh HTTP connection to the remote.
-    ///
-    // TODO: Reuse the persistent client for proxy methods once we have a
-    // better abstraction over ConnectorClient that exposes typed ops.
-    async fn connect_remote(
-        &self,
-    ) -> Result<HaystackClient<haystack_client::transport::http::HttpTransport>, String> {
-        HaystackClient::connect(
-            &self.config.url,
-            &self.config.username,
-            &self.config.password,
-        )
-        .await
-        .map_err(|e| format!("connection failed: {e}"))
+    /// Ensure the persistent client is connected, establishing a new
+    /// connection if needed. Returns an error if connection fails.
+    async fn ensure_connected(&self) -> Result<(), String> {
+        if self.client.read().await.is_none() {
+            self.connect_persistent().await?;
+        }
+        Ok(())
+    }
+
+    /// Handle a failed proxy operation by clearing the client to force
+    /// reconnection on the next call.
+    async fn on_proxy_error(&self, op_name: &str, e: String) -> String {
+        *self.client.write().await = None;
+        self.connected.store(false, Ordering::Relaxed);
+        format!("{op_name} failed: {e}")
     }
 
     /// Proxy a hisRead request to the remote server.
     pub async fn proxy_his_read(&self, prefixed_id: &str, range: &str) -> Result<HGrid, String> {
+        self.ensure_connected().await?;
         let id = self.strip_id(prefixed_id);
-        let client = self.connect_remote().await?;
-        client
-            .his_read(&id, range)
-            .await
-            .map_err(|e| format!("hisRead failed: {e}"))
+        let guard = self.client.read().await;
+        let client = guard.as_ref().ok_or("not connected")?;
+        match client.his_read(&id, range).await {
+            Ok(grid) => Ok(grid),
+            Err(e) => {
+                drop(guard);
+                Err(self.on_proxy_error("hisRead", e).await)
+            }
+        }
     }
 
     /// Proxy a pointWrite request to the remote server.
@@ -305,12 +355,18 @@ impl Connector {
         level: u8,
         val: &Kind,
     ) -> Result<HGrid, String> {
+        self.ensure_connected().await?;
         let id = self.strip_id(prefixed_id);
-        let client = self.connect_remote().await?;
-        client
-            .point_write(&id, level, val.clone())
-            .await
-            .map_err(|e| format!("pointWrite failed: {e}"))
+        let val = val.clone();
+        let guard = self.client.read().await;
+        let client = guard.as_ref().ok_or("not connected")?;
+        match client.point_write(&id, level, val).await {
+            Ok(grid) => Ok(grid),
+            Err(e) => {
+                drop(guard);
+                Err(self.on_proxy_error("pointWrite", e).await)
+            }
+        }
     }
 
     /// Proxy a hisWrite request to the remote server.
@@ -319,12 +375,17 @@ impl Connector {
         prefixed_id: &str,
         items: Vec<HDict>,
     ) -> Result<HGrid, String> {
+        self.ensure_connected().await?;
         let id = self.strip_id(prefixed_id);
-        let client = self.connect_remote().await?;
-        client
-            .his_write(&id, items)
-            .await
-            .map_err(|e| format!("hisWrite failed: {e}"))
+        let guard = self.client.read().await;
+        let client = guard.as_ref().ok_or("not connected")?;
+        match client.his_write(&id, items).await {
+            Ok(grid) => Ok(grid),
+            Err(e) => {
+                drop(guard);
+                Err(self.on_proxy_error("hisWrite", e).await)
+            }
+        }
     }
 
     /// Proxy an import request for a single entity to the remote server.
@@ -332,14 +393,13 @@ impl Connector {
     /// Strips the id prefix from the entity, wraps it in a single-row grid,
     /// and calls the remote `import` op.
     pub async fn proxy_import(&self, entity: &HDict) -> Result<HGrid, String> {
-        use crate::connector::strip_prefix_refs;
+        self.ensure_connected().await?;
 
         let mut stripped = entity.clone();
         if let Some(ref prefix) = self.config.id_prefix {
             strip_prefix_refs(&mut stripped, prefix);
         }
 
-        // Build a single-row grid with columns from the entity.
         let col_names: Vec<String> = stripped.tag_names().map(|s| s.to_string()).collect();
         let cols: Vec<haystack_core::data::HCol> = col_names
             .iter()
@@ -347,11 +407,15 @@ impl Connector {
             .collect();
         let grid = HGrid::from_parts(HDict::new(), cols, vec![stripped]);
 
-        let client = self.connect_remote().await?;
-        client
-            .call("import", &grid)
-            .await
-            .map_err(|e| format!("import failed: {e}"))
+        let guard = self.client.read().await;
+        let client = guard.as_ref().ok_or("not connected")?;
+        match client.call("import", &grid).await {
+            Ok(grid) => Ok(grid),
+            Err(e) => {
+                drop(guard);
+                Err(self.on_proxy_error("import", e).await)
+            }
+        }
     }
 
     /// Proxy an invokeAction request to the remote server.
@@ -361,12 +425,18 @@ impl Connector {
         action: &str,
         args: HDict,
     ) -> Result<HGrid, String> {
+        self.ensure_connected().await?;
         let id = self.strip_id(prefixed_id);
-        let client = self.connect_remote().await?;
-        client
-            .invoke_action(&id, action, args)
-            .await
-            .map_err(|e| format!("invokeAction failed: {e}"))
+        let action = action.to_string();
+        let guard = self.client.read().await;
+        let client = guard.as_ref().ok_or("not connected")?;
+        match client.invoke_action(&id, &action, args).await {
+            Ok(grid) => Ok(grid),
+            Err(e) => {
+                drop(guard);
+                Err(self.on_proxy_error("invokeAction", e).await)
+            }
+        }
     }
 
     /// Spawn a background sync task for this connector.
