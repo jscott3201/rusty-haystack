@@ -185,7 +185,7 @@ impl PyFederation {
 
     /// Add a connector to the federation.
     fn add(&mut self, config: &PyConnectorConfig) {
-        self.inner.add(config.inner.clone());
+        let _ = self.inner.add(config.inner.clone());
     }
 
     /// Synchronously sync all connectors. Returns list of (name, result_string).
@@ -228,7 +228,7 @@ impl PyFederation {
         // Build a grid from the entities
         let mut grid = haystack_core::data::HGrid::new();
         for entity in entities {
-            grid.rows.push(entity);
+            grid.rows.push((*entity).clone());
         }
         Ok(PyHGrid::from_core(&grid))
     }
