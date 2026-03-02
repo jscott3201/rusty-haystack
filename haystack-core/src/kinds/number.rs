@@ -1,4 +1,5 @@
 use crate::codecs::shared;
+use crate::kinds::units::{UnitError, convert, unit_for};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -20,6 +21,23 @@ impl Number {
 
     pub fn unitless(val: f64) -> Self {
         Self { val, unit: None }
+    }
+
+    /// Convert this number to a different unit.
+    ///
+    /// The target may be a unit name (`"celsius"`) or symbol (`"°C"`).
+    /// Returns a new `Number` with the converted value and the target unit's
+    /// canonical name.
+    pub fn convert_to(&self, target_unit: &str) -> Result<Number, UnitError> {
+        let from = self
+            .unit
+            .as_deref()
+            .ok_or_else(|| UnitError::UnknownUnit("(none)".to_string()))?;
+        let converted = convert(self.val, from, target_unit)?;
+        let target_name = unit_for(target_unit)
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| target_unit.to_string());
+        Ok(Number::new(converted, Some(target_name)))
     }
 }
 
@@ -152,5 +170,40 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(Number::unitless(42.0));
         assert!(set.contains(&Number::unitless(42.0)));
+    }
+
+    // --- convert_to tests ---
+
+    #[test]
+    fn number_convert_to_celsius() {
+        let n = Number::new(212.0, Some("fahrenheit".into()));
+        let c = n.convert_to("celsius").unwrap();
+        assert!((c.val - 100.0).abs() < 0.01);
+        assert_eq!(c.unit.as_deref(), Some("celsius"));
+    }
+
+    #[test]
+    fn number_convert_to_by_symbol() {
+        let n = Number::new(0.0, Some("°C".into()));
+        let f = n.convert_to("°F").unwrap();
+        assert!((f.val - 32.0).abs() < 0.01);
+        assert_eq!(f.unit.as_deref(), Some("fahrenheit"));
+    }
+
+    #[test]
+    fn number_convert_to_unitless_error() {
+        let n = Number::unitless(42.0);
+        let err = n.convert_to("celsius").unwrap_err();
+        assert!(matches!(err, crate::kinds::units::UnitError::UnknownUnit(ref s) if s == "(none)"));
+    }
+
+    #[test]
+    fn number_convert_to_incompatible() {
+        let n = Number::new(100.0, Some("celsius".into()));
+        let err = n.convert_to("meter").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::kinds::units::UnitError::IncompatibleUnits(_, _)
+        ));
     }
 }

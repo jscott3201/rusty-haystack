@@ -11,17 +11,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Import entities from a file (Zinc, Trio, or JSON format)
+    /// Import entities from a file (Zinc, Trio, JSON, or HBF format)
     Import {
         /// Path to the input file
         file: String,
-        /// Input format: zinc, trio, json, json3 (auto-detected from extension if omitted)
+        /// Input format: zinc, trio, json, json3, hbf (auto-detected from extension if omitted)
         #[arg(short, long)]
         format: Option<String>,
     },
     /// Export entities to a specified format
     Export {
-        /// Output format: zinc, trio, json, json3
+        /// Output format: zinc, trio, json, json3, hbf
         #[arg(short, long, default_value = "zinc")]
         format: String,
         /// Path to export to (stdout if omitted)
@@ -51,6 +51,12 @@ enum Commands {
         /// TOML file with federation connector configuration
         #[arg(long)]
         federation: Option<String>,
+        /// Directory for periodic snapshots (enables auto-restore on startup)
+        #[arg(long)]
+        snapshot_dir: Option<String>,
+        /// Snapshot interval in seconds (default: 300)
+        #[arg(long, default_value = "300")]
+        snapshot_interval: u64,
     },
     /// Validate entities in a file against the standard Haystack ontology
     Validate {
@@ -59,6 +65,12 @@ enum Commands {
         /// Input format (auto-detected from extension if omitted)
         #[arg(short, long)]
         format: Option<String>,
+        /// Path to a directory containing custom .xeto library files (repeatable)
+        #[arg(long = "xeto-dir", value_name = "DIR")]
+        xeto_dirs: Vec<String>,
+        /// Output full structured validation report instead of just summary
+        #[arg(long)]
+        report: bool,
     },
     /// Show information about the Haystack standard library
     Info {
@@ -83,6 +95,30 @@ enum Commands {
     User {
         #[command(subcommand)]
         action: UserAction,
+    },
+    /// Create a binary snapshot of entities from an input file
+    Snapshot {
+        /// Directory to write the snapshot file to
+        #[arg(short, long)]
+        dir: String,
+        /// Path to the input file (Zinc, Trio, or JSON format)
+        #[arg(short, long)]
+        input: Option<String>,
+        /// Input format: zinc, trio, json, json3 (auto-detected from extension if omitted)
+        #[arg(short, long)]
+        format: Option<String>,
+    },
+    /// Restore entities from a binary snapshot file
+    Restore {
+        /// Path to the snapshot (.hlss) file
+        #[arg(short, long)]
+        snapshot: String,
+        /// Path to export restored data to (omit to just print metadata)
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Output format: zinc, trio, json, json3
+        #[arg(short, long)]
+        format: Option<String>,
     },
 }
 
@@ -271,6 +307,8 @@ fn main() {
             host,
             demo,
             federation,
+            snapshot_dir,
+            snapshot_interval,
         } => commands::serve::run(
             port,
             file.as_deref(),
@@ -278,8 +316,15 @@ fn main() {
             host.as_deref(),
             demo,
             federation.as_deref(),
+            snapshot_dir.as_deref(),
+            snapshot_interval,
         ),
-        Commands::Validate { file, format } => commands::validate::run(&file, format.as_deref()),
+        Commands::Validate {
+            file,
+            format,
+            xeto_dirs,
+            report,
+        } => commands::validate::run(&file, format.as_deref(), &xeto_dirs, report),
         Commands::Info { def } => commands::info::run(def.as_deref()),
         Commands::Libs => commands::libs::run(),
         Commands::Specs { lib } => commands::specs::run(lib.as_deref()),
@@ -348,5 +393,13 @@ fn main() {
                 password,
             } => commands::user::run_update_password(&file, &username, &password),
         },
+        Commands::Snapshot { dir, input, format } => {
+            commands::snapshot::run_snapshot(&dir, input.as_deref(), format.as_deref())
+        }
+        Commands::Restore {
+            snapshot,
+            output,
+            format,
+        } => commands::snapshot::run_restore(&snapshot, output.as_deref(), format.as_deref()),
     }
 }

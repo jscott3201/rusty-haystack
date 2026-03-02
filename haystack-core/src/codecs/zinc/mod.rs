@@ -3,11 +3,13 @@
 mod encoder;
 mod parser;
 
-pub use encoder::{encode_grid, encode_meta, encode_scalar, escape_str};
+pub use encoder::{
+    encode_grid, encode_grid_header, encode_grid_row, encode_meta, encode_scalar, escape_str,
+};
 pub use parser::{ZincParser, decode_grid, decode_scalar};
 
 use super::{Codec, CodecError};
-use crate::data::HGrid;
+use crate::data::{HCol, HDict, HGrid};
 use crate::kinds::Kind;
 
 /// Zinc wire format codec.
@@ -32,5 +34,13 @@ impl Codec for ZincCodec {
 
     fn decode_scalar(&self, input: &str) -> Result<Kind, CodecError> {
         decode_scalar(input)
+    }
+
+    fn encode_grid_header(&self, grid: &HGrid) -> Result<Vec<u8>, CodecError> {
+        encoder::encode_grid_header(grid).map(|s| s.into_bytes())
+    }
+
+    fn encode_grid_row(&self, cols: &[HCol], row: &HDict) -> Result<Vec<u8>, CodecError> {
+        encoder::encode_grid_row(cols, row).map(|s| s.into_bytes())
     }
 }

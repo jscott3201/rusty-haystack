@@ -1,4 +1,4 @@
-use haystack_core::graph::{EntityGraph, SharedGraph};
+use haystack_core::graph::{EntityGraph, SharedGraph, SnapshotReader};
 use haystack_core::ontology::DefNamespace;
 use haystack_server::HaystackServer;
 use haystack_server::auth::AuthManager;
@@ -11,10 +11,15 @@ pub fn run(
     host: Option<&str>,
     demo: bool,
     federation_file: Option<&str>,
+    snapshot_dir: Option<&str>,
+    _snapshot_interval: u64,
 ) {
     env_logger::init();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+        eprintln!("Error: failed to create runtime: {e}");
+        std::process::exit(1);
+    });
     rt.block_on(async {
         let ns = DefNamespace::load_standard().unwrap_or_else(|e| {
             eprintln!("Error loading ontology: {}", e);
@@ -37,7 +42,10 @@ pub fn run(
                 "text/zinc"
             };
 
-            let codec = haystack_core::codecs::codec_for(mime).unwrap();
+            let codec = haystack_core::codecs::codec_for(mime).unwrap_or_else(|| {
+                eprintln!("Error: unsupported format: {}", mime);
+                std::process::exit(1);
+            });
             let grid = codec.decode_grid(&content).unwrap_or_else(|e| {
                 eprintln!("Error decoding: {}", e);
                 std::process::exit(1);
@@ -64,6 +72,32 @@ pub fn run(
         } else {
             SharedGraph::new(EntityGraph::new())
         };
+
+        // Auto-restore from latest snapshot if snapshot-dir is specified and graph is empty
+        if let Some(snap_dir) = snapshot_dir {
+            if graph.is_empty() {
+                match SnapshotReader::find_latest(std::path::Path::new(snap_dir)) {
+                    Ok(Some(snap_path)) => match SnapshotReader::load(&snap_path, &graph) {
+                        Ok(meta) => {
+                            eprintln!(
+                                "Restored {} entities from snapshot: {}",
+                                meta.entity_count,
+                                snap_path.display()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: failed to restore snapshot: {}", e);
+                        }
+                    },
+                    Ok(None) => {
+                        eprintln!("No snapshots found in '{}'", snap_dir);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: error scanning snapshot dir: {}", e);
+                    }
+                }
+            }
+        }
 
         let auth = if let Some(uf) = users_file {
             let users = load_users_from_toml(uf).unwrap_or_else(|e| {

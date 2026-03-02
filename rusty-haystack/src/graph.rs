@@ -2,12 +2,34 @@
 // Also SharedGraph (thread-safe) and GraphDiff/DiffOp change tracking.
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
-use haystack_core::graph::{DiffOp, EntityGraph, GraphDiff, SharedGraph};
+use haystack_core::graph::{
+    DiffOp, EntityGraph, GraphDiff, HierarchyNode, SharedGraph, SnapshotMeta, SnapshotReader,
+    SnapshotWriter,
+};
 
 use crate::data::{PyHDict, PyHGrid};
 use crate::exceptions;
 use crate::ontology::PyDefNamespace;
+
+/// Convert a HierarchyNode tree to a nested Python dict.
+fn hierarchy_node_to_py(py: Python<'_>, node: &HierarchyNode) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    let entity = PyHDict::from_core(&node.entity)
+        .into_pyobject(py)?
+        .into_any()
+        .unbind();
+    dict.set_item("entity", entity)?;
+    dict.set_item("depth", node.depth)?;
+    let children: Vec<Py<PyAny>> = node
+        .children
+        .iter()
+        .map(|c| hierarchy_node_to_py(py, c))
+        .collect::<PyResult<_>>()?;
+    dict.set_item("children", children)?;
+    Ok(dict.into_any().unbind())
+}
 
 // ── DiffOp ──
 
@@ -52,16 +74,20 @@ pub struct PyGraphDiff {
     #[pyo3(get)]
     pub version: u64,
     #[pyo3(get)]
+    pub timestamp: i64,
+    #[pyo3(get)]
     pub op: PyDiffOp,
     #[pyo3(get)]
     pub ref_val: String,
     old: Option<haystack_core::data::HDict>,
     new: Option<haystack_core::data::HDict>,
+    changed_tags: Option<haystack_core::data::HDict>,
+    previous_tags: Option<haystack_core::data::HDict>,
 }
 
 #[pymethods]
 impl PyGraphDiff {
-    /// Entity state before the mutation (None for Add).
+    /// Entity state before the mutation (Some for Remove; None for Add/Update).
     #[getter]
     fn old(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.old {
@@ -72,10 +98,32 @@ impl PyGraphDiff {
         }
     }
 
-    /// Entity state after the mutation (None for Remove).
+    /// Entity state after the mutation (Some for Add; None for Remove/Update).
     #[getter]
     fn new(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.new {
+            Some(d) => Ok(Some(
+                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// For Update: tags that changed with their new values.
+    #[getter]
+    fn changed_tags(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.changed_tags {
+            Some(d) => Ok(Some(
+                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// For Update: tags that changed with their previous values.
+    #[getter]
+    fn previous_tags(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.previous_tags {
             Some(d) => Ok(Some(
                 PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
             )),
@@ -97,10 +145,13 @@ impl PyGraphDiff {
     fn from_core(d: &GraphDiff) -> Self {
         Self {
             version: d.version,
+            timestamp: d.timestamp,
             op: PyDiffOp::from_core(&d.op),
             ref_val: d.ref_val.clone(),
             old: d.old.clone(),
             new: d.new.clone(),
+            changed_tags: d.changed_tags.clone(),
+            previous_tags: d.previous_tags.clone(),
         }
     }
 }
@@ -245,12 +296,18 @@ impl PyEntityGraph {
     }
 
     /// Return changelog entries since a given graph version.
-    fn changes_since(&self, version: u64) -> Vec<PyGraphDiff> {
+    ///
+    /// Raises RuntimeError if the subscriber has fallen behind (changelog gap).
+    fn changes_since(&self, version: u64) -> PyResult<Vec<PyGraphDiff>> {
         self.inner
             .changes_since(version)
-            .iter()
-            .map(|d| PyGraphDiff::from_core(d))
-            .collect()
+            .map(|refs| refs.iter().map(|d| PyGraphDiff::from_core(d)).collect())
+            .map_err(|gap| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "changelog gap: requested version {}, floor is {}",
+                    gap.subscriber_version, gap.floor_version
+                ))
+            })
     }
 
     /// Enable a B-tree value index on a tag for faster range queries.
@@ -354,6 +411,81 @@ impl PyEntityGraph {
             self.inner.version()
         )
     }
+
+    // ── Traversal methods ──
+
+    /// Walk the ref chain from an entity following the given ref tags in order.
+    ///
+    /// Returns a list of HDict entities along the chain.
+    fn ref_chain(
+        &self,
+        py: Python<'_>,
+        ref_val: &str,
+        ref_tags: Vec<String>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let tags: Vec<&str> = ref_tags.iter().map(|s| s.as_str()).collect();
+        self.inner
+            .ref_chain(ref_val, &tags)
+            .into_iter()
+            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
+            .collect()
+    }
+
+    /// Find the site entity for any entity by walking up the ref chain.
+    fn site_for(&self, py: Python<'_>, ref_val: &str) -> PyResult<Option<Py<PyAny>>> {
+        match self.inner.site_for(ref_val) {
+            Some(d) => Ok(Some(
+                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Get all direct children of an entity (entities whose xxxRef points to it).
+    fn children_of(&self, py: Python<'_>, ref_val: &str) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .children(ref_val)
+            .into_iter()
+            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
+            .collect()
+    }
+
+    /// Get all points for an equip, optionally filtered.
+    #[pyo3(signature = (equip_ref, filter = None))]
+    fn equip_points(
+        &self,
+        py: Python<'_>,
+        equip_ref: &str,
+        filter: Option<&str>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .equip_points(equip_ref, filter)
+            .into_iter()
+            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
+            .collect()
+    }
+
+    /// Build a hierarchy tree from a root entity.
+    ///
+    /// Returns a nested dict: {"entity": HDict, "depth": int, "children": [...]},
+    /// or None if the root is not found.
+    #[pyo3(signature = (root, max_depth = 10))]
+    fn hierarchy_tree(
+        &self,
+        py: Python<'_>,
+        root: &str,
+        max_depth: usize,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        match self.inner.hierarchy_tree(root, max_depth) {
+            Some(node) => Ok(Some(hierarchy_node_to_py(py, &node)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Classify an entity by its most specific type tag.
+    fn classify(&self, ref_val: &str) -> Option<String> {
+        self.inner.classify(ref_val)
+    }
 }
 
 // ── SharedGraph (thread-safe wrapper) ──
@@ -442,18 +574,20 @@ impl PySharedGraph {
 
     /// Query entities matching a Haystack filter. Returns an HGrid of results.
     #[pyo3(signature = (filter_expr, limit = 0))]
-    fn read(&self, filter_expr: &str, limit: usize) -> PyResult<PyHGrid> {
-        let grid = self
-            .inner
-            .read_filter(filter_expr, limit)
+    fn read(&self, py: Python<'_>, filter_expr: &str, limit: usize) -> PyResult<PyHGrid> {
+        let filter = filter_expr.to_string();
+        let inner = self.inner.clone();
+        let grid = py
+            .detach(move || inner.read_filter(&filter, limit))
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))?;
         Ok(PyHGrid::from_core(&grid))
     }
 
     /// Return all entities as a list of HDict.
     fn all(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        self.inner
-            .all_entities()
+        let inner = self.inner.clone();
+        let entities = py.detach(move || inner.all_entities());
+        entities
             .into_iter()
             .map(|d| {
                 Ok(PyHDict::from_core(&d)
@@ -558,12 +692,18 @@ impl PySharedGraph {
     }
 
     /// Return changelog entries since a given graph version.
-    fn changes_since(&self, version: u64) -> Vec<PyGraphDiff> {
+    ///
+    /// Raises RuntimeError if the subscriber has fallen behind (changelog gap).
+    fn changes_since(&self, version: u64) -> PyResult<Vec<PyGraphDiff>> {
         self.inner
             .changes_since(version)
-            .iter()
-            .map(PyGraphDiff::from_core)
-            .collect()
+            .map(|refs| refs.iter().map(PyGraphDiff::from_core).collect())
+            .map_err(|gap| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "changelog gap: requested version {}, floor is {}",
+                    gap.subscriber_version, gap.floor_version
+                ))
+            })
     }
 
     /// Return entities that structurally fit a given ontology spec.
@@ -589,6 +729,12 @@ impl PySharedGraph {
             .collect()
     }
 
+    /// Number of active broadcast subscribers.
+    #[getter]
+    fn subscriber_count(&self) -> usize {
+        self.inner.subscriber_count()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SharedGraph(len={}, version={})",
@@ -596,4 +742,190 @@ impl PySharedGraph {
             self.inner.version()
         )
     }
+
+    // ── Traversal methods ──
+
+    /// Walk the ref chain from an entity following the given ref tags in order.
+    fn ref_chain(
+        &self,
+        py: Python<'_>,
+        ref_val: &str,
+        ref_tags: Vec<String>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let tags: Vec<&str> = ref_tags.iter().map(|s| s.as_str()).collect();
+        self.inner
+            .ref_chain(ref_val, &tags)
+            .into_iter()
+            .map(|d| {
+                Ok(PyHDict::from_core(&d)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
+            .collect()
+    }
+
+    /// Find the site entity for any entity by walking up the ref chain.
+    fn site_for(&self, py: Python<'_>, ref_val: &str) -> PyResult<Option<Py<PyAny>>> {
+        match self.inner.site_for(ref_val) {
+            Some(d) => Ok(Some(
+                PyHDict::from_core(&d)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Get all direct children of an entity.
+    fn children_of(&self, py: Python<'_>, ref_val: &str) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .children(ref_val)
+            .into_iter()
+            .map(|d| {
+                Ok(PyHDict::from_core(&d)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
+            .collect()
+    }
+
+    /// Get all points for an equip, optionally filtered.
+    #[pyo3(signature = (equip_ref, filter = None))]
+    fn equip_points(
+        &self,
+        py: Python<'_>,
+        equip_ref: &str,
+        filter: Option<&str>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .equip_points(equip_ref, filter)
+            .into_iter()
+            .map(|d| {
+                Ok(PyHDict::from_core(&d)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
+            .collect()
+    }
+
+    /// Build a hierarchy tree from a root entity.
+    ///
+    /// Returns a nested dict or None if the root is not found.
+    #[pyo3(signature = (root, max_depth = 10))]
+    fn hierarchy_tree(
+        &self,
+        py: Python<'_>,
+        root: &str,
+        max_depth: usize,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        match self.inner.hierarchy_tree(root, max_depth) {
+            Some(node) => Ok(Some(hierarchy_node_to_py(py, &node)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Classify an entity by its most specific type tag.
+    fn classify(&self, ref_val: &str) -> Option<String> {
+        self.inner.classify(ref_val)
+    }
+}
+
+// ── Snapshot bindings ──
+
+/// Writes periodic snapshots of a SharedGraph to disk in HLSS format.
+///
+/// Manages a directory of snapshot files with automatic rotation to keep
+/// only the most recent N snapshots.
+///
+/// Examples:
+///     writer = SnapshotWriter("/tmp/snapshots", max_snapshots=5)
+///     path = writer.write(shared_graph)
+#[pyclass(name = "SnapshotWriter")]
+pub struct PySnapshotWriter {
+    inner: SnapshotWriter,
+}
+
+#[pymethods]
+impl PySnapshotWriter {
+    #[new]
+    #[pyo3(signature = (dir, max_snapshots = 10))]
+    fn new(dir: &str, max_snapshots: usize) -> Self {
+        Self {
+            inner: SnapshotWriter::new(std::path::PathBuf::from(dir), max_snapshots),
+        }
+    }
+
+    /// Write a snapshot of the graph. Returns the file path.
+    fn write(&self, graph: &PySharedGraph) -> PyResult<String> {
+        let path = self
+            .inner
+            .write(&graph.inner)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(path.to_string_lossy().to_string())
+    }
+
+    /// Rotate old snapshots beyond max_snapshots. Returns count removed.
+    fn rotate(&self) -> PyResult<usize> {
+        self.inner
+            .rotate()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn __repr__(&self) -> &str {
+        "SnapshotWriter"
+    }
+}
+
+/// Metadata returned when loading a snapshot file.
+#[pyclass(name = "SnapshotMeta", frozen)]
+pub struct PySnapshotMeta {
+    #[pyo3(get)]
+    pub entity_count: u32,
+    #[pyo3(get)]
+    pub graph_version: u64,
+    #[pyo3(get)]
+    pub timestamp: i64,
+    #[pyo3(get)]
+    pub path: String,
+}
+
+#[pymethods]
+impl PySnapshotMeta {
+    fn __repr__(&self) -> String {
+        format!(
+            "SnapshotMeta(entities={}, version={}, path='{}')",
+            self.entity_count, self.graph_version, self.path
+        )
+    }
+}
+
+impl PySnapshotMeta {
+    fn from_core(meta: &SnapshotMeta) -> Self {
+        Self {
+            entity_count: meta.entity_count,
+            graph_version: meta.graph_version,
+            timestamp: meta.timestamp,
+            path: meta.path.to_string_lossy().to_string(),
+        }
+    }
+}
+
+/// Load a snapshot file into a SharedGraph. Returns snapshot metadata.
+#[pyfunction]
+pub fn load_snapshot(path: &str, graph: &PySharedGraph) -> PyResult<PySnapshotMeta> {
+    let meta = SnapshotReader::load(std::path::Path::new(path), &graph.inner)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok(PySnapshotMeta::from_core(&meta))
+}
+
+/// Find the latest snapshot file in a directory. Returns the path or None.
+#[pyfunction]
+pub fn find_latest_snapshot(dir: &str) -> PyResult<Option<String>> {
+    SnapshotReader::find_latest(std::path::Path::new(dir))
+        .map(|opt| opt.map(|p| p.to_string_lossy().to_string()))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }

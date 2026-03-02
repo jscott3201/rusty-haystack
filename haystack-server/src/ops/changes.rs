@@ -35,6 +35,9 @@ use crate::content;
 use crate::error::HaystackError;
 use crate::state::AppState;
 
+/// Maximum number of change rows returned in a single response.
+const MAX_CHANGE_ROWS: usize = 10_000;
+
 /// POST /api/changes
 ///
 /// Request grid should have a single row with a `version` column (Number).
@@ -78,7 +81,31 @@ pub async fn handle(
         .unwrap_or(0);
 
     let current_version = state.graph.version();
-    let diffs = state.graph.changes_since(since_version);
+    let diffs = match state.graph.changes_since(since_version) {
+        Ok(d) => d,
+        Err(gap) => {
+            // Subscriber fell behind. Return an error grid with the gap info
+            // so the caller knows to do a full resync.
+            let mut err_meta = HDict::new();
+            err_meta.set(
+                "curVer",
+                Kind::Number(haystack_core::kinds::Number::unitless(
+                    current_version as f64,
+                )),
+            );
+            err_meta.set(
+                "err",
+                Kind::Str(format!(
+                    "changelog gap: requested version {}, floor is {}",
+                    gap.subscriber_version, gap.floor_version
+                )),
+            );
+            let grid = HGrid::from_parts(err_meta, Vec::new(), Vec::new());
+            let (encoded, ct) = content::encode_response_grid(&grid, accept)
+                .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
+            return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
+        }
+    };
 
     let mut meta = HDict::new();
     meta.set(
@@ -99,10 +126,11 @@ pub async fn handle(
         HCol::new("version"),
         HCol::new("op"),
         HCol::new("ref"),
+        HCol::new("ts"),
         HCol::new("entity"),
     ];
 
-    let rows: Vec<HDict> = diffs
+    let mut rows: Vec<HDict> = diffs
         .iter()
         .map(|diff| {
             let mut row = HDict::new();
@@ -119,13 +147,33 @@ pub async fn handle(
                 }),
             );
             row.set("ref", Kind::Str(diff.ref_val.clone()));
-            // Include entity data for add/update (the "new" state).
+            row.set(
+                "ts",
+                Kind::Number(haystack_core::kinds::Number::unitless(
+                    diff.timestamp as f64,
+                )),
+            );
+            // Include entity data: full entity for Add, changed_tags for Update.
             if let Some(entity) = &diff.new {
                 row.set("entity", Kind::Dict(Box::new(entity.clone())));
+            } else if let Some(changed) = &diff.changed_tags {
+                row.set("entity", Kind::Dict(Box::new(changed.clone())));
             }
             row
         })
         .collect();
+
+    let truncated = rows.len() > MAX_CHANGE_ROWS;
+    if truncated {
+        rows.truncate(MAX_CHANGE_ROWS);
+        meta.set("truncated", Kind::Marker);
+        meta.set(
+            "maxRows",
+            Kind::Number(haystack_core::kinds::Number::unitless(
+                MAX_CHANGE_ROWS as f64,
+            )),
+        );
+    }
 
     let grid = HGrid::from_parts(meta, cols, rows);
     let (encoded, ct) = content::encode_response_grid(&grid, accept)

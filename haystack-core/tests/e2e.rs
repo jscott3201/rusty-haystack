@@ -284,7 +284,7 @@ fn graph_crud_lifecycle() {
     assert_eq!(g.version(), 3);
 
     // Verify changelog
-    let all_changes = g.changes_since(0);
+    let all_changes = g.changes_since(0).unwrap();
     assert_eq!(all_changes.len(), 3);
 }
 

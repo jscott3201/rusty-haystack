@@ -12,3 +12,4 @@ haystack-core/src/ontology/generated.rs
 .claude/
 CLAUDE.md
 .DS_Store
+_plan/

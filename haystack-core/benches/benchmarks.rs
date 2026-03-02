@@ -1,9 +1,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
+use haystack_core::expr::{Expr, ExprContext};
 use haystack_core::filter;
 use haystack_core::graph::{EntityGraph, SharedGraph};
-use haystack_core::kinds::{HDateTime, HRef, Kind, Number, Uri};
+use haystack_core::kinds::{self, HDateTime, HRef, Kind, Number, Uri};
 use haystack_core::ontology::DefNamespace;
 use haystack_core::xeto;
 use std::hint::black_box;
@@ -456,12 +457,258 @@ fn xeto_benchmarks(c: &mut Criterion) {
     }
 }
 
+fn build_hierarchy_graph() -> EntityGraph {
+    let mut graph = EntityGraph::new();
+
+    // 2 sites
+    for i in 0..2 {
+        let mut s = HDict::new();
+        s.set("id", Kind::Ref(HRef::from_val(format!("site-{i}"))));
+        s.set("site", Kind::Marker);
+        s.set("dis", Kind::Str(format!("Site {i}")));
+        graph.add(s).unwrap();
+    }
+
+    // 5 equips per site
+    for si in 0..2 {
+        for ei in 0..5 {
+            let mut e = HDict::new();
+            e.set("id", Kind::Ref(HRef::from_val(format!("equip-{si}-{ei}"))));
+            e.set("equip", Kind::Marker);
+            e.set("ahu", Kind::Marker);
+            e.set("siteRef", Kind::Ref(HRef::from_val(format!("site-{si}"))));
+            e.set("dis", Kind::Str(format!("AHU {si}-{ei}")));
+            graph.add(e).unwrap();
+        }
+    }
+
+    // 10 points per equip (100 total)
+    for si in 0..2 {
+        for ei in 0..5 {
+            for pi in 0..10 {
+                let mut p = HDict::new();
+                p.set(
+                    "id",
+                    Kind::Ref(HRef::from_val(format!("point-{si}-{ei}-{pi}"))),
+                );
+                p.set("point", Kind::Marker);
+                p.set("sensor", Kind::Marker);
+                p.set("temp", Kind::Marker);
+                p.set(
+                    "equipRef",
+                    Kind::Ref(HRef::from_val(format!("equip-{si}-{ei}"))),
+                );
+                p.set("siteRef", Kind::Ref(HRef::from_val(format!("site-{si}"))));
+                p.set(
+                    "curVal",
+                    Kind::Number(Number::new(70.0 + pi as f64, Some("\u{00b0}F".into()))),
+                );
+                graph.add(p).unwrap();
+            }
+        }
+    }
+
+    graph
+}
+
+fn expr_benchmarks(c: &mut Criterion) {
+    // Parse benchmarks
+    c.bench_function("expr_parse_simple", |b| {
+        b.iter(|| Expr::parse(black_box("$x + 1")))
+    });
+
+    c.bench_function("expr_parse_complex", |b| {
+        b.iter(|| Expr::parse(black_box("min($x, max($y, $z * 2.0)) + abs($a - $b)")))
+    });
+
+    // Evaluate benchmarks
+    let simple = Expr::parse("$x + 1").unwrap();
+    let mut ctx = ExprContext::new();
+    ctx.set("x", Kind::Number(Number::unitless(41.0)));
+
+    c.bench_function("expr_eval_simple", |b| {
+        b.iter(|| simple.eval(black_box(&ctx)))
+    });
+
+    let complex = Expr::parse("min($x, max($y, $z * 2.0)) + abs($a - $b)").unwrap();
+    let mut ctx2 = ExprContext::new();
+    ctx2.set("x", Kind::Number(Number::unitless(10.0)));
+    ctx2.set("y", Kind::Number(Number::unitless(5.0)));
+    ctx2.set("z", Kind::Number(Number::unitless(3.0)));
+    ctx2.set("a", Kind::Number(Number::unitless(20.0)));
+    ctx2.set("b", Kind::Number(Number::unitless(15.0)));
+
+    c.bench_function("expr_eval_complex", |b| {
+        b.iter(|| complex.eval(black_box(&ctx2)))
+    });
+}
+
+fn unit_benchmarks(c: &mut Criterion) {
+    c.bench_function("unit_convert_temperature", |b| {
+        b.iter(|| {
+            kinds::convert(
+                black_box(72.0),
+                black_box("\u{00b0}F"),
+                black_box("\u{00b0}C"),
+            )
+        })
+    });
+
+    c.bench_function("unit_compatible_check", |b| {
+        b.iter(|| kinds::compatible(black_box("\u{00b0}F"), black_box("\u{00b0}C")))
+    });
+
+    c.bench_function("unit_quantity_lookup", |b| {
+        b.iter(|| kinds::quantity(black_box("\u{00b0}F")))
+    });
+}
+
+fn traversal_benchmarks(c: &mut Criterion) {
+    let graph = build_hierarchy_graph();
+
+    c.bench_function("graph_hierarchy_tree", |b| {
+        b.iter(|| graph.hierarchy_tree(black_box("site-0"), black_box(3)))
+    });
+
+    c.bench_function("graph_classify", |b| {
+        b.iter(|| graph.classify(black_box("equip-0-0")))
+    });
+
+    c.bench_function("graph_ref_chain", |b| {
+        b.iter(|| {
+            graph.ref_chain(
+                black_box("point-0-0-0"),
+                black_box(&["equipRef", "siteRef"]),
+            )
+        })
+    });
+
+    c.bench_function("graph_children", |b| {
+        b.iter(|| graph.children(black_box("site-0")))
+    });
+
+    c.bench_function("graph_site_for", |b| {
+        b.iter(|| graph.site_for(black_box("point-0-0-0")))
+    });
+
+    c.bench_function("graph_equip_points", |b| {
+        b.iter(|| graph.equip_points(black_box("equip-0-0"), None))
+    });
+}
+
+fn snapshot_benchmarks(c: &mut Criterion) {
+    use haystack_core::graph::{SnapshotReader, SnapshotWriter};
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Build a graph with 1000 entities
+    let sg = SharedGraph::new(EntityGraph::new());
+    let mut site = HDict::new();
+    site.set("id", Kind::Ref(HRef::from_val("site-1")));
+    site.set("site", Kind::Marker);
+    sg.add(site).unwrap();
+    for i in 0..1000 {
+        sg.add(make_sample_entity(i)).unwrap();
+    }
+
+    let writer = SnapshotWriter::new(tmp.path().to_path_buf(), 10);
+
+    c.bench_function("snapshot_write_1000", |b| {
+        b.iter(|| writer.write(black_box(&sg)))
+    });
+
+    // Write once to get a snapshot to read
+    let snap_path = writer.write(&sg).unwrap();
+
+    c.bench_function("snapshot_read_1000", |b| {
+        b.iter(|| {
+            let g = SharedGraph::new(EntityGraph::new());
+            SnapshotReader::load(black_box(&snap_path), &g)
+        })
+    });
+}
+
+fn validation_benchmarks(c: &mut Criterion) {
+    use haystack_core::ontology::validate_graph;
+
+    let ns = DefNamespace::load_standard().unwrap();
+
+    let mut graph = EntityGraph::new();
+    let mut site = HDict::new();
+    site.set("id", Kind::Ref(HRef::from_val("site-1")));
+    site.set("site", Kind::Marker);
+    site.set("dis", Kind::Str("Main Site".into()));
+    graph.add(site).unwrap();
+    for i in 0..1000 {
+        graph.add(make_sample_entity(i)).unwrap();
+    }
+
+    c.bench_function("validate_graph_1000", |b| {
+        b.iter(|| validate_graph(black_box(&graph), black_box(&ns)))
+    });
+}
+
+#[cfg(feature = "haystack-serde")]
+fn hbf_benchmarks(c: &mut Criterion) {
+    use haystack_core::codecs::hbf;
+
+    let grid_100 = make_sample_grid(100);
+    let grid_1000 = make_sample_grid(1000);
+
+    // HBF encode
+    c.bench_function("hbf_encode_100_rows", |b| {
+        b.iter(|| hbf::encode_grid(black_box(&grid_100)))
+    });
+
+    let hbf_100 = hbf::encode_grid(&grid_100).unwrap();
+    c.bench_function("hbf_decode_100_rows", |b| {
+        b.iter(|| hbf::decode_grid(black_box(&hbf_100)))
+    });
+
+    c.bench_function("hbf_encode_1000_rows", |b| {
+        b.iter(|| hbf::encode_grid(black_box(&grid_1000)))
+    });
+
+    let hbf_1000 = hbf::encode_grid(&grid_1000).unwrap();
+    c.bench_function("hbf_decode_1000_rows", |b| {
+        b.iter(|| hbf::decode_grid(black_box(&hbf_1000)))
+    });
+
+    // Size comparison
+    let zinc = codec_for("text/zinc").unwrap();
+    let json = codec_for("application/json").unwrap();
+    let zinc_bytes = zinc.encode_grid(&grid_100).unwrap().len();
+    let json_bytes = json.encode_grid(&grid_100).unwrap().len();
+    let hbf_bytes = hbf_100.len();
+    eprintln!(
+        "100-row grid sizes: Zinc={} bytes, JSON={} bytes, HBF={} bytes ({:.0}% of Zinc, {:.0}% of JSON)",
+        zinc_bytes,
+        json_bytes,
+        hbf_bytes,
+        hbf_bytes as f64 / zinc_bytes as f64 * 100.0,
+        hbf_bytes as f64 / json_bytes as f64 * 100.0,
+    );
+}
+
 criterion_group!(
     benches,
     codec_benchmarks,
     filter_benchmarks,
     graph_benchmarks,
     ontology_benchmarks,
-    xeto_benchmarks
+    xeto_benchmarks,
+    expr_benchmarks,
+    unit_benchmarks,
+    traversal_benchmarks,
+    snapshot_benchmarks,
+    validation_benchmarks,
 );
+
+#[cfg(feature = "haystack-serde")]
+criterion_group!(hbf_benches, hbf_benchmarks);
+
+#[cfg(feature = "haystack-serde")]
+criterion_main!(benches, hbf_benches);
+
+#[cfg(not(feature = "haystack-serde"))]
 criterion_main!(benches);

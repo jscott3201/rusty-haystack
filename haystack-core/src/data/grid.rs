@@ -2,6 +2,7 @@
 
 use super::dict::HDict;
 use std::fmt;
+use std::sync::Arc;
 
 /// A single column in a Haystack Grid.
 ///
@@ -52,6 +53,23 @@ impl HGrid {
     /// Create a grid from its constituent parts.
     pub fn from_parts(meta: HDict, cols: Vec<HCol>, rows: Vec<HDict>) -> Self {
         Self { meta, cols, rows }
+    }
+
+    /// Build a grid from Arc-wrapped rows, avoiding clones when possible.
+    ///
+    /// Uses `Arc::try_unwrap()` to move the inner HDict when the reference count
+    /// is 1 (which is the common case in request pipelines). Falls back to clone
+    /// only for shared references.
+    pub fn from_parts_arc(meta: HDict, cols: Vec<HCol>, rows: Vec<Arc<HDict>>) -> Self {
+        let owned_rows: Vec<HDict> = rows
+            .into_iter()
+            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone()))
+            .collect();
+        Self {
+            meta,
+            cols,
+            rows: owned_rows,
+        }
     }
 
     /// Look up a column by name. Returns `None` if not found.

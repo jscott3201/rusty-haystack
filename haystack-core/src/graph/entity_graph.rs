@@ -13,7 +13,7 @@ use crate::ontology::{DefNamespace, ValidationIssue};
 
 use super::adjacency::RefAdjacency;
 use super::bitmap::TagBitmapIndex;
-use super::changelog::{DiffOp, GraphDiff};
+use super::changelog::{ChangelogGap, DiffOp, GraphDiff};
 use super::columnar::ColumnarStore;
 use super::csr::CsrAdjacency;
 use super::query_planner;
@@ -54,6 +54,10 @@ pub struct EntityGraph {
     version: u64,
     /// Ordered list of mutations.
     changelog: std::collections::VecDeque<GraphDiff>,
+    /// Maximum number of changelog entries retained.
+    changelog_capacity: usize,
+    /// Lowest version still present in the changelog (0 = no evictions yet).
+    floor_version: u64,
     /// LRU query cache: (filter, version) → matching ref_vals.
     /// Uses Mutex for interior mutability since read_all takes &self.
     query_cache: Mutex<QueryCache>,
@@ -95,14 +99,23 @@ impl QueryCache {
 
     fn insert(&mut self, filter: String, version: u64, ref_vals: Vec<String>) {
         if self.entries.len() >= self.capacity {
-            // Evict least recently used (front).
+            // First try purging stale entries from older versions.
+            self.purge_stale(version);
+        }
+        if self.entries.len() >= self.capacity {
+            // Still at capacity — evict least recently used (front).
             self.entries.shift_remove_index(0);
         }
         self.entries.insert((filter, version), ref_vals);
     }
+
+    /// Remove all entries whose version is older than `min_version`.
+    fn purge_stale(&mut self, min_version: u64) {
+        self.entries
+            .retain(|(_filter, version), _| *version >= min_version);
+    }
 }
 
-const MAX_CHANGELOG: usize = 10_000;
 const QUERY_CACHE_CAPACITY: usize = 256;
 
 /// Common Haystack fields to auto-index for O(log N) value lookups.
@@ -111,8 +124,15 @@ const AUTO_INDEX_FIELDS: &[&str] = &[
 ];
 
 impl EntityGraph {
-    /// Create an empty entity graph with standard Haystack fields auto-indexed.
+    /// Create an empty entity graph with standard Haystack fields auto-indexed
+    /// and default changelog capacity (50,000).
     pub fn new() -> Self {
+        Self::with_changelog_capacity(super::changelog::DEFAULT_CHANGELOG_CAPACITY)
+    }
+
+    /// Create an empty entity graph with a custom changelog capacity.
+    pub fn with_changelog_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1); // Ensure at least 1 entry
         let mut value_index = ValueIndex::new();
         for field in AUTO_INDEX_FIELDS {
             value_index.index_field(field);
@@ -127,6 +147,8 @@ impl EntityGraph {
             namespace: None,
             version: 0,
             changelog: std::collections::VecDeque::new(),
+            changelog_capacity: capacity,
+            floor_version: 0,
             query_cache: Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             ast_cache: Mutex::new(HashMap::new()),
             value_index,
@@ -232,10 +254,13 @@ impl EntityGraph {
         self.csr = None; // Invalidate CSR snapshot on mutation.
         self.push_changelog(GraphDiff {
             version: self.version,
+            timestamp: 0,
             op: DiffOp::Add,
             ref_val: ref_val.clone(),
             old: None,
             new: Some(entity_for_log),
+            changed_tags: None,
+            previous_tags: None,
         });
 
         Ok(ref_val)
@@ -265,26 +290,36 @@ impl EntityGraph {
         // Remove old indexing.
         self.remove_indexing(eid, &old_entity);
 
-        // Snapshot old state for changelog, then merge in-place.
-        let old_snapshot = old_entity.clone();
+        // Compute delta: capture only the tags being changed.
+        let mut prev_tags = HDict::new();
+        let mut changed = HDict::new();
+        for (key, new_val) in changes.iter() {
+            if let Some(old_val) = old_entity.get(key) {
+                prev_tags.set(key, old_val.clone());
+            }
+            changed.set(key, new_val.clone());
+        }
+
+        // Merge in-place.
         old_entity.merge(&changes);
 
         // Re-index before re-inserting (entity is a local value, no borrow conflict).
         self.index_tags(eid, &old_entity);
         self.index_refs(eid, &old_entity);
 
-        // Clone for the changelog, then move the updated entity into the map.
-        let updated_for_log = old_entity.clone();
         self.entities.insert(ref_val.to_string(), old_entity);
 
         self.version += 1;
         self.csr = None; // Invalidate CSR snapshot on mutation.
         self.push_changelog(GraphDiff {
             version: self.version,
+            timestamp: 0,
             op: DiffOp::Update,
             ref_val: ref_val.to_string(),
-            old: Some(old_snapshot),
-            new: Some(updated_for_log),
+            old: None,
+            new: None,
+            changed_tags: Some(changed),
+            previous_tags: Some(prev_tags),
         });
 
         Ok(())
@@ -310,10 +345,13 @@ impl EntityGraph {
         self.csr = None; // Invalidate CSR snapshot on mutation.
         self.push_changelog(GraphDiff {
             version: self.version,
+            timestamp: 0,
             op: DiffOp::Remove,
             ref_val: ref_val.to_string(),
             old: Some(entity.clone()),
             new: None,
+            changed_tags: None,
+            previous_tags: None,
         });
 
         Ok(entity)
@@ -330,15 +368,14 @@ impl EntityGraph {
         }
 
         // Collect all unique column names.
-        let mut col_set: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(results.len().min(64));
         for entity in &results {
             for name in entity.tag_names() {
-                if seen.insert(name.to_string()) {
-                    col_set.push(name.to_string());
-                }
+                seen.insert(name.to_string());
             }
         }
+        let mut col_set: Vec<String> = seen.into_iter().collect();
         col_set.sort();
         let cols: Vec<HCol> = col_set.iter().map(|n| HCol::new(n.as_str())).collect();
         let rows: Vec<HDict> = results.into_iter().cloned().collect();
@@ -564,8 +601,8 @@ impl EntityGraph {
 
         let mut visited: HashSet<usize> = HashSet::new();
         let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
-        let mut result_entities: Vec<&HDict> = Vec::new();
-        let mut result_edges: Vec<(String, String, String)> = Vec::new();
+        let mut result_entities: Vec<&HDict> = Vec::with_capacity(16);
+        let mut result_edges: Vec<(String, String, String)> = Vec::with_capacity(16);
 
         visited.insert(start_eid);
         queue.push_back((start_eid, 0));
@@ -769,6 +806,93 @@ impl EntityGraph {
         results
     }
 
+    // ── Haystack Hierarchy Helpers ──
+
+    /// Walk a chain of ref tags starting from an entity.
+    ///
+    /// For example, `ref_chain("point-1", &["equipRef", "siteRef"])` follows
+    /// `point-1` → its `equipRef` → that entity's `siteRef`, returning the
+    /// ordered path of resolved entities (excluding the starting entity).
+    pub fn ref_chain(&self, ref_val: &str, ref_tags: &[&str]) -> Vec<&HDict> {
+        let mut result = Vec::with_capacity(ref_tags.len());
+        let mut current = ref_val.to_string();
+        for tag in ref_tags {
+            let entity = match self.entities.get(&current) {
+                Some(e) => e,
+                None => break,
+            };
+            match entity.get(tag) {
+                Some(Kind::Ref(r)) => {
+                    current = r.val.clone();
+                    if let Some(target) = self.entities.get(&current) {
+                        result.push(target);
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        result
+    }
+
+    /// Resolve the site for any entity by walking `equipRef` → `siteRef`.
+    ///
+    /// If the entity itself has a `site` marker, returns it directly.
+    /// Otherwise walks the standard Haystack ref chain.
+    pub fn site_for(&self, ref_val: &str) -> Option<&HDict> {
+        let entity = self.entities.get(ref_val)?;
+        // If the entity is itself a site, return it.
+        if entity.has("site") {
+            return Some(entity);
+        }
+        // Check direct siteRef.
+        if let Some(Kind::Ref(r)) = entity.get("siteRef") {
+            return self.entities.get(&r.val);
+        }
+        // Walk equipRef → siteRef.
+        if let Some(Kind::Ref(r)) = entity.get("equipRef") {
+            if let Some(equip) = self.entities.get(&r.val) {
+                if let Some(Kind::Ref(sr)) = equip.get("siteRef") {
+                    return self.entities.get(&sr.val);
+                }
+            }
+        }
+        None
+    }
+
+    /// All direct children: entities with any ref tag pointing to this entity.
+    pub fn children(&self, ref_val: &str) -> Vec<&HDict> {
+        self.refs_to(ref_val, None)
+            .iter()
+            .filter_map(|r| self.entities.get(r))
+            .collect()
+    }
+
+    /// All points for an equip — children with the `point` marker.
+    ///
+    /// Optionally filter further with a filter expression.
+    pub fn equip_points(&self, equip_ref: &str, filter: Option<&str>) -> Vec<&HDict> {
+        let points: Vec<&HDict> = self
+            .children(equip_ref)
+            .into_iter()
+            .filter(|e| e.has("point"))
+            .collect();
+        match filter {
+            Some(expr) => {
+                let ast = match crate::filter::parse_filter(expr) {
+                    Ok(ast) => ast,
+                    Err(_) => return points,
+                };
+                points
+                    .into_iter()
+                    .filter(|e| crate::filter::matches(&ast, e, None))
+                    .collect()
+            }
+            None => points,
+        }
+    }
+
     // ── Spec-aware ──
 
     /// Find all entities that structurally fit a spec/type name.
@@ -881,13 +1005,37 @@ impl EntityGraph {
     // ── Change tracking ──
 
     /// Get changelog entries since a given version.
-    pub fn changes_since(&self, version: u64) -> Vec<&GraphDiff> {
+    ///
+    /// Returns `Err(ChangelogGap)` if the requested version has been evicted
+    /// from the changelog, signalling the subscriber must do a full resync.
+    pub fn changes_since(&self, version: u64) -> Result<Vec<&GraphDiff>, ChangelogGap> {
         let target = version + 1;
+        // If the floor has advanced past the requested version, the subscriber
+        // has fallen behind and missed entries.
+        if self.floor_version > 0 && version < self.floor_version {
+            return Err(ChangelogGap {
+                subscriber_version: version,
+                floor_version: self.floor_version,
+            });
+        }
         // VecDeque may not be contiguous, so collect matching entries.
-        self.changelog
+        Ok(self
+            .changelog
             .iter()
             .filter(|d| d.version >= target)
-            .collect()
+            .collect())
+    }
+
+    /// The lowest version still retained in the changelog.
+    ///
+    /// Returns 0 if no entries have been evicted.
+    pub fn floor_version(&self) -> u64 {
+        self.floor_version
+    }
+
+    /// The configured changelog capacity.
+    pub fn changelog_capacity(&self) -> usize {
+        self.changelog_capacity
     }
 
     /// Current graph version (monotonically increasing).
@@ -966,11 +1114,55 @@ impl EntityGraph {
         self.columnar.clear_entity(entity_id);
     }
 
-    /// Append a diff to the changelog, capping it at [`MAX_CHANGELOG`] entries.
-    fn push_changelog(&mut self, diff: GraphDiff) {
+    /// Build a full hierarchy subtree as a structured tree.
+    /// `root` is the entity ref, `max_depth` limits recursion (0 = root only).
+    pub fn hierarchy_tree(&self, root: &str, max_depth: usize) -> Option<HierarchyNode> {
+        let entity = self.entities.get(root)?.clone();
+        Some(self.build_subtree(root, &entity, 0, max_depth))
+    }
+
+    fn build_subtree(
+        &self,
+        ref_val: &str,
+        entity: &HDict,
+        depth: usize,
+        max_depth: usize,
+    ) -> HierarchyNode {
+        let children = if depth < max_depth {
+            self.children(ref_val)
+                .into_iter()
+                .filter_map(|child| {
+                    let child_id = child.id()?.val.clone();
+                    Some(self.build_subtree(&child_id, child, depth + 1, max_depth))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        HierarchyNode {
+            entity: entity.clone(),
+            children,
+            depth,
+        }
+    }
+
+    /// Determine the most specific entity type from its markers.
+    ///
+    /// Returns the most specific marker tag that identifies the entity type.
+    /// E.g., an entity with `equip` + `ahu` markers returns `"ahu"` (most specific).
+    pub fn classify(&self, ref_val: &str) -> Option<String> {
+        let entity = self.entities.get(ref_val)?;
+        classify_entity(entity)
+    }
+
+    /// Append a diff to the changelog, capping at the configured capacity.
+    fn push_changelog(&mut self, mut diff: GraphDiff) {
+        diff.timestamp = GraphDiff::now_nanos();
         self.changelog.push_back(diff);
-        while self.changelog.len() > MAX_CHANGELOG {
-            self.changelog.pop_front();
+        while self.changelog.len() > self.changelog_capacity {
+            if let Some(evicted) = self.changelog.pop_front() {
+                self.floor_version = evicted.version;
+            }
         }
     }
 }
@@ -981,6 +1173,14 @@ impl Default for EntityGraph {
     }
 }
 
+/// A node in a hierarchy tree produced by [`EntityGraph::hierarchy_tree`].
+#[derive(Debug, Clone)]
+pub struct HierarchyNode {
+    pub entity: HDict,
+    pub children: Vec<HierarchyNode>,
+    pub depth: usize,
+}
+
 /// Extract the ref value string from an entity's `id` tag.
 fn extract_ref_val(entity: &HDict) -> Result<String, GraphError> {
     match entity.get("id") {
@@ -988,6 +1188,28 @@ fn extract_ref_val(entity: &HDict) -> Result<String, GraphError> {
         Some(_) => Err(GraphError::InvalidId),
         None => Err(GraphError::MissingId),
     }
+}
+
+/// Priority-ordered list of marker tags from most specific to least specific.
+/// The first match wins.
+const CLASSIFY_PRIORITY: &[&str] = &[
+    // Point subtypes
+    "sensor", "cmd", "sp", // Equipment subtypes
+    "ahu", "vav", "boiler", "chiller", "meter", // Base categories
+    "point", "equip", // Space types
+    "room", "floor", "zone", "space", // Site
+    "site",  // Other well-known
+    "weather", "device", "network",
+];
+
+/// Classify an entity by returning the most specific recognized marker tag.
+fn classify_entity(entity: &HDict) -> Option<String> {
+    for &tag in CLASSIFY_PRIORITY {
+        if entity.has(tag) {
+            return Some(tag.to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1152,20 +1374,28 @@ mod tests {
         g.update("site-1", HDict::new()).unwrap();
         g.remove("site-1").unwrap();
 
-        let changes = g.changes_since(0);
+        let changes = g.changes_since(0).unwrap();
         assert_eq!(changes.len(), 3);
+
+        // Add: has new, no old, no deltas.
         assert_eq!(changes[0].op, DiffOp::Add);
         assert_eq!(changes[0].ref_val, "site-1");
         assert!(changes[0].old.is_none());
         assert!(changes[0].new.is_some());
+        assert!(changes[0].changed_tags.is_none());
 
+        // Update: has deltas, no old/new.
         assert_eq!(changes[1].op, DiffOp::Update);
-        assert!(changes[1].old.is_some());
-        assert!(changes[1].new.is_some());
+        assert!(changes[1].old.is_none());
+        assert!(changes[1].new.is_none());
+        assert!(changes[1].changed_tags.is_some());
+        assert!(changes[1].previous_tags.is_some());
 
+        // Remove: has old, no new, no deltas.
         assert_eq!(changes[2].op, DiffOp::Remove);
         assert!(changes[2].old.is_some());
         assert!(changes[2].new.is_none());
+        assert!(changes[2].changed_tags.is_none());
     }
 
     #[test]
@@ -1175,9 +1405,106 @@ mod tests {
         g.add(make_site("site-2")).unwrap(); // v2
         g.add(make_site("site-3")).unwrap(); // v3
 
-        let since_v2 = g.changes_since(2);
+        let since_v2 = g.changes_since(2).unwrap();
         assert_eq!(since_v2.len(), 1);
         assert_eq!(since_v2[0].ref_val, "site-3");
+    }
+
+    #[test]
+    fn configurable_changelog_capacity() {
+        let mut g = EntityGraph::with_changelog_capacity(3);
+        assert_eq!(g.changelog_capacity(), 3);
+
+        // Add 5 entities — first 2 should be evicted from changelog.
+        for i in 0..5 {
+            g.add(make_site(&format!("site-{i}"))).unwrap();
+        }
+
+        assert_eq!(g.version(), 5);
+        assert_eq!(g.floor_version(), 2); // v1 and v2 evicted
+
+        // Can still get changes from v2 onwards.
+        let changes = g.changes_since(2).unwrap();
+        assert_eq!(changes.len(), 3); // v3, v4, v5
+
+        // Requesting from v1 (evicted) should return ChangelogGap.
+        let gap = g.changes_since(1).unwrap_err();
+        assert_eq!(gap.subscriber_version, 1);
+        assert_eq!(gap.floor_version, 2);
+    }
+
+    #[test]
+    fn changelog_gap_on_version_zero_after_eviction() {
+        let mut g = EntityGraph::with_changelog_capacity(2);
+        for i in 0..4 {
+            g.add(make_site(&format!("site-{i}"))).unwrap();
+        }
+
+        // Requesting since v0 after evictions should return gap.
+        let gap = g.changes_since(0).unwrap_err();
+        assert_eq!(gap.subscriber_version, 0);
+        assert!(gap.floor_version > 0);
+    }
+
+    #[test]
+    fn no_gap_when_capacity_sufficient() {
+        let mut g = EntityGraph::with_changelog_capacity(100);
+        for i in 0..50 {
+            g.add(make_site(&format!("site-{i}"))).unwrap();
+        }
+        assert_eq!(g.floor_version(), 0);
+        let changes = g.changes_since(0).unwrap();
+        assert_eq!(changes.len(), 50);
+    }
+
+    #[test]
+    fn changelog_entries_have_timestamps() {
+        let mut g = EntityGraph::new();
+        g.add(make_site("site-1")).unwrap();
+        g.update("site-1", HDict::new()).unwrap();
+        g.remove("site-1").unwrap();
+
+        let changes = g.changes_since(0).unwrap();
+        for diff in &changes {
+            assert!(diff.timestamp > 0, "timestamp should be positive");
+        }
+        // Timestamps should be non-decreasing.
+        for pair in changes.windows(2) {
+            assert!(pair[1].timestamp >= pair[0].timestamp);
+        }
+    }
+
+    #[test]
+    fn update_diff_carries_delta_tags() {
+        let mut g = EntityGraph::new();
+        let mut site = HDict::new();
+        site.set("id", Kind::Ref(HRef::from_val("site-1")));
+        site.set("site", Kind::Marker);
+        site.set("dis", Kind::Str("Original".into()));
+        site.set("area", Kind::Number(Number::unitless(1000.0)));
+        g.add(site).unwrap();
+
+        let mut changes = HDict::new();
+        changes.set("dis", Kind::Str("Updated".into()));
+        g.update("site-1", changes).unwrap();
+
+        let diffs = g.changes_since(1).unwrap(); // skip the Add
+        assert_eq!(diffs.len(), 1);
+        let diff = &diffs[0];
+        assert_eq!(diff.op, DiffOp::Update);
+
+        // old/new should be None for Update (delta only).
+        assert!(diff.old.is_none());
+        assert!(diff.new.is_none());
+
+        // changed_tags has the new value.
+        let ct = diff.changed_tags.as_ref().unwrap();
+        assert_eq!(ct.get("dis"), Some(&Kind::Str("Updated".into())));
+        assert!(ct.get("area").is_none()); // unchanged tag not included
+
+        // previous_tags has the old value.
+        let pt = diff.previous_tags.as_ref().unwrap();
+        assert_eq!(pt.get("dis"), Some(&Kind::Str("Original".into())));
     }
 
     // ── Container tests ──
@@ -1458,18 +1785,24 @@ mod tests {
 
     #[test]
     fn changelog_bounded_to_max_size() {
-        let mut graph = EntityGraph::new();
-        // Add more entities than MAX_CHANGELOG
-        for i in 0..12_000 {
+        // Use a small capacity to test bounding without 50K iterations.
+        let mut graph = EntityGraph::with_changelog_capacity(100);
+        for i in 0..200 {
             let mut d = HDict::new();
             d.set("id", Kind::Ref(HRef::from_val(format!("e{i}"))));
             d.set("dis", Kind::Str(format!("Entity {i}")));
             graph.add(d).unwrap();
         }
-        // Changelog should be capped
-        assert!(graph.changes_since(0).len() <= 10_000);
-        // Latest changes should still be present
-        assert!(graph.changes_since(11_999).len() <= 1);
+        // Changelog should be capped at capacity.
+        // Requesting since floor_version should succeed.
+        let floor = graph.floor_version();
+        assert!(floor > 0);
+        let changes = graph.changes_since(floor).unwrap();
+        assert!(changes.len() <= 100);
+        // Latest changes should still be present.
+        assert!(graph.changes_since(199).unwrap().len() <= 1);
+        // Old versions should return gap.
+        assert!(graph.changes_since(0).is_err());
     }
 
     #[test]
@@ -1663,5 +1996,179 @@ mod tests {
         // p1 has no children referencing it
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].0.id().unwrap().val, "p1");
+    }
+
+    // ── Haystack Hierarchy Helper tests ──
+
+    #[test]
+    fn ref_chain_walks_equip_to_site() {
+        let g = build_hierarchy_graph();
+        // p1 → equipRef=e1 → siteRef=s1
+        let chain = g.ref_chain("p1", &["equipRef", "siteRef"]);
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].id().unwrap().val, "e1");
+        assert_eq!(chain[1].id().unwrap().val, "s1");
+    }
+
+    #[test]
+    fn ref_chain_stops_on_missing_tag() {
+        let g = build_hierarchy_graph();
+        // e1 has siteRef but no spaceRef — should return just the site.
+        let chain = g.ref_chain("e1", &["siteRef", "spaceRef"]);
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].id().unwrap().val, "s1");
+    }
+
+    #[test]
+    fn ref_chain_empty_for_nonexistent() {
+        let g = build_hierarchy_graph();
+        let chain = g.ref_chain("nonexistent", &["equipRef"]);
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn site_for_returns_site_itself() {
+        let g = build_hierarchy_graph();
+        let site = g.site_for("s1").unwrap();
+        assert_eq!(site.id().unwrap().val, "s1");
+    }
+
+    #[test]
+    fn site_for_walks_from_point() {
+        let g = build_hierarchy_graph();
+        // p1 → equipRef=e1 → siteRef=s1
+        let site = g.site_for("p1").unwrap();
+        assert_eq!(site.id().unwrap().val, "s1");
+    }
+
+    #[test]
+    fn site_for_walks_from_equip() {
+        let g = build_hierarchy_graph();
+        let site = g.site_for("e1").unwrap();
+        assert_eq!(site.id().unwrap().val, "s1");
+    }
+
+    #[test]
+    fn children_returns_direct_refs() {
+        let g = build_hierarchy_graph();
+        let kids = g.children("s1");
+        // e1 and e2 reference s1 via siteRef.
+        let ids: Vec<&str> = kids.iter().map(|e| e.id().unwrap().val.as_str()).collect();
+        assert!(ids.contains(&"e1"));
+        assert!(ids.contains(&"e2"));
+    }
+
+    #[test]
+    fn equip_points_returns_points_only() {
+        let g = build_hierarchy_graph();
+        let points = g.equip_points("e1", None);
+        assert_eq!(points.len(), 2); // p1, p2
+        for p in &points {
+            assert!(p.has("point"));
+        }
+    }
+
+    #[test]
+    fn equip_points_with_filter() {
+        let mut g = build_hierarchy_graph();
+        // Existing points already have temp marker. Add one with flow instead.
+        let mut pf = HDict::new();
+        pf.set("id", Kind::Ref(HRef::from_val("pf")));
+        pf.set("point", Kind::Marker);
+        pf.set("flow", Kind::Marker);
+        pf.set("equipRef", Kind::Ref(HRef::from_val("e1")));
+        g.add(pf).unwrap();
+
+        let temp_points = g.equip_points("e1", Some("temp"));
+        // Only p1 and p2 have temp (the existing ones).
+        assert_eq!(temp_points.len(), 2);
+        assert!(temp_points.iter().all(|p| p.has("temp")));
+    }
+
+    // ── Hierarchy tree tests ──
+
+    #[test]
+    fn hierarchy_tree_from_site() {
+        let g = build_hierarchy_graph();
+        let tree = g.hierarchy_tree("s1", 10).unwrap();
+        assert_eq!(tree.depth, 0);
+        assert_eq!(tree.entity.id().unwrap().val, "s1");
+        // s1 has children e1, e2
+        assert_eq!(tree.children.len(), 2);
+        let child_ids: Vec<String> = tree
+            .children
+            .iter()
+            .map(|c| c.entity.id().unwrap().val.clone())
+            .collect();
+        assert!(child_ids.contains(&"e1".to_string()));
+        assert!(child_ids.contains(&"e2".to_string()));
+        // e1 has children p1, p2
+        let e1_node = tree
+            .children
+            .iter()
+            .find(|c| c.entity.id().unwrap().val == "e1")
+            .unwrap();
+        assert_eq!(e1_node.children.len(), 2);
+        let point_ids: Vec<String> = e1_node
+            .children
+            .iter()
+            .map(|c| c.entity.id().unwrap().val.clone())
+            .collect();
+        assert!(point_ids.contains(&"p1".to_string()));
+        assert!(point_ids.contains(&"p2".to_string()));
+    }
+
+    #[test]
+    fn hierarchy_tree_max_depth() {
+        let g = build_hierarchy_graph();
+        // depth 0 = root only
+        let tree = g.hierarchy_tree("s1", 0).unwrap();
+        assert!(tree.children.is_empty());
+        // depth 1 = root + direct children
+        let tree = g.hierarchy_tree("s1", 1).unwrap();
+        assert_eq!(tree.children.len(), 2);
+        assert!(tree.children.iter().all(|c| c.children.is_empty()));
+    }
+
+    #[test]
+    fn hierarchy_tree_missing_root() {
+        let g = build_hierarchy_graph();
+        assert!(g.hierarchy_tree("nonexistent", 10).is_none());
+    }
+
+    // ── Classify tests ──
+
+    #[test]
+    fn classify_site() {
+        let g = build_hierarchy_graph();
+        assert_eq!(g.classify("s1").unwrap(), "site");
+    }
+
+    #[test]
+    fn classify_equip() {
+        let mut g = EntityGraph::new();
+        let mut d = HDict::new();
+        d.set("id", Kind::Ref(HRef::from_val("ahu-1")));
+        d.set("equip", Kind::Marker);
+        d.set("ahu", Kind::Marker);
+        g.add(d).unwrap();
+        assert_eq!(g.classify("ahu-1").unwrap(), "ahu");
+    }
+
+    #[test]
+    fn classify_point() {
+        let g = build_hierarchy_graph();
+        // Points have point + sensor + temp markers; sensor is most specific.
+        assert_eq!(g.classify("p1").unwrap(), "sensor");
+    }
+
+    #[test]
+    fn classify_unknown() {
+        let mut g = EntityGraph::new();
+        let mut d = HDict::new();
+        d.set("id", Kind::Ref(HRef::from_val("x1")));
+        d.set("custom", Kind::Marker);
+        g.add(d).unwrap();
+        assert!(g.classify("x1").is_none());
     }
 }

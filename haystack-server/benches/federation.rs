@@ -165,6 +165,16 @@ impl TestServer {
         let transport = HttpTransport::new(&self.api_url(), String::new());
         HaystackClient::from_transport(transport)
     }
+
+    /// Connect an HTTP client using HBF binary format (no auth).
+    fn connect_hbf(&self) -> HaystackClient<HttpTransport> {
+        let transport = HttpTransport::with_format(
+            &self.api_url(),
+            String::new(),
+            haystack_core::codecs::HBF_MIME,
+        );
+        HaystackClient::from_transport(transport)
+    }
 }
 
 /// Build prefixed entities matching what a remote graph contains.
@@ -237,30 +247,36 @@ impl FederationCluster {
         // SCRAM-based sync. Instead we pre-populate the connector caches
         // with prefixed entities matching the remote graphs.
         let mut federation = Federation::new();
-        federation.add(ConnectorConfig {
-            name: "Remote A".to_string(),
-            url: remote_a.api_url(),
-            username: BENCH_USER.to_string(),
-            password: BENCH_PASS.to_string(),
-            id_prefix: Some("ra-".to_string()),
-            ws_url: None,
-            sync_interval_secs: Some(3600), // long interval — we sync manually
-            client_cert: None,
-            client_key: None,
-            ca_cert: None,
-        });
-        federation.add(ConnectorConfig {
-            name: "Remote B".to_string(),
-            url: remote_b.api_url(),
-            username: BENCH_USER.to_string(),
-            password: BENCH_PASS.to_string(),
-            id_prefix: Some("rb-".to_string()),
-            ws_url: None,
-            sync_interval_secs: Some(3600),
-            client_cert: None,
-            client_key: None,
-            ca_cert: None,
-        });
+        federation
+            .add(ConnectorConfig {
+                name: "Remote A".to_string(),
+                url: remote_a.api_url(),
+                username: BENCH_USER.to_string(),
+                password: BENCH_PASS.to_string(),
+                id_prefix: Some("ra-".to_string()),
+                ws_url: None,
+                sync_interval_secs: Some(3600), // long interval — we sync manually
+                client_cert: None,
+                client_key: None,
+                ca_cert: None,
+                domain: None,
+            })
+            .unwrap();
+        federation
+            .add(ConnectorConfig {
+                name: "Remote B".to_string(),
+                url: remote_b.api_url(),
+                username: BENCH_USER.to_string(),
+                password: BENCH_PASS.to_string(),
+                id_prefix: Some("rb-".to_string()),
+                ws_url: None,
+                sync_interval_secs: Some(3600),
+                client_cert: None,
+                client_key: None,
+                ca_cert: None,
+                domain: None,
+            })
+            .unwrap();
 
         // Pre-populate connector caches (simulates a completed sync)
         let entities_a = build_prefixed_entities(ENTITIES_PER_REMOTE, "ra-");
@@ -359,6 +375,7 @@ fn read_benchmarks(c: &mut Criterion) {
     let rt = get_runtime();
     let cluster = get_cluster();
     let client = cluster.lead.connect_http();
+    let hbf_client = cluster.lead.connect_hbf();
 
     let mut group = c.benchmark_group("federation_read");
 
@@ -380,13 +397,35 @@ fn read_benchmarks(c: &mut Criterion) {
         });
     });
 
-    // Filter: all points (20k federated entities)
+    // Filter: all points (20k federated entities) — Zinc text
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
     group.bench_function("filter_all_points_20k", |b| {
         b.iter(|| {
             rt.block_on(async {
                 black_box(client.read("point", None).await.unwrap());
+            });
+        });
+    });
+
+    // Filter: all points (20k federated entities) — HBF binary
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+    group.bench_function("filter_all_points_20k_hbf", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                black_box(hbf_client.read("point", None).await.unwrap());
+            });
+        });
+    });
+
+    // Read by ID — HBF binary
+    group.sample_size(100);
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("read_by_id_hbf", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                black_box(hbf_client.read_by_ids(&["ra-p-500"]).await.unwrap());
             });
         });
     });

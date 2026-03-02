@@ -123,6 +123,7 @@ impl PyConnectorConfig {
                 client_cert: None,
                 client_key: None,
                 ca_cert: None,
+                domain: None,
             },
         }
     }

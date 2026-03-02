@@ -14,6 +14,7 @@ use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use haystack_core::auth::{
     DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake, derive_credentials, extract_client_nonce,
@@ -49,6 +50,12 @@ pub struct AuthManager {
     /// Secret used to derive fake SCRAM challenges for unknown users,
     /// preventing username enumeration attacks.
     server_secret: [u8; 32],
+}
+
+impl Drop for AuthManager {
+    fn drop(&mut self) {
+        self.server_secret.zeroize();
+    }
 }
 
 impl AuthManager {

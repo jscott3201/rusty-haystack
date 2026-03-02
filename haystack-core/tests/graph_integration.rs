@@ -241,17 +241,17 @@ fn changelog_integration() {
     assert_eq!(v4, 4);
 
     // Changes since v0 should be all 4.
-    let all_changes = g.changes_since(v0);
+    let all_changes = g.changes_since(v0).unwrap();
     assert_eq!(all_changes.len(), 4);
 
     // Changes since v2 should be update + remove.
-    let recent = g.changes_since(v2);
+    let recent = g.changes_since(v2).unwrap();
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0].op, DiffOp::Update);
     assert_eq!(recent[1].op, DiffOp::Remove);
 
     // Changes since latest should be empty.
-    let none = g.changes_since(v4);
+    let none = g.changes_since(v4).unwrap();
     assert!(none.is_empty());
 }
 
@@ -578,7 +578,7 @@ fn multiple_updates_same_entity() {
     assert_eq!(entity.get("dis"), Some(&Kind::Str("Site v9".into())));
 
     // Changelog should have all 11 entries
-    let changes = g.changes_since(0);
+    let changes = g.changes_since(0).unwrap();
     assert_eq!(changes.len(), 11);
 }
 

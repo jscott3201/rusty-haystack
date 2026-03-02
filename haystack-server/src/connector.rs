@@ -40,7 +40,7 @@ use haystack_client::HaystackClient;
 use haystack_client::transport::http::HttpTransport;
 use haystack_client::transport::ws::WsTransport;
 use haystack_core::data::{HDict, HGrid};
-use haystack_core::filter::{matches, parse_filter};
+use haystack_core::filter::{FilterNode, matches, parse_filter};
 use haystack_core::graph::bitmap::TagBitmapIndex;
 use haystack_core::graph::query_planner;
 use haystack_core::kinds::{HRef, Kind};
@@ -140,6 +140,32 @@ pub struct ConnectorConfig {
     pub client_key: Option<String>,
     /// Path to PEM CA certificate for server verification.
     pub ca_cert: Option<String>,
+    /// Optional domain tag for scoping federated queries (e.g. "site:bldg-a").
+    #[serde(default)]
+    pub domain: Option<String>,
+}
+
+const MAX_DOMAIN_LEN: usize = 256;
+
+impl ConnectorConfig {
+    /// Validate configuration fields.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(ref domain) = self.domain {
+            if domain.len() > MAX_DOMAIN_LEN {
+                return Err(format!(
+                    "domain too long: {} chars (max {MAX_DOMAIN_LEN})",
+                    domain.len()
+                ));
+            }
+            if !domain
+                .chars()
+                .all(|c| c.is_alphanumeric() || "-.:_".contains(c))
+            {
+                return Err(format!("domain contains invalid characters: {domain}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A connector that can fetch entities from a remote Haystack server.
@@ -148,7 +174,7 @@ pub struct ConnectorConfig {
 /// Consolidated cache state — entities, ownership set, bitmap index, and ID map
 /// bundled under a single lock for atomic reads/updates and consistency.
 struct CacheState {
-    entities: Vec<HDict>,
+    entities: Vec<Arc<HDict>>,
     owned_ids: HashSet<String>,
     tag_index: TagBitmapIndex,
     id_map: HashMap<String, usize>,
@@ -164,23 +190,45 @@ impl CacheState {
         }
     }
 
+    /// Maximum number of tags per entity before the entity is skipped.
+    const MAX_ENTITY_TAGS: usize = 1_000;
+    /// Maximum entity ID length (bytes) before the entity is skipped.
+    const MAX_ENTITY_ID_LEN: usize = 256;
+
     /// Build a fully indexed cache state from a list of entities.
+    /// Entities with an ID exceeding [`MAX_ENTITY_ID_LEN`] or more than
+    /// [`MAX_ENTITY_TAGS`] tags are silently skipped.
     fn build(entities: Vec<HDict>) -> Self {
         let mut owned_ids = HashSet::with_capacity(entities.len());
         let mut tag_index = TagBitmapIndex::new();
         let mut id_map = HashMap::with_capacity(entities.len());
+        let mut valid_entities = Vec::with_capacity(entities.len());
 
-        for (eid, entity) in entities.iter().enumerate() {
+        for entity in entities {
+            // Validate entity: skip oversized IDs or excessive tag counts
+            if let Some(Kind::Ref(r)) = entity.get("id") {
+                if r.val.len() > Self::MAX_ENTITY_ID_LEN {
+                    log::warn!("skipping entity with oversized ID ({} bytes)", r.val.len());
+                    continue;
+                }
+            }
+            if entity.len() > Self::MAX_ENTITY_TAGS {
+                log::warn!("skipping entity with too many tags ({})", entity.len());
+                continue;
+            }
+
+            let eid = valid_entities.len();
             if let Some(Kind::Ref(r)) = entity.get("id") {
                 owned_ids.insert(r.val.clone());
                 id_map.insert(r.val.clone(), eid);
             }
             let tags: Vec<String> = entity.tag_names().map(|s| s.to_string()).collect();
             tag_index.add(eid, &tags);
+            valid_entities.push(Arc::new(entity));
         }
 
         Self {
-            entities,
+            entities: valid_entities,
             owned_ids,
             tag_index,
             id_map,
@@ -206,6 +254,17 @@ impl CacheState {
 
 /// and state for adaptive sync and federation proxy operations. See the
 /// [module-level documentation](self) for the full lifecycle.
+/// Observable state of a federation connector.
+#[derive(Debug, Clone)]
+pub struct ConnectorState {
+    pub name: String,
+    pub connected: bool,
+    pub cache_version: u64,
+    pub entity_count: usize,
+    pub last_sync_ts: Option<i64>,
+    pub staleness_secs: Option<f64>,
+}
+
 pub struct Connector {
     pub config: ConnectorConfig,
     /// Consolidated cache state: entities, ownership index, bitmap tag index, and
@@ -229,6 +288,8 @@ pub struct Connector {
     current_interval_secs: AtomicU64,
     /// Number of entities from last sync (for change detection).
     last_entity_count: AtomicU64,
+    /// Monotonically increasing version counter, bumped on each cache update.
+    cache_version: AtomicU64,
 }
 
 impl Connector {
@@ -249,6 +310,7 @@ impl Connector {
             client: tokio::sync::RwLock::new(None),
             current_interval_secs: AtomicU64::new(base_interval),
             last_entity_count: AtomicU64::new(0),
+            cache_version: AtomicU64::new(0),
         }
     }
 
@@ -441,10 +503,22 @@ impl Connector {
                 _ => continue,
             };
 
+            const MAX_ENTITY_TAGS: usize = 1_000;
+            const MAX_ENTITY_ID_LEN: usize = 256;
+
+            if ref_val.len() > MAX_ENTITY_ID_LEN {
+                log::warn!("skipping entity with oversized id: {} bytes", ref_val.len());
+                continue;
+            }
+
             match op {
                 "add" | "update" => {
                     if let Some(Kind::Dict(entity_box)) = row.get("entity") {
                         let mut entity: HDict = (**entity_box).clone();
+                        if entity.len() > MAX_ENTITY_TAGS {
+                            log::warn!("skipping oversized entity with {} tags", entity.len());
+                            continue;
+                        }
                         if let Some(pfx) = prefix {
                             prefix_refs(&mut entity, pfx);
                         }
@@ -459,12 +533,12 @@ impl Connector {
                         if let Some(ref eid) = entity_id {
                             if let Some(&idx) = state.id_map.get(eid.as_str()) {
                                 // Update in place.
-                                state.entities[idx] = entity;
+                                state.entities[idx] = Arc::new(entity);
                             } else {
                                 // Add new entity.
                                 let idx = state.entities.len();
                                 state.id_map.insert(eid.clone(), idx);
-                                state.entities.push(entity);
+                                state.entities.push(Arc::new(entity));
                             }
                         }
                     }
@@ -504,6 +578,7 @@ impl Connector {
         let count = state.entities.len();
         drop(state);
 
+        self.cache_version.fetch_add(1, Ordering::Relaxed);
         *self.last_remote_version.write() = Some(cur_ver);
         *self.last_sync.write() = Some(Utc::now());
         self.connected.store(true, Ordering::Relaxed);
@@ -517,6 +592,7 @@ impl Connector {
     /// replaces the cache, ownership set, and index.
     pub fn update_cache(&self, entities: Vec<HDict>) {
         *self.cache_state.write() = CacheState::build(entities);
+        self.cache_version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Returns `true` if this connector owns an entity with the given ID.
@@ -525,25 +601,25 @@ impl Connector {
     }
 
     /// Look up a single cached entity by ID using the O(1) id_map index.
-    pub fn get_cached_entity(&self, id: &str) -> Option<HDict> {
+    pub fn get_cached_entity(&self, id: &str) -> Option<Arc<HDict>> {
         let state = self.cache_state.read();
         state
             .id_map
             .get(id)
             .and_then(|&idx| state.entities.get(idx))
-            .cloned()
+            .map(Arc::clone)
     }
 
     /// Look up multiple cached entities by ID in a single pass.
     /// Returns found entities and missing IDs.
-    pub fn batch_get_cached(&self, ids: &[&str]) -> (Vec<HDict>, Vec<String>) {
+    pub fn batch_get_cached(&self, ids: &[&str]) -> (Vec<Arc<HDict>>, Vec<String>) {
         let state = self.cache_state.read();
         let mut found = Vec::with_capacity(ids.len());
         let mut missing = Vec::new();
         for &id in ids {
             if let Some(&idx) = state.id_map.get(id) {
                 if let Some(entity) = state.entities.get(idx) {
-                    found.push(entity.clone());
+                    found.push(Arc::clone(entity));
                 } else {
                     missing.push(id.to_string());
                 }
@@ -554,8 +630,8 @@ impl Connector {
         (found, missing)
     }
 
-    /// Returns a clone of all cached entities.
-    pub fn cached_entities(&self) -> Vec<HDict> {
+    /// Returns Arc-wrapped references to all cached entities (cheap pointer copies).
+    pub fn cached_entities(&self) -> Vec<Arc<HDict>> {
         self.cache_state.read().entities.clone()
     }
 
@@ -569,16 +645,28 @@ impl Connector {
     /// Returns matching entities up to `limit` (0 = unlimited). Uses the same
     /// two-phase approach as EntityGraph: bitmap candidates → full filter eval.
     pub fn filter_cached(&self, filter_expr: &str, limit: usize) -> Result<Vec<HDict>, String> {
-        let effective_limit = if limit == 0 { usize::MAX } else { limit };
-
         let ast = parse_filter(filter_expr).map_err(|e| format!("filter error: {e}"))?;
+        Ok(self
+            .filter_cached_with_ast(&ast, limit)
+            .into_iter()
+            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone()))
+            .collect())
+    }
+
+    /// Filter cached entities using a pre-parsed filter AST.
+    ///
+    /// Avoids redundant parsing when the same filter is applied across
+    /// multiple connectors (e.g. federated reads). Returns Arc-wrapped
+    /// references for cheap cloning in federation pipelines.
+    pub fn filter_cached_with_ast(&self, ast: &FilterNode, limit: usize) -> Vec<Arc<HDict>> {
+        let effective_limit = if limit == 0 { usize::MAX } else { limit };
 
         let state = self.cache_state.read();
         let max_id = state.entities.len();
 
-        let candidates = query_planner::bitmap_candidates(&ast, &state.tag_index, max_id);
+        let candidates = query_planner::bitmap_candidates(ast, &state.tag_index, max_id);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(effective_limit.min(max_id));
 
         if let Some(ref bitmap) = candidates {
             for eid in TagBitmapIndex::iter_set_bits(bitmap) {
@@ -586,9 +674,9 @@ impl Connector {
                     break;
                 }
                 if let Some(entity) = state.entities.get(eid)
-                    && matches(&ast, entity, None)
+                    && matches(ast, entity, None)
                 {
-                    results.push(entity.clone());
+                    results.push(Arc::clone(entity));
                 }
             }
         } else {
@@ -596,13 +684,13 @@ impl Connector {
                 if results.len() >= effective_limit {
                     break;
                 }
-                if matches(&ast, entity, None) {
-                    results.push(entity.clone());
+                if matches(ast, entity, None) {
+                    results.push(Arc::clone(entity));
                 }
             }
         }
 
-        Ok(results)
+        results
     }
 
     /// Add a federated entity ID to the remote watch set.
@@ -638,6 +726,25 @@ impl Connector {
     /// Returns the timestamp of the last successful sync, if any.
     pub fn last_sync_time(&self) -> Option<DateTime<Utc>> {
         *self.last_sync.read()
+    }
+
+    /// Returns the current cache version counter.
+    pub fn cache_version(&self) -> u64 {
+        self.cache_version.load(Ordering::Relaxed)
+    }
+
+    /// Returns an observable snapshot of this connector's state.
+    pub fn state(&self) -> ConnectorState {
+        let now = Utc::now();
+        let last_sync = self.last_sync_time();
+        ConnectorState {
+            name: self.config.name.clone(),
+            connected: self.is_connected(),
+            cache_version: self.cache_version(),
+            entity_count: self.entity_count(),
+            last_sync_ts: last_sync.map(|ts| ts.timestamp()),
+            staleness_secs: last_sync.map(|ts| (now - ts).num_milliseconds() as f64 / 1000.0),
+        }
     }
 
     /// Strip the id_prefix from an entity ID.
@@ -929,6 +1036,19 @@ pub fn strip_prefix_refs(entity: &mut HDict, prefix: &str) {
     }
 }
 
+/// Encode an entity grid to HBF binary for efficient federation sync.
+///
+/// Provides a compact binary representation that is significantly smaller
+/// than Zinc or JSON for bulk entity transfer.
+pub fn encode_sync_payload(grid: &HGrid) -> Result<Vec<u8>, String> {
+    haystack_core::codecs::encode_grid_binary(grid)
+}
+
+/// Decode an entity grid from HBF binary received during federation sync.
+pub fn decode_sync_payload(bytes: &[u8]) -> Result<HGrid, String> {
+    haystack_core::codecs::decode_grid_binary(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +1067,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         let connector = Connector::new(config);
         assert_eq!(connector.entity_count(), 0);
@@ -1131,6 +1252,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         assert_eq!(config.effective_ws_url(), "ws://remote:8080/api/ws");
     }
@@ -1148,6 +1270,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         assert_eq!(config.effective_ws_url(), "wss://remote:8443/api/ws");
     }
@@ -1165,6 +1288,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         assert_eq!(config.effective_ws_url(), "ws://custom:9999/ws");
     }
@@ -1182,6 +1306,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         let connector = Connector::new(config);
         assert!(!connector.owns("t-site-1"));
@@ -1210,6 +1335,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         let connector = Connector::new(config);
         assert_eq!(connector.transport_mode(), TransportMode::Http);
@@ -1246,6 +1372,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         let connector = Connector::new(config);
         assert_eq!(connector.remote_watch_count(), 0);
@@ -1304,6 +1431,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         let connector = Connector::new(config);
         connector.update_cache(make_test_entities());
@@ -1342,6 +1470,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         let connector = Connector::new(config);
 
@@ -1372,6 +1501,7 @@ mod tests {
             client_cert: None,
             client_key: None,
             ca_cert: None,
+            domain: None,
         };
         let connector = Connector::new(config);
         connector.update_cache(make_test_entities());
@@ -1379,5 +1509,84 @@ mod tests {
         // site or equip should return 2
         let results = connector.filter_cached("site or equip", 0).unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn cache_version_starts_at_zero() {
+        let connector = Connector::new(ConnectorConfig {
+            name: "test".to_string(),
+            url: "http://localhost:8080/api".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            id_prefix: None,
+            ws_url: None,
+            sync_interval_secs: None,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+            domain: None,
+        });
+        assert_eq!(connector.cache_version(), 0);
+    }
+
+    #[test]
+    fn cache_version_increments_on_update() {
+        let connector = Connector::new(ConnectorConfig {
+            name: "test".to_string(),
+            url: "http://localhost:8080/api".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            id_prefix: None,
+            ws_url: None,
+            sync_interval_secs: None,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+            domain: None,
+        });
+        assert_eq!(connector.cache_version(), 0);
+
+        connector.update_cache(vec![]);
+        assert_eq!(connector.cache_version(), 1);
+
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val("p-1")));
+        connector.update_cache(vec![e]);
+        assert_eq!(connector.cache_version(), 2);
+    }
+
+    #[test]
+    fn connector_state_populated() {
+        let connector = Connector::new(ConnectorConfig {
+            name: "alpha".to_string(),
+            url: "http://localhost:8080/api".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            id_prefix: None,
+            ws_url: None,
+            sync_interval_secs: None,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+            domain: None,
+        });
+
+        let st = connector.state();
+        assert_eq!(st.name, "alpha");
+        assert!(!st.connected);
+        assert_eq!(st.cache_version, 0);
+        assert_eq!(st.entity_count, 0);
+        assert!(st.last_sync_ts.is_none());
+        assert!(st.staleness_secs.is_none());
+
+        // After cache update, version and count change
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val("s-1")));
+        e.set("site", Kind::Marker);
+        connector.update_cache(vec![e]);
+
+        let st = connector.state();
+        assert_eq!(st.cache_version, 1);
+        assert_eq!(st.entity_count, 1);
     }
 }

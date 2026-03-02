@@ -53,7 +53,10 @@ mod kind;
 pub use kind::Kind;
 
 mod units;
-pub use units::{Unit, unit_for, units_by_name, units_by_symbol};
+pub use units::{
+    ConversionFactor, Unit, UnitError, base_unit, compatible, convert, quantity, unit_for,
+    units_by_name, units_by_symbol,
+};
 
 mod tz;
 pub use tz::{tz_for, tz_map};

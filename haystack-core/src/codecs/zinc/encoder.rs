@@ -2,7 +2,7 @@
 
 use crate::codecs::CodecError;
 use crate::codecs::shared;
-use crate::data::{HDict, HGrid};
+use crate::data::{HCol, HDict, HGrid};
 use crate::kinds::Kind;
 
 /// Encode a single Kind value to its Zinc string representation.
@@ -167,6 +167,55 @@ pub fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
         buf.push('\n');
     }
 
+    Ok(buf)
+}
+
+/// Encode just the grid header: version line + meta + column definitions.
+pub fn encode_grid_header(grid: &HGrid) -> Result<String, CodecError> {
+    let mut buf = String::new();
+
+    // Line 1: version + grid meta
+    buf.push_str("ver:\"3.0\"");
+    if !grid.meta.is_empty() {
+        buf.push(' ');
+        buf.push_str(&encode_meta(&grid.meta)?);
+    }
+    buf.push('\n');
+
+    // Line 2: columns
+    if grid.cols.is_empty() {
+        buf.push_str("empty\n");
+    } else {
+        for (i, col) in grid.cols.iter().enumerate() {
+            if i > 0 {
+                buf.push(',');
+            }
+            buf.push_str(&col.name);
+            if !col.meta.is_empty() {
+                buf.push(' ');
+                buf.push_str(&encode_meta(&col.meta)?);
+            }
+        }
+        buf.push('\n');
+    }
+
+    Ok(buf)
+}
+
+/// Encode a single grid row as comma-delimited values followed by newline.
+pub fn encode_grid_row(cols: &[HCol], row: &HDict) -> Result<String, CodecError> {
+    use std::fmt::Write;
+    let mut buf = String::new();
+    for (i, col) in cols.iter().enumerate() {
+        if i > 0 {
+            buf.push(',');
+        }
+        match row.get(&col.name) {
+            Some(val) => write!(buf, "{}", encode_scalar(val)?).unwrap(),
+            None => buf.push('N'),
+        }
+    }
+    buf.push('\n');
     Ok(buf)
 }
 

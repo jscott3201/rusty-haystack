@@ -31,11 +31,20 @@ base64 = "0.22"
 rand = "0.10"
 subtle = "2"
 regex = "1"
+zstd = "0.13"
+crc32fast = "1"
+zeroize = "1"
+arrow = { version = "55", optional = true }
+
+[features]
+haystack-serde = []
+arrow = ["dep:arrow"]
 
 [dev-dependencies]
 proptest = "1.10"
 criterion = { version = "0.8", features = ["html_reports"] }
 test-case = "3"
+tempfile = "3"
 
 [[bench]]
 name = "benchmarks"

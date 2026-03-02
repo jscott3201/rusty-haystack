@@ -31,9 +31,14 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 
 const MAX_WATCHES: usize = 100;
-const MAX_ENTITY_IDS_PER_WATCH: usize = 10_000;
+const MAX_ENTITY_IDS_PER_WATCH: usize = 1_000;
+/// Maximum total entity IDs a single user can watch across all watches.
+const MAX_TOTAL_WATCHED_IDS: usize = 5_000;
 /// Maximum watches a single user can hold at once.
 const MAX_WATCHES_PER_USER: usize = 20;
+
+/// Maximum entries in the per-connection encode cache.
+const MAX_ENCODE_CACHE_ENTRIES: usize = 50_000;
 
 /// Server-initiated ping interval for liveness detection.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -289,6 +294,18 @@ impl WatchManager {
                 MAX_ENTITY_IDS_PER_WATCH
             ));
         }
+        // Check total watched IDs across all watches for this user.
+        let user_total: usize = watches
+            .values()
+            .filter(|w| w.owner == username)
+            .map(|w| w.entity_ids.len())
+            .sum();
+        if user_total + ids.len() > MAX_TOTAL_WATCHED_IDS {
+            return Err(format!(
+                "user '{}' would exceed the maximum of {} total watched IDs",
+                username, MAX_TOTAL_WATCHED_IDS
+            ));
+        }
         let watch_id = Uuid::new_v4().to_string();
         let watch = Watch {
             entity_ids: ids.into_iter().collect(),
@@ -327,7 +344,13 @@ impl WatchManager {
         }; // write lock released here
 
         // Graph reads happen without the WatchManager write lock held.
-        let changes = graph.changes_since(last_version);
+        let changes = match graph.changes_since(last_version) {
+            Ok(c) => c,
+            Err(_gap) => {
+                // Subscriber fell behind — treat all watched entities as changed.
+                return Some(entity_ids.iter().filter_map(|id| graph.get(id)).collect());
+            }
+        };
         let changed_refs: HashSet<&str> = changes.iter().map(|d| d.ref_val.as_str()).collect();
 
         Some(
@@ -359,18 +382,32 @@ impl WatchManager {
     /// the addition would not exceed the per-watch entity ID limit.
     pub fn add_ids(&self, watch_id: &str, username: &str, ids: Vec<String>) -> bool {
         let mut watches = self.watches.write();
-        if let Some(watch) = watches.get_mut(watch_id) {
-            if watch.owner != username {
-                return false;
-            }
-            if watch.entity_ids.len() + ids.len() > MAX_ENTITY_IDS_PER_WATCH {
-                return false;
-            }
-            watch.entity_ids.extend(ids);
-            true
-        } else {
-            false
+
+        // Pre-check ownership and compute total before taking a mutable ref.
+        let (owner_ok, per_watch_ok, user_total) = match watches.get(watch_id) {
+            Some(watch) => (
+                watch.owner == username,
+                watch.entity_ids.len() + ids.len() <= MAX_ENTITY_IDS_PER_WATCH,
+                watches
+                    .values()
+                    .filter(|w| w.owner == username)
+                    .map(|w| w.entity_ids.len())
+                    .sum::<usize>(),
+            ),
+            None => return false,
+        };
+
+        if !owner_ok || !per_watch_ok {
+            return false;
         }
+        if user_total + ids.len() > MAX_TOTAL_WATCHED_IDS {
+            return false;
+        }
+
+        if let Some(watch) = watches.get_mut(watch_id) {
+            watch.entity_ids.extend(ids);
+        }
+        true
     }
 
     /// Remove specific entity IDs from an existing watch.
@@ -430,7 +467,16 @@ impl WatchManager {
         }
 
         let encoded = encode_entity(entity);
-        self.encode_cache.write().insert(key, encoded.clone());
+        let mut cache = self.encode_cache.write();
+        cache.insert(key, encoded.clone());
+        if cache.len() > MAX_ENCODE_CACHE_ENTRIES {
+            // Evict oldest quarter of entries
+            let to_remove = cache.len() / 4;
+            let keys: Vec<_> = cache.keys().take(to_remove).cloned().collect();
+            for k in keys {
+                cache.remove(&k);
+            }
+        }
         encoded
     }
 
@@ -667,7 +713,14 @@ pub async fn ws_handler(
                 _ = push_interval.tick() => {
                     let current_version = state.graph.version();
                     if current_version > last_push_version {
-                        let changes = state.graph.changes_since(last_push_version);
+                        let changes = match state.graph.changes_since(last_push_version) {
+                            Ok(c) => c,
+                            Err(_gap) => {
+                                // Subscriber fell behind — skip to current version.
+                                last_push_version = current_version;
+                                continue;
+                            }
+                        };
                         let changed_refs: HashSet<&str> =
                             changes.iter().map(|d| d.ref_val.as_str()).collect();
 

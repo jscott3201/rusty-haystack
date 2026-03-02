@@ -90,6 +90,7 @@ fn connector_config(name: &str, url: &str, prefix: Option<&str>) -> ConnectorCon
         client_cert: None,
         client_key: None,
         ca_cert: None,
+        domain: None,
     }
 }
 

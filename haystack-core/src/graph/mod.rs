@@ -33,8 +33,12 @@ pub mod csr;
 pub mod entity_graph;
 pub mod query_planner;
 pub mod shared;
+pub mod snapshot;
+pub mod subscriber;
 pub mod value_index;
 
-pub use changelog::{DiffOp, GraphDiff};
-pub use entity_graph::{EntityGraph, GraphError};
+pub use changelog::{ChangelogGap, DEFAULT_CHANGELOG_CAPACITY, DiffOp, GraphDiff};
+pub use entity_graph::{EntityGraph, GraphError, HierarchyNode};
 pub use shared::SharedGraph;
+pub use snapshot::{SnapshotError, SnapshotMeta, SnapshotReader, SnapshotWriter};
+pub use subscriber::GraphSubscriber;

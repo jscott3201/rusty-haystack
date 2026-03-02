@@ -36,12 +36,15 @@ pub mod auth;
 pub mod connector;
 pub mod content;
 pub mod demo;
+pub mod domain_scope;
 pub mod error;
 pub mod federation;
 pub mod his_store;
 pub mod ops;
+pub mod session;
 pub mod state;
 pub mod ws;
 
 pub use app::HaystackServer;
+pub use domain_scope::DomainScope;
 pub use federation::Federation;

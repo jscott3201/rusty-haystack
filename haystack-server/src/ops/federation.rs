@@ -11,13 +11,15 @@
 //!
 //! No request grid. Response columns:
 //!
-//! | Column        | Kind     | Description                       |
-//! |---------------|----------|-----------------------------------|
-//! | `name`        | Str      | Connector display name            |
-//! | `entityCount` | Number   | Cached entity count               |
-//! | `transport`   | Str      | `"http"` or `"ws"`                |
-//! | `connected`   | Bool     | Whether last sync succeeded       |
-//! | `lastSync`    | DateTime | Timestamp of last successful sync |
+//! | Column          | Kind     | Description                         |
+//! |-----------------|----------|-------------------------------------|
+//! | `name`          | Str      | Connector display name              |
+//! | `entityCount`   | Number   | Cached entity count                 |
+//! | `transport`     | Str      | `"http"` or `"ws"`                  |
+//! | `connected`     | Bool     | Whether last sync succeeded         |
+//! | `lastSync`      | DateTime | Timestamp of last successful sync   |
+//! | `cacheVersion`  | Number   | Monotonic cache version counter     |
+//! | `stalenessSecs` | Number   | Seconds since last successful sync  |
 //!
 //! ## `POST /api/federation/sync`
 //!
@@ -55,6 +57,8 @@ fn status_columns() -> Vec<HCol> {
         HCol::new("transport"),
         HCol::new("connected"),
         HCol::new("lastSync"),
+        HCol::new("cacheVersion"),
+        HCol::new("stalenessSecs"),
     ]
 }
 
@@ -80,18 +84,19 @@ pub async fn handle_status(
         let rows: Vec<HDict> = connectors
             .iter()
             .map(|c| {
+                let st = c.state();
                 let mut row = HDict::new();
                 row.set("name", Kind::Str(c.config.name.clone()));
                 row.set(
                     "entityCount",
-                    Kind::Number(Number::unitless(c.entity_count() as f64)),
+                    Kind::Number(Number::unitless(st.entity_count as f64)),
                 );
                 let transport_str = match c.transport_mode() {
                     TransportMode::Http => "http",
                     TransportMode::WebSocket => "ws",
                 };
                 row.set("transport", Kind::Str(transport_str.to_string()));
-                row.set("connected", Kind::Bool(c.is_connected()));
+                row.set("connected", Kind::Bool(st.connected));
                 let last_sync_kind = match c.last_sync_time() {
                     Some(ts) => {
                         let fixed = ts.fixed_offset();
@@ -100,6 +105,14 @@ pub async fn handle_status(
                     None => Kind::Null,
                 };
                 row.set("lastSync", last_sync_kind);
+                row.set(
+                    "cacheVersion",
+                    Kind::Number(Number::unitless(st.cache_version as f64)),
+                );
+                match st.staleness_secs {
+                    Some(s) => row.set("stalenessSecs", Kind::Number(Number::unitless(s))),
+                    None => row.set("stalenessSecs", Kind::Null),
+                };
                 row
             })
             .collect();

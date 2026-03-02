@@ -34,10 +34,13 @@
 //!   request decode failure.
 //! - **500 Internal Server Error** — graph or encoding error.
 
+use actix_web::web::Bytes;
 use actix_web::{HttpRequest, HttpResponse, web};
+use futures_util::stream;
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::{HRef, Kind};
+use std::sync::Arc;
 
 use crate::content;
 use crate::error::HaystackError;
@@ -79,6 +82,22 @@ pub async fn handle(
         ))
     }?;
 
+    if result_grid.rows.len() > 25_000 {
+        let (header, rows, ct) = content::encode_response_streaming(&result_grid, accept)
+            .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
+
+        if rows.is_empty() {
+            return Ok(HttpResponse::Ok().content_type(ct).body(header));
+        }
+
+        let chunks = std::iter::once(Ok::<Bytes, actix_web::Error>(Bytes::from(header)))
+            .chain(rows.into_iter().map(|r| Ok(Bytes::from(r))));
+
+        return Ok(HttpResponse::Ok()
+            .content_type(ct)
+            .streaming(stream::iter(chunks)));
+    }
+
     let (encoded, ct) = content::encode_response_grid(&result_grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
@@ -108,15 +127,20 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
     let is_wildcard = filter == "*";
 
     // Read from local graph.
-    let mut results: Vec<HDict> = if is_wildcard {
+    let mut results: Vec<Arc<HDict>> = if is_wildcard {
         // Wildcard: return all entities from the graph.
-        state.graph.all_entities()
+        state
+            .graph
+            .all_entities()
+            .into_iter()
+            .map(Arc::new)
+            .collect()
     } else {
         let local_grid = state
             .graph
             .read_filter(filter, limit)
             .map_err(|e| HaystackError::bad_request(format!("filter error: {e}")))?;
-        local_grid.rows
+        local_grid.rows.into_iter().map(Arc::new).collect()
     };
 
     // Apply limit to local results.
@@ -166,7 +190,7 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
     col_set.sort_unstable();
     let cols: Vec<HCol> = col_set.iter().map(|&n| HCol::new(n)).collect();
 
-    Ok(HGrid::from_parts(HDict::new(), cols, results))
+    Ok(HGrid::from_parts_arc(HDict::new(), cols, results))
 }
 
 /// Read entities by ID references.
@@ -175,7 +199,7 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
 /// Second pass: batch-fetch remaining IDs from federation connectors
 /// (grouped by connector for O(1) indexed lookup per ID).
 fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackError> {
-    let mut results: Vec<HDict> = Vec::new();
+    let mut results: Vec<Arc<HDict>> = Vec::new();
     let mut unknown_ids: Vec<String> = Vec::new();
 
     // First pass: resolve from local graph, collect unknowns.
@@ -186,7 +210,7 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
         };
 
         if let Some(entity) = state.graph.get(ref_val) {
-            results.push(entity);
+            results.push(Arc::new(entity));
         } else {
             unknown_ids.push(ref_val.clone());
         }
@@ -202,14 +226,14 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
         for id in still_missing {
             let mut missing = HDict::new();
             missing.set("id", Kind::Ref(HRef::from_val(id.as_str())));
-            results.push(missing);
+            results.push(Arc::new(missing));
         }
     } else {
         // No federation — add missing stubs directly.
         for id in unknown_ids {
             let mut missing = HDict::new();
             missing.set("id", Kind::Ref(HRef::from_val(id.as_str())));
-            results.push(missing);
+            results.push(Arc::new(missing));
         }
     }
 
@@ -230,5 +254,5 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
 
     col_set.sort_unstable();
     let cols: Vec<HCol> = col_set.iter().map(|&n| HCol::new(n)).collect();
-    Ok(HGrid::from_parts(HDict::new(), cols, results))
+    Ok(HGrid::from_parts_arc(HDict::new(), cols, results))
 }

@@ -4,6 +4,7 @@ pub mod import;
 pub mod info;
 pub mod libs;
 pub mod serve;
+pub mod snapshot;
 pub mod specs;
 pub mod user;
 pub mod validate;

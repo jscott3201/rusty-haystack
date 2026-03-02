@@ -15,6 +15,7 @@ use pbkdf2::pbkdf2_hmac;
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -49,6 +50,13 @@ pub struct ScramCredentials {
     pub iterations: u32,
     pub stored_key: Vec<u8>,
     pub server_key: Vec<u8>,
+}
+
+impl Drop for ScramCredentials {
+    fn drop(&mut self) {
+        self.stored_key.zeroize();
+        self.server_key.zeroize();
+    }
 }
 
 /// In-flight SCRAM handshake state held by the server between the
@@ -112,6 +120,7 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
     let mut salted_password = vec![0u8; 32];
     pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut salted_password);
     salted_password
+    // Note: caller is responsible for zeroizing via Zeroize trait on Vec<u8>
 }
 
 /// Derive (ClientKey, StoredKey, ServerKey) from a salted password.
@@ -146,8 +155,10 @@ fn make_client_first_bare(username: &str, client_nonce: &str) -> String {
 ///
 /// Uses PBKDF2-HMAC-SHA-256 with the given salt and iteration count.
 pub fn derive_credentials(password: &str, salt: &[u8], iterations: u32) -> ScramCredentials {
-    let salted_password = pbkdf2_sha256(password.as_bytes(), salt, iterations);
-    let (_client_key, stored_key, server_key) = derive_keys(&salted_password);
+    let mut salted_password = pbkdf2_sha256(password.as_bytes(), salt, iterations);
+    let (mut _client_key, stored_key, server_key) = derive_keys(&salted_password);
+    salted_password.zeroize();
+    _client_key.zeroize();
     ScramCredentials {
         salt: salt.to_vec(),
         iterations,
@@ -278,8 +289,9 @@ pub fn client_final_message(
         .map_err(|e: std::num::ParseIntError| AuthError::HandshakeFailed(e.to_string()))?;
 
     // Key derivation
-    let salted_password = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
-    let (client_key, stored_key, server_key) = derive_keys(&salted_password);
+    let mut salted_password = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
+    let (mut client_key, stored_key, server_key) = derive_keys(&salted_password);
+    salted_password.zeroize();
 
     // Build AuthMessage
     let cfmb = make_client_first_bare(username, client_nonce);
@@ -295,6 +307,9 @@ pub fn client_final_message(
     let client_proof = xor_bytes(&client_key, &client_signature);
     // ServerSignature = HMAC(ServerKey, AuthMessage)
     let server_signature = hmac_sha256(&server_key, auth_message.as_bytes());
+
+    // Zeroize intermediate key material
+    client_key.zeroize();
 
     // client-final-message: c=biws,r=<combined>,p=<proof_b64>
     let proof_b64 = BASE64.encode(&client_proof);

@@ -20,6 +20,7 @@
 
 pub mod conjunct;
 pub mod def;
+pub mod graph_validation;
 pub mod lib;
 pub mod namespace;
 pub mod taxonomy;
@@ -28,6 +29,7 @@ pub mod validation;
 
 pub use conjunct::ConjunctIndex;
 pub use def::{Def, DefKind};
+pub use graph_validation::{ValidationReport, ValidationSummary, validate_graph};
 pub use lib::Lib;
 pub use namespace::{DefNamespace, LibSource};
 pub use taxonomy::TaxonomyTree;

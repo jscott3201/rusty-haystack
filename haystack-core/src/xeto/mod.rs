@@ -13,6 +13,7 @@ pub mod spec;
 pub use ast::{LibPragma, SlotDef, SpecDef, XetoFile};
 pub use fitting::{EntityResolver, fits, fits_explain};
 pub use lexer::{Token, TokenType, XetoLexer};
+pub use loader::load_xeto_with_deps;
 pub use parser::parse_xeto;
 pub use resolver::XetoResolver;
 pub use spec::{Slot, Spec};

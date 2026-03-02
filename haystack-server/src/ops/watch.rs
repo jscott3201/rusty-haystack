@@ -144,17 +144,13 @@ pub async fn handle_sub(
         } else if let Some(connector) = state.federation.owner_of(id) {
             // Federated entity — look up in the connector's cache and register
             // the ID for remote watch tracking.
-            let cached = connector.cached_entities();
-            if let Some(entity) = cached
-                .iter()
-                .find(|e| matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *id))
-            {
+            if let Some(entity) = connector.get_cached_entity(id) {
                 for name in entity.tag_names() {
                     if seen.insert(name.to_string()) {
                         col_set.push(name.to_string());
                     }
                 }
-                rows.push(entity.clone());
+                rows.push((*entity).clone());
             }
             connector.add_remote_watch(id);
             // TODO: For real-time push, establish a WS watch subscription on

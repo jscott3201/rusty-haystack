@@ -43,9 +43,13 @@
 //! let encoded = zinc.encode_grid(&grid).unwrap();
 //! ```
 
+#[cfg(feature = "haystack-serde")]
+mod serde_impls;
+
 pub mod auth;
 pub mod codecs;
 pub mod data;
+pub mod expr;
 pub mod filter;
 pub mod graph;
 pub mod kinds;
