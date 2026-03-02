@@ -8,7 +8,7 @@
 | CPU | Apple M2 |
 | Memory | 8 GB |
 | Rust | 1.93.1 |
-| Version | 0.6.1 |
+| Version | 0.6.2 |
 | Profile | release (optimized) |
 | Framework | Criterion 0.8 |
 | Date | 2026-07-17 |

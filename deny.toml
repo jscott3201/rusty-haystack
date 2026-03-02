@@ -24,6 +24,7 @@ allow = [
     "BSL-1.0",
     "Unlicense",
     "OpenSSL",
+    "CC0-1.0",
 ]
 exceptions = [
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },

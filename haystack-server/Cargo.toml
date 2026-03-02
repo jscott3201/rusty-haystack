@@ -13,8 +13,8 @@ categories.workspace = true
 name = "haystack_server"
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.6.1", path = "../haystack-core", features = ["haystack-serde"] }
-haystack-client = { package = "rusty-haystack-client", version = "0.6.1", path = "../haystack-client" }
+haystack-core = { package = "rusty-haystack-core", version = "0.6.2", path = "../haystack-core", features = ["haystack-serde"] }
+haystack-client = { package = "rusty-haystack-client", version = "0.6.2", path = "../haystack-client" }
 actix-web = "=4.13.0"
 actix-http = "=3.12.0"
 actix-ws = "0.4"
