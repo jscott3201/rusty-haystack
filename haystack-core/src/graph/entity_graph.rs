@@ -569,31 +569,31 @@ impl EntityGraph {
                 continue;
             }
             // Traverse forward edges
-            if let Some(&eid) = self.id_map.get(&current) {
-                if let Some(fwd) = self.adjacency.forward_raw().get(&eid) {
-                    for (ref_tag, target) in fwd {
-                        if let Some(types) = ref_types {
-                            if !types.iter().any(|t| t == ref_tag) {
-                                continue;
-                            }
+            if let Some(&eid) = self.id_map.get(&current)
+                && let Some(fwd) = self.adjacency.forward_raw().get(&eid)
+            {
+                for (ref_tag, target) in fwd {
+                    if let Some(types) = ref_types
+                        && !types.iter().any(|t| t == ref_tag)
+                    {
+                        continue;
+                    }
+                    result_edges.push((current.clone(), ref_tag.clone(), target.clone()));
+                    if visited.insert(target.clone()) {
+                        if let Some(entity) = self.entities.get(target.as_str()) {
+                            result_entities.push(entity);
                         }
-                        result_edges.push((current.clone(), ref_tag.clone(), target.clone()));
-                        if visited.insert(target.clone()) {
-                            if let Some(entity) = self.entities.get(target.as_str()) {
-                                result_entities.push(entity);
-                            }
-                            queue.push_back((target.clone(), depth + 1));
-                        }
+                        queue.push_back((target.clone(), depth + 1));
                     }
                 }
             }
             // Traverse reverse edges
             if let Some(rev) = self.adjacency.reverse_raw().get(&current) {
                 for (ref_tag, source_eid) in rev {
-                    if let Some(types) = ref_types {
-                        if !types.iter().any(|t| t == ref_tag) {
-                            continue;
-                        }
+                    if let Some(types) = ref_types
+                        && !types.iter().any(|t| t == ref_tag)
+                    {
+                        continue;
                     }
                     if let Some(source_ref) = self.reverse_id.get(source_eid) {
                         result_edges.push((source_ref.clone(), ref_tag.clone(), current.clone()));
@@ -639,30 +639,30 @@ impl EntityGraph {
 
         while let Some(current) = queue.pop_front() {
             // Forward edges
-            if let Some(&eid) = self.id_map.get(&current) {
-                if let Some(fwd) = self.adjacency.forward_raw().get(&eid) {
-                    for (_, target) in fwd {
-                        if !visited.contains_key(target) {
-                            visited.insert(target.clone(), current.clone());
-                            if target == to {
-                                return Self::reconstruct_path(&visited, to);
-                            }
-                            queue.push_back(target.clone());
+            if let Some(&eid) = self.id_map.get(&current)
+                && let Some(fwd) = self.adjacency.forward_raw().get(&eid)
+            {
+                for (_, target) in fwd {
+                    if !visited.contains_key(target) {
+                        visited.insert(target.clone(), current.clone());
+                        if target == to {
+                            return Self::reconstruct_path(&visited, to);
                         }
+                        queue.push_back(target.clone());
                     }
                 }
             }
             // Reverse edges
             if let Some(rev) = self.adjacency.reverse_raw().get(&current) {
                 for (_, source_eid) in rev {
-                    if let Some(source_ref) = self.reverse_id.get(source_eid) {
-                        if !visited.contains_key(source_ref) {
-                            visited.insert(source_ref.clone(), current.clone());
-                            if source_ref == to {
-                                return Self::reconstruct_path(&visited, to);
-                            }
-                            queue.push_back(source_ref.clone());
+                    if let Some(source_ref) = self.reverse_id.get(source_eid)
+                        && !visited.contains_key(source_ref)
+                    {
+                        visited.insert(source_ref.clone(), current.clone());
+                        if source_ref == to {
+                            return Self::reconstruct_path(&visited, to);
                         }
+                        queue.push_back(source_ref.clone());
                     }
                 }
             }
@@ -716,11 +716,11 @@ impl EntityGraph {
             // Children = entities that reference current (reverse refs)
             let child_refs = self.refs_to(&current, None);
             for child_ref in child_refs {
-                if visited.insert(child_ref.clone()) {
-                    if let Some(entity) = self.entities.get(&child_ref) {
-                        results.push((entity, depth + 1));
-                        queue.push_back((child_ref, depth + 1));
-                    }
+                if visited.insert(child_ref.clone())
+                    && let Some(entity) = self.entities.get(&child_ref)
+                {
+                    results.push((entity, depth + 1));
+                    queue.push_back((child_ref, depth + 1));
                 }
             }
         }

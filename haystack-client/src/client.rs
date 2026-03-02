@@ -25,6 +25,7 @@ impl HaystackClient<HttpTransport> {
     /// * `username` - The username to authenticate as
     /// * `password` - The user's plaintext password
     pub async fn connect(url: &str, username: &str, password: &str) -> Result<Self, ClientError> {
+        crate::ensure_crypto_provider();
         let client = reqwest::Client::new();
         let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
         let transport = HttpTransport::new(url, auth_token);
@@ -49,6 +50,7 @@ impl HaystackClient<HttpTransport> {
         password: &str,
         tls: &crate::tls::TlsConfig,
     ) -> Result<Self, ClientError> {
+        crate::ensure_crypto_provider();
         // Combine cert + key into a single PEM buffer for reqwest::Identity
         let mut combined_pem = tls.client_cert_pem.clone();
         combined_pem.extend_from_slice(&tls.client_key_pem);
@@ -91,6 +93,7 @@ impl HaystackClient<WsTransport> {
         username: &str,
         password: &str,
     ) -> Result<Self, ClientError> {
+        crate::ensure_crypto_provider();
         // Authenticate via HTTP first to get the token
         let client = reqwest::Client::new();
         let auth_token = crate::auth::authenticate(&client, url, username, password).await?;

@@ -330,10 +330,10 @@ impl Connector {
             };
             client.call("changes", &build_changes_grid(u64::MAX)).await
         };
-        if let Ok(grid) = grid {
-            if let Some(Kind::Number(n)) = grid.meta.get("curVer") {
-                *self.last_remote_version.write() = Some(n.val as u64);
-            }
+        if let Ok(grid) = grid
+            && let Some(Kind::Number(n)) = grid.meta.get("curVer")
+        {
+            *self.last_remote_version.write() = Some(n.val as u64);
         }
     }
 
@@ -548,10 +548,10 @@ impl Connector {
                 if results.len() >= effective_limit {
                     break;
                 }
-                if let Some(entity) = cache.get(eid) {
-                    if matches(&ast, entity, None) {
-                        results.push(entity.clone());
-                    }
+                if let Some(entity) = cache.get(eid)
+                    && matches(&ast, entity, None)
+                {
+                    results.push(entity.clone());
                 }
             }
         } else {
@@ -1312,7 +1312,7 @@ mod tests {
         let mut entities = Vec::new();
         for i in 0..10 {
             let mut p = HDict::new();
-            p.set("id", Kind::Ref(HRef::from_val(&format!("point-{i}"))));
+            p.set("id", Kind::Ref(HRef::from_val(format!("point-{i}"))));
             p.set("point", Kind::Marker);
             entities.push(p);
         }

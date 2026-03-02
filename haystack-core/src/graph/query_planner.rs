@@ -128,7 +128,7 @@ pub fn bitmap_candidates_with_values(
             };
 
             // Convert entity IDs to a bitmap.
-            let mut bitmap = vec![0u64; (max_id + 63) / 64];
+            let mut bitmap = vec![0u64; max_id.div_ceil(64)];
             for eid in entity_ids {
                 if eid < max_id {
                     bitmap[eid / 64] |= 1u64 << (eid % 64);

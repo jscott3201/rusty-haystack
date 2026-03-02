@@ -13,8 +13,9 @@ categories.workspace = true
 name = "haystack_client"
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.5.0", path = "../haystack-core" }
-reqwest = { version = "0.13", features = ["rustls"], default-features = false }
+haystack-core = { package = "rusty-haystack-core", version = "0.5.1", path = "../haystack-core" }
+reqwest = { version = "0.13", features = ["rustls-no-provider"], default-features = false }
+rustls = { version = "0.23", features = ["ring", "tls12", "std"], default-features = false }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-util = "0.7"

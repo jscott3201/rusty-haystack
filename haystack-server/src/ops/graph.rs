@@ -103,7 +103,7 @@ pub async fn handle_flow(
             .collect(),
         (None, Some(f)) => {
             let f = if f == "*" {
-                return Ok(build_flow_all(&state, accept)?);
+                return build_flow_all(&state, accept);
             } else {
                 f
             };
@@ -298,15 +298,15 @@ pub async fn handle_edges(
     let edges: Vec<(String, String, String)> = all_edges
         .into_iter()
         .filter(|(src, tag, _)| {
-            if let Some(ref ids) = entity_ids {
-                if !ids.contains(src) {
-                    return false;
-                }
+            if let Some(ref ids) = entity_ids
+                && !ids.contains(src)
+            {
+                return false;
             }
-            if let Some(ref rt) = ref_type {
-                if tag != rt {
-                    return false;
-                }
+            if let Some(ref rt) = ref_type
+                && tag != rt
+            {
+                return false;
             }
             true
         })
@@ -737,10 +737,10 @@ fn build_parent_map(subtree: &[(HDict, usize)], state: &AppState) -> HashMap<Str
             Some(r) => r.val.clone(),
             None => continue,
         };
-        if let Some(parent) = find_parent_ref(entity) {
-            if subtree_ids.contains(&parent) {
-                parent_map.insert(id, parent);
-            }
+        if let Some(parent) = find_parent_ref(entity)
+            && subtree_ids.contains(&parent)
+        {
+            parent_map.insert(id, parent);
         }
     }
     let _ = state; // state available if needed for extended lookup

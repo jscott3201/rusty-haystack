@@ -1,4 +1,4 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::filter;
@@ -6,6 +6,7 @@ use haystack_core::graph::{EntityGraph, SharedGraph};
 use haystack_core::kinds::{HDateTime, HRef, Kind, Number, Uri};
 use haystack_core::ontology::DefNamespace;
 use haystack_core::xeto;
+use std::hint::black_box;
 
 fn make_sample_entity(i: usize) -> HDict {
     let mut d = HDict::new();

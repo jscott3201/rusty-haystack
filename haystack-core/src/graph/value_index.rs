@@ -95,9 +95,7 @@ impl ValueIndex {
 
     /// Register a field for indexing. Call this before adding entities.
     pub fn index_field(&mut self, field: &str) {
-        self.indexes
-            .entry(field.to_string())
-            .or_insert_with(BTreeMap::new);
+        self.indexes.entry(field.to_string()).or_default();
     }
 
     /// Returns the set of indexed field names.
@@ -115,7 +113,7 @@ impl ValueIndex {
         if let Some(tree) = self.indexes.get_mut(field)
             && let Some(key) = OrderableKind::from_kind(value)
         {
-            tree.entry(key).or_insert_with(Vec::new).push(entity_id);
+            tree.entry(key).or_default().push(entity_id);
         }
     }
 
@@ -123,12 +121,11 @@ impl ValueIndex {
     pub fn remove(&mut self, entity_id: usize, field: &str, value: &Kind) {
         if let Some(tree) = self.indexes.get_mut(field)
             && let Some(key) = OrderableKind::from_kind(value)
+            && let Some(ids) = tree.get_mut(&key)
         {
-            if let Some(ids) = tree.get_mut(&key) {
-                ids.retain(|&id| id != entity_id);
-                if ids.is_empty() {
-                    tree.remove(&key);
-                }
+            ids.retain(|&id| id != entity_id);
+            if ids.is_empty() {
+                tree.remove(&key);
             }
         }
     }

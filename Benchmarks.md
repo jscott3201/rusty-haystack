@@ -8,7 +8,7 @@
 | CPU | Apple M2 |
 | Memory | 8 GB |
 | Rust | 1.93.1 |
-| Version | 0.5.0 |
+| Version | 0.5.1 |
 | Profile | release (optimized) |
 | Framework | Criterion 0.5 |
 | Date | 2026-03-02 |
@@ -228,11 +228,11 @@ Federation benchmarks using 3 in-process servers: 1 lead server with 2 federated
 
 ---
 
-## Version Comparison (0.4.x → 0.5.0)
+## Version Comparison (0.4.x → 0.5.1)
 
 Key improvements from graph/federation optimizations, bitmap-indexed connector caches, bloom filters, and codec refinements:
 
-| Benchmark | v0.4.x | v0.5.0 | Improvement |
+| Benchmark | v0.4.x | v0.5.1 | Improvement |
 |-----------|--------|--------|-------------|
 | `zinc_decode_scalar` | 186.4 ns | 123.8 ns | **↑34%** |
 | `filter_eval_simple` | 15.7 ns | 11.6 ns | **↑26%** |

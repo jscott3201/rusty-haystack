@@ -39,3 +39,11 @@ pub mod transport;
 
 pub use client::HaystackClient;
 pub use error::ClientError;
+
+/// Install the ring crypto provider for rustls.
+///
+/// Called automatically by client constructors. Safe to call multiple times;
+/// only the first call has effect.
+fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
