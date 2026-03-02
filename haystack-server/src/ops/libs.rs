@@ -1,4 +1,31 @@
 //! Library and spec management endpoints.
+//!
+//! # Overview
+//!
+//! These endpoints manage Xeto-based ontology libraries at runtime:
+//! listing specs, inspecting individual specs, loading/unloading libraries,
+//! exporting library source, and validating entities against the ontology.
+//!
+//! # Endpoints
+//!
+//! - `POST /api/specs` — list specs, optionally filtered by `lib` (Str).
+//!   Response: `qname`, `name`, `lib`, `base`, `doc`, `abstract`.
+//! - `POST /api/spec` — get single spec by `qname` (Str).
+//!   Response: `qname`, `name`, `lib`, `base`, `doc`, `abstract`, `slots`.
+//! - `POST /api/loadLib` — load library from `name` (Str) and `source` (Str).
+//!   Response: `loaded`, `specs`.
+//! - `POST /api/unloadLib` — unload library by `name` (Str).
+//!   Response: `unloaded`.
+//! - `POST /api/exportLib` — export library by `name` (Str) to Xeto source.
+//!   Response: `name`, `source`.
+//! - `POST /api/validate` — validate entity rows against the ontology.
+//!   Response: `entity`, `issueType`, `detail`.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — missing required columns, spec not found, load/unload
+//!   error, or request decode failure.
+//! - **500 Internal Server Error** — encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 
@@ -10,6 +37,10 @@ use crate::error::HaystackError;
 use crate::state::AppState;
 
 /// POST /api/specs — list specs, optionally filtered by library.
+///
+/// Request grid may have a `lib` (Str) column to filter by library name.
+/// Returns a grid of specs sorted by `qname`, with columns:
+/// `qname`, `name`, `lib`, `base`, `doc`, and `abstract` (Marker).
 pub async fn handle_specs(
     req: HttpRequest,
     body: String,
@@ -87,6 +118,10 @@ pub async fn handle_specs(
 }
 
 /// POST /api/spec — get a single spec by qualified name.
+///
+/// Request grid must have a `qname` (Str) column with the fully-qualified
+/// spec name. Returns a single-row grid with `qname`, `name`, `lib`,
+/// `base`, `doc`, `abstract`, and `slots` (comma-separated slot names).
 pub async fn handle_spec(
     req: HttpRequest,
     body: String,
@@ -150,6 +185,10 @@ pub async fn handle_spec(
 }
 
 /// POST /api/loadLib — load a library from Xeto source text.
+///
+/// Request grid must have `name` (Str) and `source` (Str) columns.
+/// Returns a single-row grid with `loaded` (library name) and `specs`
+/// (comma-separated list of loaded spec qualified names).
 pub async fn handle_load_lib(
     req: HttpRequest,
     body: String,
@@ -196,6 +235,9 @@ pub async fn handle_load_lib(
 }
 
 /// POST /api/unloadLib — unload a library by name.
+///
+/// Request grid must have a `name` (Str) column.
+/// Returns a single-row grid with `unloaded` (the library name).
 pub async fn handle_unload_lib(
     req: HttpRequest,
     body: String,
@@ -235,6 +277,9 @@ pub async fn handle_unload_lib(
 }
 
 /// POST /api/exportLib — export a library to Xeto source text.
+///
+/// Request grid must have a `name` (Str) column.
+/// Returns a single-row grid with `name` and `source` (Xeto text).
 pub async fn handle_export_lib(
     req: HttpRequest,
     body: String,
@@ -276,7 +321,12 @@ pub async fn handle_export_lib(
     Ok(HttpResponse::Ok().content_type(ct).body(encoded))
 }
 
-/// POST /api/validate — validate an entity against the ontology.
+/// POST /api/validate — validate entities against the ontology.
+///
+/// Each row in the request grid is an entity dict to validate.
+/// Returns a grid of validation issues with columns: `entity` (Str),
+/// `issueType` (Str), and `detail` (Str). An empty grid means all
+/// entities passed validation.
 pub async fn handle_validate(
     req: HttpRequest,
     body: String,

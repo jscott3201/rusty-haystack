@@ -1,4 +1,21 @@
 //! The `formats` op — list supported MIME types.
+//!
+//! # Overview
+//!
+//! `GET /api/formats` returns the data formats this server can send and
+//! receive. No request grid is needed.
+//!
+//! # Response Grid Columns
+//!
+//! | Column    | Kind   | Description                          |
+//! |-----------|--------|--------------------------------------|
+//! | `mime`    | Str    | MIME type string                     |
+//! | `receive` | Marker | Server can decode this format        |
+//! | `send`   | Marker | Server can encode this format        |
+//!
+//! # Errors
+//!
+//! - **500 Internal Server Error** — encoding failure.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 
@@ -9,6 +26,10 @@ use crate::content;
 use crate::state::AppState;
 
 /// GET /api/formats — returns a grid listing supported MIME formats.
+///
+/// Each row represents a MIME type with `mime` (Str), `receive` (Marker),
+/// and `send` (Marker) columns. Supported formats: Zinc, JSON v4, Trio,
+/// JSON v3.
 pub async fn handle(req: HttpRequest, _state: web::Data<AppState>) -> HttpResponse {
     let accept = req
         .headers()

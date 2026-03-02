@@ -9,12 +9,14 @@ use haystack_core::kinds;
 
 // ── Marker ──
 
-#[pyclass(name = "Marker", frozen)]
+/// Haystack Marker tag value. Represents presence of a tag with no value.
+#[pyclass(name = "Marker", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyMarker;
 
 #[pymethods]
 impl PyMarker {
+    /// Create a Marker value.
     #[new]
     pub fn new() -> Self {
         PyMarker
@@ -55,12 +57,14 @@ impl PyMarker {
 
 // ── NA ──
 
-#[pyclass(name = "NA", frozen)]
+/// Haystack NA (not available) value. Indicates missing or unavailable data.
+#[pyclass(name = "NA", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyNA;
 
 #[pymethods]
 impl PyNA {
+    /// Create an NA (not available) value.
     #[new]
     pub fn new() -> Self {
         PyNA
@@ -101,12 +105,14 @@ impl PyNA {
 
 // ── Remove ──
 
-#[pyclass(name = "Remove", frozen)]
+/// Haystack Remove marker. Used in diffs to indicate tag removal.
+#[pyclass(name = "Remove", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyRemove;
 
 #[pymethods]
 impl PyRemove {
+    /// Create a Remove marker for tag removal in diffs.
     #[new]
     pub fn new() -> Self {
         PyRemove
@@ -147,7 +153,12 @@ impl PyRemove {
 
 // ── Number ──
 
-#[pyclass(name = "Number", frozen)]
+/// Haystack Number with optional unit. Wraps a float value and unit string.
+///
+/// Examples:
+///     Number(72, "°F")
+///     Number(100)
+#[pyclass(name = "Number", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyNumber {
     #[pyo3(get)]
@@ -158,6 +169,7 @@ pub struct PyNumber {
 
 #[pymethods]
 impl PyNumber {
+    /// Create a Number with a float value and optional unit string.
     #[new]
     #[pyo3(signature = (val, unit = None))]
     pub fn new(val: f64, unit: Option<String>) -> Self {
@@ -243,7 +255,12 @@ impl PyNumber {
 
 // ── Ref ──
 
-#[pyclass(name = "Ref", frozen)]
+/// Haystack Ref identifier. References entities by string ID with optional display name.
+///
+/// Examples:
+///     Ref("site-1")
+///     Ref("site-1", "Main Campus")
+#[pyclass(name = "Ref", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyRef_ {
     #[pyo3(get)]
@@ -254,6 +271,7 @@ pub struct PyRef_ {
 
 #[pymethods]
 impl PyRef_ {
+    /// Create a Ref with an ID string and optional display name.
     #[new]
     #[pyo3(signature = (val, dis = None))]
     pub fn new(val: String, dis: Option<String>) -> Self {
@@ -303,7 +321,8 @@ impl PyRef_ {
 
 // ── Uri ──
 
-#[pyclass(name = "Uri", frozen)]
+/// Haystack URI value. Wraps a string URI/URL.
+#[pyclass(name = "Uri", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyUri {
     #[pyo3(get)]
@@ -312,6 +331,7 @@ pub struct PyUri {
 
 #[pymethods]
 impl PyUri {
+    /// Create a URI from a string value.
     #[new]
     pub fn new(val: String) -> Self {
         Self { val }
@@ -354,7 +374,8 @@ impl PyUri {
 
 // ── Symbol ──
 
-#[pyclass(name = "Symbol", frozen)]
+/// Haystack Symbol value. Represents a def symbol reference (e.g., ^hot-water).
+#[pyclass(name = "Symbol", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PySymbol {
     #[pyo3(get)]
@@ -363,6 +384,7 @@ pub struct PySymbol {
 
 #[pymethods]
 impl PySymbol {
+    /// Create a Symbol from a def name string (without ^ prefix).
     #[new]
     pub fn new(val: String) -> Self {
         Self { val }
@@ -405,7 +427,8 @@ impl PySymbol {
 
 // ── XStr ──
 
-#[pyclass(name = "XStr", frozen)]
+/// Haystack XStr (extended string). Type-qualified string value like Bin("text/plain").
+#[pyclass(name = "XStr", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyXStr {
     #[pyo3(get)]
@@ -416,6 +439,7 @@ pub struct PyXStr {
 
 #[pymethods]
 impl PyXStr {
+    /// Create an XStr with a type qualifier and string value.
     #[new]
     pub fn new(type_name: String, val: String) -> Self {
         Self { type_name, val }
@@ -460,7 +484,8 @@ impl PyXStr {
 
 // ── Coord ──
 
-#[pyclass(name = "Coord", frozen)]
+/// Haystack geographic Coordinate with latitude and longitude.
+#[pyclass(name = "Coord", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyCoord {
     #[pyo3(get)]
@@ -471,6 +496,7 @@ pub struct PyCoord {
 
 #[pymethods]
 impl PyCoord {
+    /// Create a geographic Coordinate from latitude and longitude in degrees.
     #[new]
     pub fn new(lat: f64, lng: f64) -> Self {
         Self { lat, lng }
@@ -515,7 +541,8 @@ impl PyCoord {
 
 // ── HDateTime ──
 
-#[pyclass(name = "HDateTime", frozen)]
+/// Haystack DateTime with timezone. Wraps an ISO 8601 datetime and timezone name.
+#[pyclass(name = "HDateTime", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyHDateTime {
     inner: kinds::HDateTime,
@@ -523,6 +550,12 @@ pub struct PyHDateTime {
 
 #[pymethods]
 impl PyHDateTime {
+    /// Create a Haystack DateTime from components.
+    ///
+    /// Args:
+    ///     year, month, day, hour, minute, second: Calendar/time components.
+    ///     offset_seconds: UTC offset in seconds (e.g., -18000 for EST).
+    ///     tz_name: Haystack timezone name (e.g., 'New_York').
     #[new]
     #[pyo3(signature = (year, month, day, hour, minute, second, offset_seconds, tz_name))]
     #[allow(clippy::too_many_arguments)]
@@ -558,7 +591,7 @@ impl PyHDateTime {
         let timedelta = datetime_mod.getattr("timedelta")?;
         let timezone = datetime_mod.getattr("timezone")?;
         let td = timedelta.call1((0, offset_secs))?;
-        let tz_obj: Bound<'py, PyTzInfo> = timezone.call1((td,))?.downcast_into()?;
+        let tz_obj: Bound<'py, PyTzInfo> = timezone.call1((td,))?.cast_into()?;
 
         PyDateTime::new(
             py,
@@ -573,6 +606,7 @@ impl PyHDateTime {
         )
     }
 
+    /// The Haystack timezone name.
     #[getter]
     fn tz_name(&self) -> &str {
         &self.inner.tz_name

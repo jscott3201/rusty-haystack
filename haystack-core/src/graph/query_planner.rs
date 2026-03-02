@@ -9,9 +9,10 @@
 // Returns `None` when bitmap optimization is not applicable (e.g.
 // comparison nodes), causing the caller to fall back to a full scan.
 
-use crate::filter::FilterNode;
+use crate::filter::{CmpOp, FilterNode};
 
 use super::bitmap::TagBitmapIndex;
+use super::value_index::ValueIndex;
 
 /// Compute a bitmap of candidate entity ids that *may* match the given
 /// filter node, using tag presence bitmaps only.
@@ -95,6 +96,79 @@ pub fn bitmap_candidates(
         }
 
         FilterNode::SpecMatch(_) => None,
+    }
+}
+
+/// Enhanced candidate computation that uses B-Tree value indexes for Cmp nodes
+/// in addition to tag bitmap indexes.
+///
+/// When a `Cmp` node references a single-segment path with an available value
+/// index, this produces a precise candidate set (only entities whose value
+/// satisfies the comparison) rather than just tag-existence candidates.
+///
+/// Falls back to `bitmap_candidates` behavior for non-indexed fields.
+pub fn bitmap_candidates_with_values(
+    node: &FilterNode,
+    tag_index: &TagBitmapIndex,
+    value_index: &ValueIndex,
+    max_id: usize,
+) -> Option<Vec<u64>> {
+    match node {
+        FilterNode::Cmp { path, op, val }
+            if path.is_single() && value_index.has_index(path.first()) =>
+        {
+            let field = path.first();
+            let entity_ids = match op {
+                CmpOp::Eq => value_index.eq_lookup(field, val),
+                CmpOp::Ne => value_index.ne_lookup(field, val),
+                CmpOp::Lt => value_index.lt_lookup(field, val),
+                CmpOp::Le => value_index.le_lookup(field, val),
+                CmpOp::Gt => value_index.gt_lookup(field, val),
+                CmpOp::Ge => value_index.ge_lookup(field, val),
+            };
+
+            // Convert entity IDs to a bitmap.
+            let mut bitmap = vec![0u64; (max_id + 63) / 64];
+            for eid in entity_ids {
+                if eid < max_id {
+                    bitmap[eid / 64] |= 1u64 << (eid % 64);
+                }
+            }
+            Some(bitmap)
+        }
+
+        FilterNode::And(left, right) => {
+            let l = bitmap_candidates_with_values(left, tag_index, value_index, max_id);
+            let r = bitmap_candidates_with_values(right, tag_index, value_index, max_id);
+            match (l, r) {
+                (Some(lb), Some(rb)) => {
+                    let lc = TagBitmapIndex::count_ones(&lb);
+                    let rc = TagBitmapIndex::count_ones(&rb);
+                    if lc == 0 || rc == 0 {
+                        return Some(Vec::new());
+                    }
+                    if lc <= rc {
+                        Some(TagBitmapIndex::intersect(&[&lb, &rb]))
+                    } else {
+                        Some(TagBitmapIndex::intersect(&[&rb, &lb]))
+                    }
+                }
+                (Some(bm), None) | (None, Some(bm)) => Some(bm),
+                (None, None) => None,
+            }
+        }
+
+        FilterNode::Or(left, right) => {
+            let l = bitmap_candidates_with_values(left, tag_index, value_index, max_id);
+            let r = bitmap_candidates_with_values(right, tag_index, value_index, max_id);
+            match (l, r) {
+                (Some(lb), Some(rb)) => Some(TagBitmapIndex::union(&[&lb, &rb])),
+                _ => None,
+            }
+        }
+
+        // Delegate to base bitmap_candidates for all other node types.
+        _ => bitmap_candidates(node, tag_index, max_id),
     }
 }
 

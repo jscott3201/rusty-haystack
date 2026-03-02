@@ -1,4 +1,10 @@
-// RDF export — Turtle and JSON-LD serialization for Haystack entities.
+//! RDF serialization of Haystack entities in Turtle and JSON-LD formats.
+//!
+//! This module is **output-only** — it can serialize a slice of [`HDict`]
+//! entities into either [Turtle](https://www.w3.org/TR/turtle/) or
+//! [JSON-LD](https://www.w3.org/TR/json-ld11/) but provides no parsing.
+//! Standard Project Haystack namespace prefixes (`ph:`, `phIoT:`, `entity:`,
+//! `xsd:`) are emitted automatically.
 
 use crate::data::HDict;
 use crate::kinds::Kind;
@@ -8,7 +14,10 @@ const PH_IOT_PREFIX: &str = "https://project-haystack.org/def/phIoT/";
 const ENTITY_PREFIX: &str = "urn:haystack:entity/";
 const XSD_PREFIX: &str = "http://www.w3.org/2001/XMLSchema#";
 
-/// Encode a slice of entity dicts as RDF Turtle.
+/// Serializes a slice of entity dicts as an RDF Turtle document.
+///
+/// Each entity must carry an `id` tag ([`Kind::Ref`]); entities without one
+/// are silently skipped. Tags are sorted alphabetically for deterministic output.
 pub fn to_turtle(entities: &[HDict]) -> String {
     let mut out = String::new();
 
@@ -80,7 +89,11 @@ fn escape_turtle_string(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-/// Encode a slice of entity dicts as JSON-LD.
+/// Serializes a slice of entity dicts as a JSON-LD document.
+///
+/// Returns a pretty-printed JSON string containing `@context` and `@graph`.
+/// Entities without an `id` tag are silently skipped. On serialization
+/// failure, returns a JSON object with an `"error"` key.
 pub fn to_jsonld(entities: &[HDict]) -> String {
     let mut graph = Vec::new();
 
@@ -133,7 +146,7 @@ pub fn to_jsonld(entities: &[HDict]) -> String {
     doc.insert("@graph".to_string(), serde_json::Value::Array(graph));
 
     serde_json::to_string_pretty(&serde_json::Value::Object(doc))
-        .expect("JSON-LD serialization should not fail")
+        .unwrap_or_else(|e| format!("{{\"error\": \"JSON-LD serialization failed: {}\"}}", e))
 }
 
 /// Convert a Kind value to its JSON-LD representation.

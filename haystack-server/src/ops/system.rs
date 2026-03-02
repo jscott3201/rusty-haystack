@@ -2,6 +2,34 @@
 //!
 //! All routes under `/api/system/` require the "admin" permission, enforced by
 //! the auth middleware in `app.rs`.
+//!
+//! # Endpoints
+//!
+//! ## `GET /api/system/status`
+//!
+//! No request grid. Response columns:
+//!
+//! | Column        | Kind   | Description                           |
+//! |---------------|--------|---------------------------------------|
+//! | `uptime`      | Number | Seconds since server start (unit `s`) |
+//! | `entityCount` | Number | Number of entities in the graph       |
+//! | `watchCount`  | Number | Number of active watch subscriptions  |
+//!
+//! ## `POST /api/system/backup`
+//!
+//! No request grid. Returns all entities as a JSON-encoded grid
+//! (`Content-Type: application/json`), regardless of `Accept` header.
+//!
+//! ## `POST /api/system/restore`
+//!
+//! Request body: JSON grid of entities (each row must have an `id` Ref).
+//! Existing entities are updated; new entities are added.
+//! Response: single-row grid with `count` (Number) of entities loaded.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — invalid JSON body (restore only).
+//! - **500 Internal Server Error** — graph, codec, or encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 

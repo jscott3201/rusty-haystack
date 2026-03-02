@@ -1,4 +1,30 @@
 //! The `pointWrite` op — write a value to a writable point.
+//!
+//! # Overview
+//!
+//! `POST /api/pointWrite` writes a value to one or more writable point
+//! entities. Each row represents a write command. The entity must carry
+//! the `writable` marker tag.
+//!
+//! # Request Grid Columns
+//!
+//! | Column  | Kind   | Description                                     |
+//! |---------|--------|-------------------------------------------------|
+//! | `id`    | Ref    | Writable point entity reference                 |
+//! | `level` | Number | Priority level 1–17 (default 17 if omitted)     |
+//! | `val`   | *any*  | Value to write                                  |
+//!
+//! # Response
+//!
+//! Empty grid on success.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — `level` outside 1–17, entity not `writable`, write
+//!   failed, or request decode failure.
+//! - **404 Not Found** — entity not in local graph and not owned by any
+//!   federation connector.
+//! - **500 Internal Server Error** — federation proxy or encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 

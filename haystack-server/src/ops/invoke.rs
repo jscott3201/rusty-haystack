@@ -1,7 +1,27 @@
 //! The `invokeAction` op — invoke an action on an entity.
 //!
 //! Parses `id` and `action` columns from the request grid, resolves
-//! the entity from the graph, and dispatches to the ActionRegistry.
+//! the entity from the graph, and dispatches to the
+//! [`ActionRegistry`](crate::actions::ActionRegistry).
+//!
+//! # Request Grid Columns
+//!
+//! | Column   | Kind | Description                               |
+//! |----------|------|-------------------------------------------|
+//! | `id`     | Ref  | Target entity reference                   |
+//! | `action` | Str  | Action name to invoke                     |
+//! | *(other)* | *any* | Additional columns passed as arguments  |
+//!
+//! # Response Grid Columns
+//!
+//! Determined by the action handler. Typically action-specific result data.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — missing `id` or `action` column, or action handler error.
+//! - **404 Not Found** — entity not in local graph and not owned by any
+//!   federation connector.
+//! - **500 Internal Server Error** — federation proxy or encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 

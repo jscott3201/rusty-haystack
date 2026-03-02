@@ -1,4 +1,41 @@
 //! Federation HTTP endpoints — status and sync for remote connectors.
+//!
+//! # Overview
+//!
+//! These admin endpoints expose the state of federation connectors and
+//! allow manual sync triggers.
+//!
+//! # Endpoints
+//!
+//! ## `GET /api/federation/status`
+//!
+//! No request grid. Response columns:
+//!
+//! | Column        | Kind     | Description                       |
+//! |---------------|----------|-----------------------------------|
+//! | `name`        | Str      | Connector display name            |
+//! | `entityCount` | Number   | Cached entity count               |
+//! | `transport`   | Str      | `"http"` or `"ws"`                |
+//! | `connected`   | Bool     | Whether last sync succeeded       |
+//! | `lastSync`    | DateTime | Timestamp of last successful sync |
+//!
+//! ## `POST /api/federation/sync`
+//!
+//! Triggers all connectors. Response columns:
+//!
+//! | Column   | Kind | Description                     |
+//! |----------|------|---------------------------------|
+//! | `name`   | Str  | Connector name                  |
+//! | `result` | Str  | Entity count or error message   |
+//! | `ok`     | Bool | Whether sync succeeded          |
+//!
+//! ## `POST /api/federation/sync/{name}`
+//!
+//! Same response as sync-all but for a single named connector.
+//!
+//! # Errors
+//!
+//! - **500 Internal Server Error** — encoding failure or sync error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 

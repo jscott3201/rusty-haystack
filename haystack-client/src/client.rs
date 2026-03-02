@@ -103,11 +103,16 @@ impl HaystackClient<WsTransport> {
 
 impl<T: Transport> HaystackClient<T> {
     /// Create a client with an already-configured transport.
+    ///
+    /// Useful for testing or when you have a custom [`Transport`] implementation.
     pub fn from_transport(transport: T) -> Self {
         Self { transport }
     }
 
     /// Call a raw Haystack op with a request grid.
+    ///
+    /// `op` is the operation name (e.g. `"read"`, `"hisRead"`). The server
+    /// returns an error grid (as [`ClientError::Grid`]) if the op fails.
     pub async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
         self.transport.call(op, req).await
     }
@@ -116,27 +121,35 @@ impl<T: Transport> HaystackClient<T> {
     // Standard ops
     // -----------------------------------------------------------------------
 
-    /// Call the `about` op. Returns server information.
+    /// Call the `about` op. Returns a single-row grid with server metadata
+    /// including `vendorName`, `productName`, `productVersion`, and `tz`.
     pub async fn about(&self) -> Result<HGrid, ClientError> {
         self.call("about", &HGrid::new()).await
     }
 
-    /// Call the `ops` op. Returns the list of operations supported by the server.
+    /// Call the `ops` op. Returns a grid listing every operation the server
+    /// supports, with `name`, `summary`, and `doc` columns.
     pub async fn ops(&self) -> Result<HGrid, ClientError> {
         self.call("ops", &HGrid::new()).await
     }
 
-    /// Call the `formats` op. Returns the list of MIME formats supported by the server.
+    /// Call the `formats` op. Returns a grid of MIME types the server can
+    /// read/write, with `mime`, `receive`, and `send` columns.
     pub async fn formats(&self) -> Result<HGrid, ClientError> {
         self.call("formats", &HGrid::new()).await
     }
 
-    /// Call the `libs` op. Returns the library modules installed on the server.
+    /// Call the `libs` op. Returns a grid of Xeto library modules installed
+    /// on the server, including `name` and `version` for each library.
     pub async fn libs(&self) -> Result<HGrid, ClientError> {
         self.call("libs", &HGrid::new()).await
     }
 
-    /// Call the `read` op with a filter expression and optional limit.
+    /// Call the `read` op with a Haystack filter expression and optional limit.
+    ///
+    /// `filter` is a Haystack filter string (e.g. `"site"`, `"equip and siteRef==@s"`,
+    /// `"temp > 72"`). Returns a grid of matching entity dicts. Pass `limit` to
+    /// cap the number of results. Returns an empty grid if nothing matches.
     pub async fn read(&self, filter: &str, limit: Option<usize>) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("filter", Kind::Str(filter.to_string()));
@@ -152,7 +165,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("read", &grid).await
     }
 
-    /// Call the `read` op with a list of entity ids.
+    /// Call the `read` op with a list of entity ref ids.
+    ///
+    /// Each entry in `ids` is a ref value string (e.g. `"@site-1"`, `"@equip-2"`).
+    /// Returns one row per id. Rows for unknown ids contain only a `Null` marker.
     pub async fn read_by_ids(&self, ids: &[&str]) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
@@ -166,7 +182,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("read", &grid).await
     }
 
-    /// Call the `nav` op. If `nav_id` is `None`, returns the root navigation tree.
+    /// Call the `nav` op to walk the site/equip/point navigation tree.
+    ///
+    /// Pass `None` to get root-level nodes, or `Some(nav_id)` to expand a
+    /// specific node. Returns a grid of child navigation entries.
     pub async fn nav(&self, nav_id: Option<&str>) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         if let Some(id) = nav_id {
@@ -176,7 +195,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("nav", &grid).await
     }
 
-    /// Call the `defs` op with an optional filter.
+    /// Call the `defs` op to query the server's tag/def ontology.
+    ///
+    /// `filter` is an optional Haystack filter (e.g. `"point"`, `"equip"`) to
+    /// narrow results. Returns a grid of matching def dicts.
     pub async fn defs(&self, filter: Option<&str>) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         if let Some(f) = filter {
@@ -186,9 +208,12 @@ impl<T: Transport> HaystackClient<T> {
         self.call("defs", &grid).await
     }
 
-    /// Call the `watchSub` op to subscribe to a set of entity ids.
+    /// Call the `watchSub` op to subscribe to real-time changes for a set of entities.
     ///
-    /// `lease` is an optional lease duration (e.g. `"1min"`).
+    /// `ids` are ref value strings (e.g. `["@point-1", "@point-2"]`). `lease` is
+    /// an optional duration string (e.g. `"1min"`, `"30sec"`, `"1hr"`) controlling
+    /// how long the server keeps the watch alive without polls. Returns a grid
+    /// whose meta contains the assigned `watchId`.
     pub async fn watch_sub(&self, ids: &[&str], lease: Option<&str>) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
@@ -206,7 +231,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("watchSub", &grid).await
     }
 
-    /// Call the `watchPoll` op to poll a watch for changes.
+    /// Call the `watchPoll` op to poll a watch for changed entity values.
+    ///
+    /// `watch_id` is the identifier returned by [`watch_sub`](Self::watch_sub).
+    /// Returns a grid of entities whose `curVal` has changed since the last poll.
     pub async fn watch_poll(&self, watch_id: &str) -> Result<HGrid, ClientError> {
         let mut meta = HDict::new();
         meta.set("watchId", Kind::Str(watch_id.to_string()));
@@ -214,7 +242,11 @@ impl<T: Transport> HaystackClient<T> {
         self.call("watchPoll", &grid).await
     }
 
-    /// Call the `watchUnsub` op to unsubscribe from a watch.
+    /// Call the `watchUnsub` op to remove entities from an active watch.
+    ///
+    /// `watch_id` identifies the watch. `ids` are the ref value strings to
+    /// unsubscribe (e.g. `["@point-1"]`). The watch is closed automatically
+    /// when all entities have been removed.
     pub async fn watch_unsub(&self, watch_id: &str, ids: &[&str]) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
@@ -231,6 +263,10 @@ impl<T: Transport> HaystackClient<T> {
     }
 
     /// Call the `pointWrite` op to write a value to a writable point.
+    ///
+    /// `id` is the point ref (e.g. `"@point-1"`). `level` is the priority
+    /// array level 1–17 per the Haystack spec (1=emergency, 8=manual,
+    /// 16=default, 17=fallback). `val` is the value to write at that level.
     pub async fn point_write(&self, id: &str, level: u8, val: Kind) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("id", Kind::Ref(HRef::from_val(id)));
@@ -244,10 +280,12 @@ impl<T: Transport> HaystackClient<T> {
         self.call("pointWrite", &grid).await
     }
 
-    /// Call the `hisRead` op to read historical data for a point.
+    /// Call the `hisRead` op to read time-series history for a point.
     ///
-    /// `range` is a Haystack date range string (e.g. `"today"`, `"yesterday"`,
-    /// `"2024-01-01,2024-01-31"`).
+    /// `id` is the point ref (e.g. `"@sensor-1"`). `range` is a Haystack range
+    /// string: `"today"`, `"yesterday"`, a single date like `"2024-01-01"`, a
+    /// date span `"2024-01-01,2024-01-31"`, or a datetime with timezone like
+    /// `"2024-01-01T00:00:00-05:00 New_York"`. Returns a grid of `ts`/`val` rows.
     pub async fn his_read(&self, id: &str, range: &str) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("id", Kind::Ref(HRef::from_val(id)));
@@ -260,9 +298,11 @@ impl<T: Transport> HaystackClient<T> {
         self.call("hisRead", &grid).await
     }
 
-    /// Call the `hisWrite` op to write historical data for a point.
+    /// Call the `hisWrite` op to write time-series samples for a point.
     ///
-    /// `items` should be dicts with `ts` and `val` tags.
+    /// `id` is the point ref. `items` must be dicts each containing a `ts`
+    /// (DateTime) and `val` tag. Returns an empty grid on success or an
+    /// error grid if the write is rejected.
     pub async fn his_write(&self, id: &str, items: Vec<HDict>) -> Result<HGrid, ClientError> {
         let mut meta = HDict::new();
         meta.set("id", Kind::Ref(HRef::from_val(id)));
@@ -270,7 +310,11 @@ impl<T: Transport> HaystackClient<T> {
         self.call("hisWrite", &grid).await
     }
 
-    /// Call the `invokeAction` op to invoke an action on an entity.
+    /// Call the `invokeAction` op to invoke a named action on an entity.
+    ///
+    /// `id` is the target entity ref. `action` is the action name. `args` is
+    /// an [`HDict`] of additional parameters for the action. Returns the
+    /// action's result grid.
     pub async fn invoke_action(
         &self,
         id: &str,
@@ -300,7 +344,10 @@ impl<T: Transport> HaystackClient<T> {
     // Library & spec management ops
     // -----------------------------------------------------------------------
 
-    /// List all specs, optionally filtered by library name.
+    /// List all Xeto specs on the server, optionally filtered by library name.
+    ///
+    /// Pass `None` to list specs across all libraries, or `Some("lib_name")`
+    /// to restrict to a single library. Returns a grid of spec dicts.
     pub async fn specs(&self, lib: Option<&str>) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         if let Some(lib_name) = lib {
@@ -310,7 +357,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("specs", &grid).await
     }
 
-    /// Get a single spec by qualified name.
+    /// Get a single Xeto spec by its fully-qualified name.
+    ///
+    /// `qname` is the qualified spec name (e.g. `"ph::Site"`). Returns a
+    /// single-row grid with the spec definition.
     pub async fn spec(&self, qname: &str) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("qname", Kind::Str(qname.to_string()));
@@ -318,7 +368,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("spec", &grid).await
     }
 
-    /// Load a Xeto library from source text.
+    /// Load a Xeto library from source text into the server's ontology.
+    ///
+    /// `name` is the library name and `source` is the raw Xeto source code.
+    /// Returns an error grid if the source fails to parse or validate.
     pub async fn load_lib(&self, name: &str, source: &str) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("name", Kind::Str(name.to_string()));
@@ -331,7 +384,9 @@ impl<T: Transport> HaystackClient<T> {
         self.call("loadLib", &grid).await
     }
 
-    /// Unload a library by name.
+    /// Unload a previously loaded Xeto library by name.
+    ///
+    /// Removes the library and its specs from the server's active ontology.
     pub async fn unload_lib(&self, name: &str) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("name", Kind::Str(name.to_string()));
@@ -339,7 +394,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("unloadLib", &grid).await
     }
 
-    /// Export a library to Xeto source text.
+    /// Export a library as Xeto source text.
+    ///
+    /// Returns a grid whose first row contains the serialized Xeto source
+    /// for the named library.
     pub async fn export_lib(&self, name: &str) -> Result<HGrid, ClientError> {
         let mut row = HDict::new();
         row.set("name", Kind::Str(name.to_string()));
@@ -347,7 +405,11 @@ impl<T: Transport> HaystackClient<T> {
         self.call("exportLib", &grid).await
     }
 
-    /// Validate entities against the server's ontology.
+    /// Validate entity dicts against the server's Xeto ontology.
+    ///
+    /// `entities` is a list of [`HDict`] records to check. Returns a grid
+    /// with validation results — each row reports errors for the corresponding
+    /// input entity. An empty result grid means all entities are valid.
     pub async fn validate(&self, entities: Vec<HDict>) -> Result<HGrid, ClientError> {
         // Build column set from all entities
         let mut col_names: Vec<String> = Vec::new();
@@ -365,7 +427,10 @@ impl<T: Transport> HaystackClient<T> {
         self.call("validate", &grid).await
     }
 
-    /// Close the transport connection.
+    /// Close the underlying transport connection (HTTP or WebSocket).
+    ///
+    /// Call [`close_session`](Self::close_session) first if you want to
+    /// explicitly end the server-side session before disconnecting.
     pub async fn close(&self) -> Result<(), ClientError> {
         self.transport.close().await
     }

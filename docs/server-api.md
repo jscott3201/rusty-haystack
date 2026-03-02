@@ -151,6 +151,96 @@ Export all entities as RDF Turtle. Returns `text/turtle` content type.
 
 Export all entities as JSON-LD. Returns `application/ld+json` content type.
 
+### Graph Visualization (read permission)
+
+These endpoints return graph-structural data optimized for visualization libraries like [React Flow](https://reactflow.dev).
+
+#### POST `/api/graph/flow`
+
+Full graph as nodes and edges for React Flow.
+
+**Request grid** (all columns optional):
+
+| Column  | Kind   | Description                                   |
+|---------|--------|-----------------------------------------------|
+| `filter`| Str    | Filter expression to scope nodes              |
+| `root`  | Ref    | Root entity for scoped subgraph               |
+| `depth` | Number | Max depth from root (default 10)              |
+
+**Response grid**: one row per entity with additional columns:
+- `nodeId` (Str) — entity id
+- `nodeType` (Str) — entity type: `site`, `equip`, `point`, etc.
+- `posX`, `posY` (Number) — auto-computed layout coordinates
+- `parentId` (Str) — nearest hierarchy parent
+
+Grid metadata contains an `edges` tag (Zinc-encoded grid) with columns: `edgeId`, `source`, `target`, `label`.
+
+#### POST `/api/graph/edges`
+
+All ref relationships as explicit edges.
+
+**Request grid** (all columns optional):
+
+| Column    | Kind | Description                                    |
+|-----------|------|------------------------------------------------|
+| `filter`  | Str  | Filter to scope source entities                |
+| `refType` | Str  | Only edges of this ref tag (e.g. `"siteRef"`)  |
+
+**Response grid columns**: `id` (Str), `source` (Ref), `target` (Ref), `refTag` (Str)
+
+#### POST `/api/graph/tree`
+
+Recursive subtree from a root entity.
+
+**Request grid**:
+
+| Column     | Kind   | Description                                  |
+|------------|--------|----------------------------------------------|
+| `root`     | Ref    | **Required.** Root entity                    |
+| `maxDepth` | Number | Max tree depth (default 10)                  |
+
+**Response grid**: all entity tags plus `depth` (Number), `parentId` (Ref), `navId` (Str)
+
+#### POST `/api/graph/neighbors`
+
+N-hop neighborhood around an entity.
+
+**Request grid**:
+
+| Column     | Kind   | Description                                      |
+|------------|--------|--------------------------------------------------|
+| `id`       | Ref    | **Required.** Center entity                      |
+| `hops`     | Number | Traversal depth (default 1)                      |
+| `refTypes` | Str    | Comma-separated ref types to follow               |
+
+**Response**: same format as `graph/flow` (nodes grid with edges in metadata).
+
+#### POST `/api/graph/path`
+
+Shortest path between two entities.
+
+**Request grid**:
+
+| Column | Kind | Description         |
+|--------|------|---------------------|
+| `from` | Ref  | **Required.** Source entity       |
+| `to`   | Ref  | **Required.** Destination entity  |
+
+**Response grid**: entities in path order with all tags plus `pathIndex` (Number, 0-based). Empty grid if no path.
+
+#### GET `/api/graph/stats`
+
+Graph metrics and statistics.
+
+**Response grid columns**: `metric` (Str), `value` (Number), `detail` (Str)
+
+Metrics returned:
+- `totalEntities` — total entity count
+- `totalEdges` — total ref relationship count
+- `connectedComponents` — number of disconnected subgraphs
+- `entityType` — one row per type (detail = type name)
+- `refType` — one row per ref tag (detail = tag name)
+
 #### GET `/api/federation/status`
 
 Federation connector status. See [Federation](federation.md) for full setup and usage details.

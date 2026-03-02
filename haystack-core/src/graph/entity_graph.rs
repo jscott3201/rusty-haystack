@@ -2,6 +2,9 @@
 
 use std::collections::HashMap;
 
+use parking_lot::Mutex;
+use rayon::prelude::*;
+
 use crate::data::{HCol, HDict, HGrid};
 use crate::filter::{matches_with_ns, parse_filter};
 use crate::kinds::{HRef, Kind};
@@ -10,7 +13,10 @@ use crate::ontology::{DefNamespace, ValidationIssue};
 use super::adjacency::RefAdjacency;
 use super::bitmap::TagBitmapIndex;
 use super::changelog::{DiffOp, GraphDiff};
+use super::columnar::ColumnarStore;
+use super::csr::CsrAdjacency;
 use super::query_planner;
+use super::value_index::ValueIndex;
 
 /// Errors returned by EntityGraph operations.
 #[derive(Debug, thiserror::Error)]
@@ -46,10 +52,72 @@ pub struct EntityGraph {
     /// Monotonic version counter, incremented on every mutation.
     version: u64,
     /// Ordered list of mutations.
-    changelog: Vec<GraphDiff>,
+    changelog: std::collections::VecDeque<GraphDiff>,
+    /// LRU query cache: (filter, version) → matching ref_vals.
+    /// Uses Mutex for interior mutability since read_all takes &self.
+    query_cache: Mutex<QueryCache>,
+    /// Optional B-Tree value indexes for comparison-based filter acceleration.
+    value_index: ValueIndex,
+    /// CSR snapshot of adjacency for cache-friendly traversal.
+    /// Rebuilt lazily via `rebuild_csr()`. `None` until first build.
+    csr: Option<CsrAdjacency>,
+    /// Version at which the CSR was last rebuilt (for staleness detection).
+    csr_version: u64,
+    /// Columnar storage for cache-friendly single-tag scans.
+    columnar: ColumnarStore,
+}
+
+/// Simple fixed-capacity LRU cache for filter query results.
+struct QueryCache {
+    entries: Vec<QueryCacheEntry>,
+    capacity: usize,
+}
+
+struct QueryCacheEntry {
+    filter: String,
+    version: u64,
+    ref_vals: Vec<String>,
+}
+
+impl QueryCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, filter: &str, version: u64) -> Option<&[String]> {
+        let pos = self
+            .entries
+            .iter()
+            .position(|e| e.version == version && e.filter == filter)?;
+        // Move to front (most recently used)
+        if pos > 0 {
+            let entry = self.entries.remove(pos);
+            self.entries.insert(0, entry);
+        }
+        Some(&self.entries[0].ref_vals)
+    }
+
+    fn insert(&mut self, filter: String, version: u64, ref_vals: Vec<String>) {
+        // Evict oldest if at capacity
+        if self.entries.len() >= self.capacity {
+            self.entries.pop();
+        }
+        self.entries.insert(
+            0,
+            QueryCacheEntry {
+                filter,
+                version,
+                ref_vals,
+            },
+        );
+    }
 }
 
 const MAX_CHANGELOG: usize = 10_000;
+const QUERY_CACHE_CAPACITY: usize = 256;
 
 impl EntityGraph {
     /// Create an empty entity graph.
@@ -63,7 +131,12 @@ impl EntityGraph {
             adjacency: RefAdjacency::new(),
             namespace: None,
             version: 0,
-            changelog: Vec::new(),
+            changelog: std::collections::VecDeque::new(),
+            query_cache: Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
+            value_index: ValueIndex::new(),
+            csr: None,
+            csr_version: 0,
+            columnar: ColumnarStore::new(),
         }
     }
 
@@ -73,6 +146,63 @@ impl EntityGraph {
             namespace: Some(ns),
             ..Self::new()
         }
+    }
+
+    // ── Value Indexes ──
+
+    /// Register a field for B-Tree value indexing. Enables O(log N) range
+    /// queries (e.g. `temp > 72`) for this field. Must be called before
+    /// entities are added, or followed by `rebuild_value_index` for existing data.
+    pub fn index_field(&mut self, field: &str) {
+        self.value_index.index_field(field);
+    }
+
+    /// Rebuild the value index for all indexed fields from the current entities.
+    pub fn rebuild_value_index(&mut self) {
+        self.value_index.clear();
+        for (ref_val, entity) in &self.entities {
+            if let Some(&eid) = self.id_map.get(ref_val.as_str()) {
+                for (name, val) in entity.iter() {
+                    if self.value_index.has_index(name) {
+                        self.value_index.add(eid, name, val);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns a reference to the value index (for use by the query planner).
+    pub fn value_index(&self) -> &ValueIndex {
+        &self.value_index
+    }
+
+    // ── Columnar Storage ──
+
+    /// Register a tag for columnar storage. Enables cache-friendly sequential
+    /// scans for this tag. Must be called before entities are added, or followed
+    /// by `rebuild_columnar` for existing data.
+    pub fn track_column(&mut self, tag: &str) {
+        self.columnar.track_tag(tag);
+    }
+
+    /// Rebuild all tracked columnar data from current entities.
+    pub fn rebuild_columnar(&mut self) {
+        self.columnar.clear();
+        self.columnar.ensure_capacity(self.next_id);
+        for (ref_val, entity) in &self.entities {
+            if let Some(&eid) = self.id_map.get(ref_val.as_str()) {
+                for (name, val) in entity.iter() {
+                    if self.columnar.is_tracked(name) {
+                        self.columnar.set(eid, name, val);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns a reference to the columnar store for direct column scans.
+    pub fn columnar(&self) -> &ColumnarStore {
+        &self.columnar
     }
 
     // ── CRUD ──
@@ -89,7 +219,7 @@ impl EntityGraph {
         }
 
         let eid = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.checked_add(1).ok_or(GraphError::InvalidId)?;
 
         self.id_map.insert(ref_val.clone(), eid);
         self.reverse_id.insert(eid, ref_val.clone());
@@ -103,6 +233,7 @@ impl EntityGraph {
         self.entities.insert(ref_val.clone(), entity);
 
         self.version += 1;
+        self.csr = None; // Invalidate CSR snapshot on mutation.
         self.push_changelog(GraphDiff {
             version: self.version,
             op: DiffOp::Add,
@@ -151,6 +282,7 @@ impl EntityGraph {
         self.entities.insert(ref_val.to_string(), old_entity);
 
         self.version += 1;
+        self.csr = None; // Invalidate CSR snapshot on mutation.
         self.push_changelog(GraphDiff {
             version: self.version,
             op: DiffOp::Update,
@@ -179,6 +311,7 @@ impl EntityGraph {
         self.remove_indexing(eid, &entity);
 
         self.version += 1;
+        self.csr = None; // Invalidate CSR snapshot on mutation.
         self.push_changelog(GraphDiff {
             version: self.version,
             op: DiffOp::Remove,
@@ -219,42 +352,126 @@ impl EntityGraph {
 
     /// Run a filter expression and return matching entities as references.
     pub fn read_all(&self, filter_expr: &str, limit: usize) -> Result<Vec<&HDict>, GraphError> {
-        let ast = parse_filter(filter_expr).map_err(|e| GraphError::Filter(e.to_string()))?;
         let effective_limit = if limit == 0 { usize::MAX } else { limit };
 
-        // Phase 1: bitmap acceleration.
+        // Check query cache (version-keyed, so mutations auto-invalidate).
+        {
+            let mut cache = self.query_cache.lock();
+            if let Some(cached_refs) = cache.get(filter_expr, self.version) {
+                let mut results = Vec::new();
+                for rv in cached_refs {
+                    if results.len() >= effective_limit {
+                        break;
+                    }
+                    if let Some(entity) = self.entities.get(rv) {
+                        results.push(entity);
+                    }
+                }
+                return Ok(results);
+            }
+        }
+
+        let ast = parse_filter(filter_expr).map_err(|e| GraphError::Filter(e.to_string()))?;
+
+        // Phase 1: bitmap acceleration (with value index enhancement).
         let max_id = self.next_id;
-        let candidates = query_planner::bitmap_candidates(&ast, &self.tag_index, max_id);
+        let candidates = query_planner::bitmap_candidates_with_values(
+            &ast,
+            &self.tag_index,
+            &self.value_index,
+            max_id,
+        );
 
         // Phase 2: full filter evaluation.
-        let resolver = |r: &HRef| -> Option<HDict> { self.entities.get(&r.val).cloned() };
+        let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
         let ns = self.namespace.as_ref();
 
-        let mut results = Vec::new();
+        /// Threshold for parallel evaluation — below this, sequential is faster.
+        const PARALLEL_THRESHOLD: usize = 500;
+
+        let mut results: Vec<&HDict>;
 
         if let Some(ref bitmap) = candidates {
-            // Evaluate only candidate entities.
-            for eid in TagBitmapIndex::iter_set_bits(bitmap) {
-                if results.len() >= effective_limit {
-                    break;
-                }
-                if let Some(ref_val) = self.reverse_id.get(&eid)
-                    && let Some(entity) = self.entities.get(ref_val)
-                    && matches_with_ns(&ast, entity, Some(&resolver), ns)
-                {
-                    results.push(entity);
+            let candidate_ids: Vec<usize> = TagBitmapIndex::iter_set_bits(bitmap).collect();
+
+            if candidate_ids.len() >= PARALLEL_THRESHOLD && effective_limit == usize::MAX {
+                // Parallel path for large, unlimited queries.
+                results = candidate_ids
+                    .par_iter()
+                    .filter_map(|&eid| {
+                        let ref_val = self.reverse_id.get(&eid)?;
+                        let entity = self.entities.get(ref_val)?;
+                        if matches_with_ns(&ast, entity, Some(&resolver), ns) {
+                            Some(entity)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            } else {
+                // Sequential path for small sets or limited queries.
+                results = Vec::new();
+                for eid in TagBitmapIndex::iter_set_bits(bitmap) {
+                    if results.len() >= effective_limit {
+                        break;
+                    }
+                    if let Some(ref_val) = self.reverse_id.get(&eid)
+                        && let Some(entity) = self.entities.get(ref_val)
+                        && matches_with_ns(&ast, entity, Some(&resolver), ns)
+                    {
+                        results.push(entity);
+                    }
                 }
             }
         } else {
-            // No bitmap optimization possible; scan all entities.
-            for entity in self.entities.values() {
-                if results.len() >= effective_limit {
-                    break;
-                }
-                if matches_with_ns(&ast, entity, Some(&resolver), ns) {
-                    results.push(entity);
+            let entity_count = self.entities.len();
+
+            if entity_count >= PARALLEL_THRESHOLD && effective_limit == usize::MAX {
+                // Parallel full scan for large, unlimited queries.
+                results = self
+                    .entities
+                    .par_iter()
+                    .filter_map(|(_, entity)| {
+                        if matches_with_ns(&ast, entity, Some(&resolver), ns) {
+                            Some(entity)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            } else {
+                // Sequential full scan.
+                results = Vec::new();
+                for entity in self.entities.values() {
+                    if results.len() >= effective_limit {
+                        break;
+                    }
+                    if matches_with_ns(&ast, entity, Some(&resolver), ns) {
+                        results.push(entity);
+                    }
                 }
             }
+        }
+
+        // Apply limit to parallel results.
+        if results.len() > effective_limit {
+            results.truncate(effective_limit);
+        }
+
+        // Populate cache with result ref_vals (only for unlimited queries to
+        // avoid caching partial results that depend on limit).
+        if limit == 0 {
+            let ref_vals: Vec<String> = results
+                .iter()
+                .filter_map(|e| {
+                    e.get("id").and_then(|k| match k {
+                        Kind::Ref(r) => Some(r.val.clone()),
+                        _ => None,
+                    })
+                })
+                .collect();
+            let mut cache = self.query_cache.lock();
+            cache.insert(filter_expr.to_string(), self.version, ref_vals);
         }
 
         Ok(results)
@@ -265,18 +482,250 @@ impl EntityGraph {
     /// Get ref values that the given entity points to.
     pub fn refs_from(&self, ref_val: &str, ref_type: Option<&str>) -> Vec<String> {
         match self.id_map.get(ref_val) {
-            Some(&eid) => self.adjacency.targets_from(eid, ref_type),
+            Some(&eid) => {
+                if let Some(csr) = &self.csr {
+                    csr.targets_from(eid, ref_type)
+                } else {
+                    self.adjacency.targets_from(eid, ref_type)
+                }
+            }
             None => Vec::new(),
         }
     }
 
     /// Get ref values of entities that point to the given entity.
     pub fn refs_to(&self, ref_val: &str, ref_type: Option<&str>) -> Vec<String> {
-        self.adjacency
-            .sources_to(ref_val, ref_type)
-            .iter()
-            .filter_map(|eid| self.reverse_id.get(eid).cloned())
-            .collect()
+        if let Some(csr) = &self.csr {
+            csr.sources_to(ref_val, ref_type)
+                .iter()
+                .filter_map(|eid| self.reverse_id.get(eid).cloned())
+                .collect()
+        } else {
+            self.adjacency
+                .sources_to(ref_val, ref_type)
+                .iter()
+                .filter_map(|eid| self.reverse_id.get(eid).cloned())
+                .collect()
+        }
+    }
+
+    /// Rebuild the CSR snapshot from the current adjacency.
+    /// Should be called after a batch of mutations (e.g., import, sync).
+    pub fn rebuild_csr(&mut self) {
+        let max_id = if self.next_id > 0 { self.next_id } else { 0 };
+        self.csr = Some(CsrAdjacency::from_ref_adjacency(&self.adjacency, max_id));
+        self.csr_version = self.version;
+    }
+
+    /// Returns true if the CSR snapshot is stale (version mismatch).
+    pub fn csr_is_stale(&self) -> bool {
+        match &self.csr {
+            Some(_) => self.csr_version != self.version,
+            None => true,
+        }
+    }
+
+    // ── Graph traversal ──
+
+    /// Return all edges in the graph as `(source_ref, ref_tag, target_ref)` tuples.
+    pub fn all_edges(&self) -> Vec<(String, String, String)> {
+        let mut edges = Vec::new();
+        for (&eid, ref_val) in &self.reverse_id {
+            if let Some(fwd) = self.adjacency.forward_raw().get(&eid) {
+                for (ref_tag, target) in fwd {
+                    edges.push((ref_val.clone(), ref_tag.clone(), target.clone()));
+                }
+            }
+        }
+        edges
+    }
+
+    /// BFS neighborhood: return entities and edges within `hops` of `ref_val`.
+    ///
+    /// `ref_types` optionally restricts which ref tags are traversed.
+    /// Returns `(entities, edges)` where edges are `(source, ref_tag, target)`.
+    pub fn neighbors(
+        &self,
+        ref_val: &str,
+        hops: usize,
+        ref_types: Option<&[&str]>,
+    ) -> (Vec<&HDict>, Vec<(String, String, String)>) {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        let mut result_entities: Vec<&HDict> = Vec::new();
+        let mut result_edges: Vec<(String, String, String)> = Vec::new();
+
+        visited.insert(ref_val.to_string());
+        queue.push_back((ref_val.to_string(), 0));
+
+        if let Some(entity) = self.entities.get(ref_val) {
+            result_entities.push(entity);
+        }
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= hops {
+                continue;
+            }
+            // Traverse forward edges
+            if let Some(&eid) = self.id_map.get(&current) {
+                if let Some(fwd) = self.adjacency.forward_raw().get(&eid) {
+                    for (ref_tag, target) in fwd {
+                        if let Some(types) = ref_types {
+                            if !types.iter().any(|t| t == ref_tag) {
+                                continue;
+                            }
+                        }
+                        result_edges.push((current.clone(), ref_tag.clone(), target.clone()));
+                        if visited.insert(target.clone()) {
+                            if let Some(entity) = self.entities.get(target.as_str()) {
+                                result_entities.push(entity);
+                            }
+                            queue.push_back((target.clone(), depth + 1));
+                        }
+                    }
+                }
+            }
+            // Traverse reverse edges
+            if let Some(rev) = self.adjacency.reverse_raw().get(&current) {
+                for (ref_tag, source_eid) in rev {
+                    if let Some(types) = ref_types {
+                        if !types.iter().any(|t| t == ref_tag) {
+                            continue;
+                        }
+                    }
+                    if let Some(source_ref) = self.reverse_id.get(source_eid) {
+                        result_edges.push((source_ref.clone(), ref_tag.clone(), current.clone()));
+                        if visited.insert(source_ref.clone()) {
+                            if let Some(entity) = self.entities.get(source_ref.as_str()) {
+                                result_entities.push(entity);
+                            }
+                            queue.push_back((source_ref.clone(), depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        result_entities.sort_by(|a, b| {
+            let a_id = a.id().map(|r| r.val.as_str()).unwrap_or("");
+            let b_id = b.id().map(|r| r.val.as_str()).unwrap_or("");
+            a_id.cmp(b_id)
+        });
+        result_edges.sort();
+        // Deduplicate edges (reverse traversal can produce duplicates)
+        result_edges.dedup();
+
+        (result_entities, result_edges)
+    }
+
+    /// BFS shortest path from `from` to `to`. Returns ordered ref_vals, or
+    /// empty vec if no path exists.
+    pub fn shortest_path(&self, from: &str, to: &str) -> Vec<String> {
+        use std::collections::{HashMap as StdHashMap, VecDeque};
+
+        if from == to {
+            return vec![from.to_string()];
+        }
+        if !self.entities.contains_key(from) || !self.entities.contains_key(to) {
+            return Vec::new();
+        }
+
+        let mut visited: StdHashMap<String, String> = StdHashMap::new(); // child -> parent
+        let mut queue: VecDeque<String> = VecDeque::new();
+        visited.insert(from.to_string(), String::new());
+        queue.push_back(from.to_string());
+
+        while let Some(current) = queue.pop_front() {
+            // Forward edges
+            if let Some(&eid) = self.id_map.get(&current) {
+                if let Some(fwd) = self.adjacency.forward_raw().get(&eid) {
+                    for (_, target) in fwd {
+                        if !visited.contains_key(target) {
+                            visited.insert(target.clone(), current.clone());
+                            if target == to {
+                                return Self::reconstruct_path(&visited, to);
+                            }
+                            queue.push_back(target.clone());
+                        }
+                    }
+                }
+            }
+            // Reverse edges
+            if let Some(rev) = self.adjacency.reverse_raw().get(&current) {
+                for (_, source_eid) in rev {
+                    if let Some(source_ref) = self.reverse_id.get(source_eid) {
+                        if !visited.contains_key(source_ref) {
+                            visited.insert(source_ref.clone(), current.clone());
+                            if source_ref == to {
+                                return Self::reconstruct_path(&visited, to);
+                            }
+                            queue.push_back(source_ref.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        Vec::new() // No path found
+    }
+
+    /// Reconstruct path from BFS parent map.
+    fn reconstruct_path(
+        parents: &std::collections::HashMap<String, String>,
+        to: &str,
+    ) -> Vec<String> {
+        let mut path = vec![to.to_string()];
+        let mut current = to.to_string();
+        while let Some(parent) = parents.get(&current) {
+            if parent.is_empty() {
+                break;
+            }
+            path.push(parent.clone());
+            current = parent.clone();
+        }
+        path.reverse();
+        path
+    }
+
+    /// Return the subtree rooted at `root` up to `max_depth` levels.
+    ///
+    /// Walks reverse refs (children referencing parent). Returns entities
+    /// paired with their depth from root. Root is depth 0.
+    pub fn subtree(&self, root: &str, max_depth: usize) -> Vec<(&HDict, usize)> {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        let mut results: Vec<(&HDict, usize)> = Vec::new();
+
+        visited.insert(root.to_string());
+        queue.push_back((root.to_string(), 0));
+
+        if let Some(entity) = self.entities.get(root) {
+            results.push((entity, 0));
+        } else {
+            return Vec::new();
+        }
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            // Children = entities that reference current (reverse refs)
+            let child_refs = self.refs_to(&current, None);
+            for child_ref in child_refs {
+                if visited.insert(child_ref.clone()) {
+                    if let Some(entity) = self.entities.get(&child_ref) {
+                        results.push((entity, depth + 1));
+                        queue.push_back((child_ref, depth + 1));
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     // ── Spec-aware ──
@@ -383,20 +832,21 @@ impl EntityGraph {
                 graph.add(row.clone())?;
             }
         }
+        // Bulk import: build CSR once after all adds.
+        graph.rebuild_csr();
         Ok(graph)
     }
 
     // ── Change tracking ──
 
     /// Get changelog entries since a given version.
-    pub fn changes_since(&self, version: u64) -> &[GraphDiff] {
-        match self
-            .changelog
-            .binary_search_by_key(&(version + 1), |d| d.version)
-        {
-            Ok(idx) => &self.changelog[idx..],
-            Err(idx) => &self.changelog[idx..],
-        }
+    pub fn changes_since(&self, version: u64) -> Vec<&GraphDiff> {
+        let target = version + 1;
+        // VecDeque may not be contiguous, so collect matching entries.
+        self.changelog
+            .iter()
+            .filter(|d| d.version >= target)
+            .collect()
     }
 
     /// Current graph version (monotonically increasing).
@@ -432,6 +882,17 @@ impl EntityGraph {
     fn index_tags(&mut self, entity_id: usize, entity: &HDict) {
         let tags: Vec<String> = entity.tag_names().map(|s| s.to_string()).collect();
         self.tag_index.add(entity_id, &tags);
+
+        // Update value indexes for any indexed fields present on this entity.
+        for (name, val) in entity.iter() {
+            if self.value_index.has_index(name) {
+                self.value_index.add(entity_id, name, val);
+            }
+            // Update columnar store for tracked tags.
+            if self.columnar.is_tracked(name) {
+                self.columnar.set(entity_id, name, val);
+            }
+        }
     }
 
     /// Add ref adjacency entries for an entity.
@@ -452,13 +913,23 @@ impl EntityGraph {
         let tags: Vec<String> = entity.tag_names().map(|s| s.to_string()).collect();
         self.tag_index.remove(entity_id, &tags);
         self.adjacency.remove(entity_id);
+
+        // Remove from value indexes.
+        for (name, val) in entity.iter() {
+            if self.value_index.has_index(name) {
+                self.value_index.remove(entity_id, name, val);
+            }
+        }
+
+        // Clear columnar data for this entity.
+        self.columnar.clear_entity(entity_id);
     }
 
     /// Append a diff to the changelog, capping it at [`MAX_CHANGELOG`] entries.
     fn push_changelog(&mut self, diff: GraphDiff) {
-        self.changelog.push(diff);
-        if self.changelog.len() > MAX_CHANGELOG {
-            self.changelog.drain(..self.changelog.len() - MAX_CHANGELOG);
+        self.changelog.push_back(diff);
+        while self.changelog.len() > MAX_CHANGELOG {
+            self.changelog.pop_front();
         }
     }
 }
@@ -761,6 +1232,38 @@ mod tests {
         assert!(matches!(err, GraphError::Filter(_)));
     }
 
+    #[test]
+    fn query_cache_returns_same_results() {
+        let mut g = EntityGraph::new();
+        g.add(make_site("site-1")).unwrap();
+        g.add(make_equip("equip-1", "site-1")).unwrap();
+        g.add(make_point("pt-1", "equip-1")).unwrap();
+
+        // First call populates cache
+        let results1 = g.read_all("site", 0).unwrap();
+        assert_eq!(results1.len(), 1);
+
+        // Second call should hit cache and return same results
+        let results2 = g.read_all("site", 0).unwrap();
+        assert_eq!(results2.len(), 1);
+        assert_eq!(results1[0].get("id"), results2[0].get("id"));
+    }
+
+    #[test]
+    fn query_cache_invalidated_by_mutation() {
+        let mut g = EntityGraph::new();
+        g.add(make_site("site-1")).unwrap();
+
+        let results = g.read_all("site", 0).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Add another site — cache should be invalidated by version bump
+        g.add(make_site("site-2")).unwrap();
+
+        let results = g.read_all("site", 0).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
     // ── Ref traversal tests ──
 
     #[test]
@@ -951,5 +1454,173 @@ mod tests {
 
         assert_eq!(g.len(), 1);
         assert!(g.contains("site-1"));
+    }
+
+    // ── Graph traversal method tests ──
+
+    fn build_hierarchy_graph() -> EntityGraph {
+        let mut g = EntityGraph::new();
+        g.add(make_site("s1")).unwrap();
+        g.add(make_site("s2")).unwrap();
+        g.add(make_equip("e1", "s1")).unwrap();
+        g.add(make_equip("e2", "s1")).unwrap();
+        g.add(make_equip("e3", "s2")).unwrap();
+        g.add(make_point("p1", "e1")).unwrap();
+        g.add(make_point("p2", "e1")).unwrap();
+        g.add(make_point("p3", "e2")).unwrap();
+        g
+    }
+
+    #[test]
+    fn all_edges_returns_all_ref_relationships() {
+        let g = build_hierarchy_graph();
+        let edges = g.all_edges();
+        // e1->s1 (siteRef), e2->s1, e3->s2, p1->e1 (equipRef), p2->e1, p3->e2
+        assert_eq!(edges.len(), 6);
+        assert!(
+            edges
+                .iter()
+                .any(|(s, t, d)| s == "e1" && t == "siteRef" && d == "s1")
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|(s, t, d)| s == "p1" && t == "equipRef" && d == "e1")
+        );
+    }
+
+    #[test]
+    fn all_edges_empty_graph() {
+        let g = EntityGraph::new();
+        assert!(g.all_edges().is_empty());
+    }
+
+    #[test]
+    fn neighbors_one_hop() {
+        let g = build_hierarchy_graph();
+        let (entities, edges) = g.neighbors("e1", 1, None);
+        // e1 + s1 (forward via siteRef) + p1, p2 (reverse from equipRef)
+        let ids: Vec<String> = entities
+            .iter()
+            .filter_map(|e| e.id().map(|r| r.val.clone()))
+            .collect();
+        assert!(ids.contains(&"e1".to_string()));
+        assert!(ids.contains(&"s1".to_string()));
+        assert!(ids.contains(&"p1".to_string()));
+        assert!(ids.contains(&"p2".to_string()));
+        assert!(!edges.is_empty());
+    }
+
+    #[test]
+    fn neighbors_with_ref_type_filter() {
+        let g = build_hierarchy_graph();
+        let (entities, edges) = g.neighbors("e1", 1, Some(&["siteRef"]));
+        // Only forward siteRef edge: e1->s1
+        let ids: Vec<String> = entities
+            .iter()
+            .filter_map(|e| e.id().map(|r| r.val.clone()))
+            .collect();
+        assert!(ids.contains(&"e1".to_string()));
+        assert!(ids.contains(&"s1".to_string()));
+        // Should not include p1/p2 (those connect via equipRef)
+        assert!(!ids.contains(&"p1".to_string()));
+        // Edges should only contain siteRef
+        assert!(edges.iter().all(|(_, tag, _)| tag == "siteRef"));
+    }
+
+    #[test]
+    fn neighbors_zero_hops() {
+        let g = build_hierarchy_graph();
+        let (entities, edges) = g.neighbors("e1", 0, None);
+        assert_eq!(entities.len(), 1);
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn neighbors_nonexistent_entity() {
+        let g = build_hierarchy_graph();
+        let (entities, _) = g.neighbors("nonexistent", 1, None);
+        assert!(entities.is_empty());
+    }
+
+    #[test]
+    fn shortest_path_direct() {
+        let g = build_hierarchy_graph();
+        let path = g.shortest_path("e1", "s1");
+        assert_eq!(path, vec!["e1".to_string(), "s1".to_string()]);
+    }
+
+    #[test]
+    fn shortest_path_two_hops() {
+        let g = build_hierarchy_graph();
+        let path = g.shortest_path("p1", "s1");
+        // p1 -> e1 -> s1
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0], "p1");
+        assert_eq!(path[2], "s1");
+    }
+
+    #[test]
+    fn shortest_path_same_node() {
+        let g = build_hierarchy_graph();
+        let path = g.shortest_path("s1", "s1");
+        assert_eq!(path, vec!["s1".to_string()]);
+    }
+
+    #[test]
+    fn shortest_path_no_connection() {
+        // s1 and s2 are not connected to each other directly
+        let g = build_hierarchy_graph();
+        let path = g.shortest_path("s1", "s2");
+        // They are disconnected (no edges between them)
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn shortest_path_nonexistent() {
+        let g = build_hierarchy_graph();
+        let path = g.shortest_path("s1", "nonexistent");
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn subtree_from_site() {
+        let g = build_hierarchy_graph();
+        let tree = g.subtree("s1", 10);
+        // s1 (depth 0), e1 (1), e2 (1), p1 (2), p2 (2), p3 (2)
+        assert_eq!(tree.len(), 6);
+        // Root is at depth 0
+        assert_eq!(tree[0].0.id().unwrap().val, "s1");
+        assert_eq!(tree[0].1, 0);
+        // Equips at depth 1
+        let depth_1: Vec<_> = tree.iter().filter(|(_, d)| *d == 1).collect();
+        assert_eq!(depth_1.len(), 2);
+        // Points at depth 2
+        let depth_2: Vec<_> = tree.iter().filter(|(_, d)| *d == 2).collect();
+        assert_eq!(depth_2.len(), 3);
+    }
+
+    #[test]
+    fn subtree_max_depth_1() {
+        let g = build_hierarchy_graph();
+        let tree = g.subtree("s1", 1);
+        // s1 (depth 0), e1 (1), e2 (1) — no points (depth 2)
+        assert_eq!(tree.len(), 3);
+    }
+
+    #[test]
+    fn subtree_nonexistent_root() {
+        let g = build_hierarchy_graph();
+        let tree = g.subtree("nonexistent", 10);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn subtree_leaf_node() {
+        let g = build_hierarchy_graph();
+        let tree = g.subtree("p1", 10);
+        // p1 has no children referencing it
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].0.id().unwrap().val, "p1");
     }
 }

@@ -55,7 +55,7 @@ impl AuthManager {
     /// Create a new AuthManager with the given user records and token TTL.
     pub fn new(users: HashMap<String, UserRecord>, token_ttl: Duration) -> Self {
         let mut server_secret = [0u8; 32];
-        rand::Rng::fill(&mut rand::rng(), &mut server_secret);
+        rand::RngExt::fill(&mut rand::rng(), &mut server_secret);
         Self {
             users,
             handshakes: RwLock::new(HashMap::new()),
@@ -217,24 +217,22 @@ impl AuthManager {
     /// Validate a bearer token and return the associated user.
     ///
     /// Returns `None` if the token is unknown or has expired. Expired
-    /// tokens are automatically removed.
+    /// tokens are automatically removed under a single write lock to
+    /// avoid TOCTOU races.
     pub fn validate_token(&self, token: &str) -> Option<AuthUser> {
-        // First, check with a read lock.
-        {
-            let tokens = self.tokens.read();
-            match tokens.get(token) {
-                Some((user, created_at)) => {
-                    if created_at.elapsed() <= self.token_ttl {
-                        return Some(user.clone());
-                    }
-                    // Token expired -- fall through to remove it.
+        let mut tokens = self.tokens.write();
+        match tokens.get(token) {
+            Some((user, created_at)) => {
+                if created_at.elapsed() <= self.token_ttl {
+                    Some(user.clone())
+                } else {
+                    // Token expired — remove immediately under the same lock.
+                    tokens.remove(token);
+                    None
                 }
-                None => return None,
             }
+            None => None,
         }
-        // Expired: remove under a write lock.
-        self.tokens.write().remove(token);
-        None
     }
 
     /// Remove a bearer token (logout / close).

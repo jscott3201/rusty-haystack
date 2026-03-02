@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::Client;
 
 use crate::error::ClientError;
@@ -27,7 +29,10 @@ impl HttpTransport {
     /// `auth_token` is the bearer token obtained from SCRAM authentication.
     pub fn new(base_url: &str, auth_token: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url.trim_end_matches('/').to_string(),
             auth_token,
             format: "text/zinc".to_string(),
@@ -37,7 +42,10 @@ impl HttpTransport {
     /// Create a new HTTP transport with a specific wire format.
     pub fn with_format(base_url: &str, auth_token: String, format: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url.trim_end_matches('/').to_string(),
             auth_token,
             format: format.to_string(),

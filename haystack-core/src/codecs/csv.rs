@@ -1,11 +1,21 @@
-// CSV wire format codec — encode-only CSV output for Haystack grids.
+//! CSV wire format codec for Haystack grids.
+//!
+//! This module provides encode-only CSV output (`text/csv`). Each cell is
+//! Zinc-encoded and then quoted for CSV. Decoding is **not** supported —
+//! calling [`CsvCodec::decode_grid`] returns an error. Nested or complex
+//! kinds (grids, lists, dicts) may not roundtrip through CSV because the
+//! Zinc scalar representation is used verbatim inside each cell.
 
 use super::{Codec, CodecError};
 use crate::codecs::zinc;
 use crate::data::HGrid;
 use crate::kinds::Kind;
 
-/// CSV wire format codec (encode only).
+/// CSV wire format codec implementing the [`Codec`] trait for `text/csv`.
+///
+/// Encoding writes a header row of quoted column names followed by data rows
+/// whose cells are Zinc-encoded scalars wrapped in CSV quoting. Decoding
+/// is not supported and will return a [`CodecError`].
 pub struct CsvCodec;
 
 /// Escape a value for inclusion in a CSV cell.

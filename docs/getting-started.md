@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Rust 1.85+** (edition 2024) — install via [rustup](https://rustup.rs/)
+- **Rust 1.93+** (edition 2024) — install via [rustup](https://rustup.rs/)
 - **cargo** (included with Rust)
 - **Docker** (optional, for containerized deployment)
 
@@ -19,7 +19,7 @@ The `rusty-haystack` crate (Python bindings) is excluded because it requires mat
 To build only the CLI binary:
 
 ```sh
-cargo build -p haystack-cli --release
+cargo build -p rusty-haystack-cli --release
 ```
 
 The binary is at `target/release/haystack`.
@@ -30,7 +30,7 @@ The binary is at `target/release/haystack`.
 cargo test --workspace --exclude rusty-haystack
 ```
 
-This runs ~946 tests across all crates.
+This runs ~996 tests across all crates.
 
 ## Starting the Demo Server
 

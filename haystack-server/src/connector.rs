@@ -1,8 +1,37 @@
 //! Connector for fetching entities from a remote Haystack server.
+//!
+//! # Overview
+//!
+//! A [`Connector`] maintains a persistent connection (HTTP or WebSocket) to a
+//! remote Haystack server, periodically syncs entities into a local cache, and
+//! proxies write operations (`hisRead`, `hisWrite`, `pointWrite`,
+//! `invokeAction`, `import`) to the remote when the target entity is owned by
+//! that connector.
+//!
+//! # Lifecycle
+//!
+//! 1. **Construction** — [`Connector::new`] creates a connector with an empty
+//!    cache from a [`ConnectorConfig`] (parsed from the TOML federation config).
+//! 2. **Connection** — on first sync, [`Connector::sync`] calls
+//!    `connect_persistent()` which tries WebSocket first, falling back to HTTP.
+//! 3. **Sync loop** — [`Connector::spawn_sync_task`] spawns a tokio task that
+//!    calls [`Connector::sync`] at an adaptive interval. Sync tries incremental
+//!    delta sync via the `changes` op first, falling back to full entity fetch.
+//! 4. **Cache** — [`Connector::update_cache`] replaces the cached entity list
+//!    and rebuilds the bitmap tag index and owned-ID set for fast lookups.
+//! 5. **Proxy** — write ops check [`Connector::owns`] and forward to the remote
+//!    server via `proxy_*` methods, stripping/re-adding the ID prefix as needed.
+//!
+//! # ID Prefixing
+//!
+//! When `id_prefix` is configured, all Ref values (`id`, `siteRef`, etc.) are
+//! prefixed on sync and stripped before proxying. See [`prefix_refs`] and
+//! [`strip_prefix_refs`].
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -11,6 +40,9 @@ use haystack_client::HaystackClient;
 use haystack_client::transport::http::HttpTransport;
 use haystack_client::transport::ws::WsTransport;
 use haystack_core::data::{HDict, HGrid};
+use haystack_core::filter::{matches, parse_filter};
+use haystack_core::graph::bitmap::TagBitmapIndex;
+use haystack_core::graph::query_planner;
 use haystack_core::kinds::{HRef, Kind};
 
 /// Type-erased persistent connection to a remote Haystack server.
@@ -111,12 +143,20 @@ pub struct ConnectorConfig {
 }
 
 /// A connector that can fetch entities from a remote Haystack server.
+///
+/// Holds a persistent connection, a local entity cache with bitmap index,
+/// and state for adaptive sync and federation proxy operations. See the
+/// [module-level documentation](self) for the full lifecycle.
 pub struct Connector {
     pub config: ConnectorConfig,
     /// Cached entities from last sync.
     cache: RwLock<Vec<HDict>>,
     /// Set of entity IDs owned by this connector (populated during sync/update_cache).
     owned_ids: RwLock<HashSet<String>>,
+    /// Bitmap tag index over cached entities for fast filtered reads.
+    cache_index: RwLock<TagBitmapIndex>,
+    /// Maps entity ref_val → numeric cache index for bitmap lookups.
+    cache_id_map: RwLock<HashMap<String, usize>>,
     /// Entity IDs being watched remotely (prefixed IDs).
     remote_watch_ids: RwLock<HashSet<String>>,
     /// Transport protocol (HTTP or WebSocket).
@@ -125,24 +165,39 @@ pub struct Connector {
     connected: AtomicBool,
     /// Timestamp of the last successful sync.
     last_sync: RwLock<Option<DateTime<Utc>>>,
+    /// Remote graph version from last successful sync (for delta sync).
+    last_remote_version: RwLock<Option<u64>>,
     /// Persistent client connection used by sync and background tasks.
     /// Lazily initialized on first sync. Cleared on connection error.
     /// Uses `tokio::sync::RwLock` because the guard is held across `.await`.
     client: tokio::sync::RwLock<Option<ConnectorClient>>,
+    /// Current adaptive sync interval in seconds (adjusted based on change rate).
+    current_interval_secs: AtomicU64,
+    /// Number of entities from last sync (for change detection).
+    last_entity_count: AtomicU64,
 }
 
 impl Connector {
     /// Create a new connector with an empty cache.
+    ///
+    /// The connector starts disconnected; a persistent connection is
+    /// established lazily on the first [`sync`](Self::sync) call.
     pub fn new(config: ConnectorConfig) -> Self {
+        let base_interval = config.effective_sync_interval_secs();
         Self {
             config,
             cache: RwLock::new(Vec::new()),
             owned_ids: RwLock::new(HashSet::new()),
+            cache_index: RwLock::new(TagBitmapIndex::new()),
+            cache_id_map: RwLock::new(HashMap::new()),
             remote_watch_ids: RwLock::new(HashSet::new()),
             transport_mode: AtomicU8::new(TransportMode::Http as u8),
             connected: AtomicBool::new(false),
             last_sync: RwLock::new(None),
+            last_remote_version: RwLock::new(None),
             client: tokio::sync::RwLock::new(None),
+            current_interval_secs: AtomicU64::new(base_interval),
+            last_entity_count: AtomicU64::new(0),
         }
     }
 
@@ -199,18 +254,39 @@ impl Connector {
         }
     }
 
-    /// Connect to the remote server, fetch all entities, apply id prefixing,
-    /// and store them in the cache. Returns the count of entities synced.
+    /// Connect to the remote server, fetch entities, and update cache.
     ///
-    /// Uses the persistent client if available, otherwise establishes a new
-    /// connection (WS-first, falling back to HTTP).
+    /// Tries incremental delta sync first (via the `changes` op) if we have a
+    /// known remote version. Falls back to full sync on first connect, when the
+    /// remote doesn't support `changes`, or when the version gap is too large.
+    ///
+    /// Returns the number of cached entities after sync, or an error string.
     pub async fn sync(&self) -> Result<usize, String> {
         // Ensure we have a connection
         if self.client.read().await.is_none() {
             self.connect_persistent().await?;
         }
 
-        // Use the persistent client to read all entities
+        // Attempt delta sync if we have a previous version.
+        let maybe_ver = *self.last_remote_version.read();
+        if let Some(last_ver) = maybe_ver {
+            match self.try_delta_sync(last_ver).await {
+                Ok(count) => return Ok(count),
+                Err(e) => {
+                    log::debug!(
+                        "Delta sync failed for {}, falling back to full: {e}",
+                        self.config.name,
+                    );
+                }
+            }
+        }
+
+        // Full sync: read all entities
+        self.full_sync().await
+    }
+
+    /// Full sync: fetch all entities from remote and replace cache.
+    async fn full_sync(&self) -> Result<usize, String> {
         let grid = {
             let client = self.client.read().await;
             let client = client.as_ref().ok_or("not connected")?;
@@ -235,28 +311,209 @@ impl Connector {
         self.update_cache(entities);
         *self.last_sync.write() = Some(Utc::now());
         self.connected.store(true, Ordering::Relaxed);
+
+        // Probe remote version for next delta sync attempt.
+        self.probe_remote_version().await;
+
         Ok(count)
     }
 
-    /// Replace the cached entities and rebuild the owned-ID index.
+    /// Try to discover the remote graph version by calling `changes` with a
+    /// high version number. The response meta contains `curVer` which we store
+    /// for future delta syncs. Failures are silently ignored (remote may not
+    /// support the `changes` op).
+    async fn probe_remote_version(&self) {
+        let grid = {
+            let client = self.client.read().await;
+            let Some(client) = client.as_ref() else {
+                return;
+            };
+            client.call("changes", &build_changes_grid(u64::MAX)).await
+        };
+        if let Ok(grid) = grid {
+            if let Some(Kind::Number(n)) = grid.meta.get("curVer") {
+                *self.last_remote_version.write() = Some(n.val as u64);
+            }
+        }
+    }
+
+    /// Attempt incremental delta sync using the `changes` op.
+    ///
+    /// Sends the last known remote version to the server. The server returns
+    /// only the diffs since that version. We apply them incrementally to our
+    /// cache, avoiding a full entity set transfer.
+    async fn try_delta_sync(&self, since_version: u64) -> Result<usize, String> {
+        let changes_grid = build_changes_grid(since_version);
+        let grid = {
+            let client = self.client.read().await;
+            let client = client.as_ref().ok_or("not connected")?;
+            client.call("changes", &changes_grid).await
+        }
+        .map_err(|e| format!("changes op failed: {e}"))?;
+
+        // If the remote returned an error grid, fall back.
+        if grid.is_err() {
+            return Err("remote returned error grid for changes op".to_string());
+        }
+
+        // Extract current version from response meta.
+        let cur_ver = grid
+            .meta
+            .get("curVer")
+            .and_then(|k| {
+                if let Kind::Number(n) = k {
+                    Some(n.val as u64)
+                } else {
+                    None
+                }
+            })
+            .ok_or("changes response missing curVer in meta")?;
+
+        // No changes — nothing to do.
+        if grid.rows.is_empty() {
+            *self.last_remote_version.write() = Some(cur_ver);
+            *self.last_sync.write() = Some(Utc::now());
+            return Ok(self.cache.read().len());
+        }
+
+        // Apply diffs to a mutable copy of the cache.
+        let mut cache = self.cache.read().clone();
+        let mut id_to_idx: HashMap<String, usize> = self.cache_id_map.read().clone();
+        let prefix = self.config.id_prefix.as_deref();
+
+        for row in &grid.rows {
+            let op = match row.get("op") {
+                Some(Kind::Str(s)) => s.as_str(),
+                _ => continue,
+            };
+            let ref_val = match row.get("ref") {
+                Some(Kind::Str(s)) => s.clone(),
+                _ => continue,
+            };
+
+            match op {
+                "add" | "update" => {
+                    if let Some(Kind::Dict(entity_box)) = row.get("entity") {
+                        let mut entity: HDict = (**entity_box).clone();
+                        if let Some(pfx) = prefix {
+                            prefix_refs(&mut entity, pfx);
+                        }
+                        // Get the (potentially prefixed) ID.
+                        let entity_id = entity.get("id").and_then(|k| {
+                            if let Kind::Ref(r) = k {
+                                Some(r.val.clone())
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some(ref eid) = entity_id {
+                            if let Some(&idx) = id_to_idx.get(eid.as_str()) {
+                                // Update in place.
+                                cache[idx] = entity;
+                            } else {
+                                // Add new entity.
+                                let idx = cache.len();
+                                id_to_idx.insert(eid.clone(), idx);
+                                cache.push(entity);
+                            }
+                        }
+                    }
+                }
+                "remove" => {
+                    let prefixed_ref = match prefix {
+                        Some(pfx) => format!("{pfx}{ref_val}"),
+                        None => ref_val,
+                    };
+                    if let Some(&idx) = id_to_idx.get(prefixed_ref.as_str()) {
+                        // Swap-remove and fix up the id_to_idx map.
+                        let last_idx = cache.len() - 1;
+                        if idx != last_idx {
+                            let last_id = cache[last_idx].get("id").and_then(|k| {
+                                if let Kind::Ref(r) = k {
+                                    Some(r.val.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                            cache.swap(idx, last_idx);
+                            if let Some(lid) = last_id {
+                                id_to_idx.insert(lid, idx);
+                            }
+                        }
+                        cache.pop();
+                        id_to_idx.remove(prefixed_ref.as_str());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let count = cache.len();
+        self.update_cache(cache);
+        *self.last_remote_version.write() = Some(cur_ver);
+        *self.last_sync.write() = Some(Utc::now());
+        self.connected.store(true, Ordering::Relaxed);
+        Ok(count)
+    }
+
+    /// Replace the cached entities and rebuild the owned-ID index and bitmap tag index.
     ///
     /// Extracts all `id` Ref values from the given entities into a `HashSet`,
-    /// then atomically replaces both the entity cache and the ownership set.
+    /// builds a bitmap tag index for fast filtered reads, then atomically
+    /// replaces the cache, ownership set, and index.
     pub fn update_cache(&self, entities: Vec<HDict>) {
-        let ids: HashSet<String> = entities
-            .iter()
-            .filter_map(|e| match e.get("id") {
-                Some(Kind::Ref(r)) => Some(r.val.clone()),
-                _ => None,
-            })
-            .collect();
+        let mut ids = HashSet::with_capacity(entities.len());
+        let mut tag_index = TagBitmapIndex::new();
+        let mut id_map = HashMap::with_capacity(entities.len());
+
+        for (eid, entity) in entities.iter().enumerate() {
+            if let Some(Kind::Ref(r)) = entity.get("id") {
+                ids.insert(r.val.clone());
+                id_map.insert(r.val.clone(), eid);
+            }
+
+            let tags: Vec<String> = entity.tag_names().map(|s| s.to_string()).collect();
+            tag_index.add(eid, &tags);
+        }
+
         *self.cache.write() = entities;
         *self.owned_ids.write() = ids;
+        *self.cache_index.write() = tag_index;
+        *self.cache_id_map.write() = id_map;
     }
 
     /// Returns `true` if this connector owns an entity with the given ID.
     pub fn owns(&self, id: &str) -> bool {
         self.owned_ids.read().contains(id)
+    }
+
+    /// Look up a single cached entity by ID using the O(1) id_map index.
+    pub fn get_cached_entity(&self, id: &str) -> Option<HDict> {
+        let id_map = self.cache_id_map.read();
+        let cache = self.cache.read();
+        id_map.get(id).and_then(|&idx| cache.get(idx)).cloned()
+    }
+
+    /// Look up multiple cached entities by ID in a single pass.
+    /// Returns found entities and missing IDs.
+    pub fn batch_get_cached(&self, ids: &[&str]) -> (Vec<HDict>, Vec<String>) {
+        let id_map = self.cache_id_map.read();
+        let cache = self.cache.read();
+        let mut found = Vec::with_capacity(ids.len());
+        let mut missing = Vec::new();
+        for &id in ids {
+            if let Some(&idx) = id_map.get(id) {
+                if let Some(entity) = cache.get(idx) {
+                    found.push(entity.clone());
+                } else {
+                    missing.push(id.to_string());
+                }
+            } else {
+                missing.push(id.to_string());
+            }
+        }
+        (found, missing)
     }
 
     /// Returns a clone of all cached entities.
@@ -267,6 +524,48 @@ impl Connector {
     /// Returns the number of cached entities.
     pub fn entity_count(&self) -> usize {
         self.cache.read().len()
+    }
+
+    /// Filter cached entities using the bitmap tag index for acceleration.
+    ///
+    /// Returns matching entities up to `limit` (0 = unlimited). Uses the same
+    /// two-phase approach as EntityGraph: bitmap candidates → full filter eval.
+    pub fn filter_cached(&self, filter_expr: &str, limit: usize) -> Result<Vec<HDict>, String> {
+        let effective_limit = if limit == 0 { usize::MAX } else { limit };
+
+        let ast = parse_filter(filter_expr).map_err(|e| format!("filter error: {e}"))?;
+
+        let cache = self.cache.read();
+        let tag_index = self.cache_index.read();
+        let max_id = cache.len();
+
+        let candidates = query_planner::bitmap_candidates(&ast, &tag_index, max_id);
+
+        let mut results = Vec::new();
+
+        if let Some(ref bitmap) = candidates {
+            for eid in TagBitmapIndex::iter_set_bits(bitmap) {
+                if results.len() >= effective_limit {
+                    break;
+                }
+                if let Some(entity) = cache.get(eid) {
+                    if matches(&ast, entity, None) {
+                        results.push(entity.clone());
+                    }
+                }
+            }
+        } else {
+            for entity in cache.iter() {
+                if results.len() >= effective_limit {
+                    break;
+                }
+                if matches(&ast, entity, None) {
+                    results.push(entity.clone());
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Add a federated entity ID to the remote watch set.
@@ -334,6 +633,9 @@ impl Connector {
     }
 
     /// Proxy a hisRead request to the remote server.
+    ///
+    /// Strips the ID prefix, calls `hisRead` on the remote, and returns the
+    /// response grid. Clears the client on connection error.
     pub async fn proxy_his_read(&self, prefixed_id: &str, range: &str) -> Result<HGrid, String> {
         self.ensure_connected().await?;
         let id = self.strip_id(prefixed_id);
@@ -349,6 +651,9 @@ impl Connector {
     }
 
     /// Proxy a pointWrite request to the remote server.
+    ///
+    /// Strips the ID prefix, calls `pointWrite` on the remote with the given
+    /// level and value. Clears the client on connection error.
     pub async fn proxy_point_write(
         &self,
         prefixed_id: &str,
@@ -370,6 +675,9 @@ impl Connector {
     }
 
     /// Proxy a hisWrite request to the remote server.
+    ///
+    /// Strips the ID prefix, calls `hisWrite` on the remote with the given
+    /// time-series rows. Clears the client on connection error.
     pub async fn proxy_his_write(
         &self,
         prefixed_id: &str,
@@ -419,6 +727,9 @@ impl Connector {
     }
 
     /// Proxy an invokeAction request to the remote server.
+    ///
+    /// Strips the ID prefix, calls `invokeAction` on the remote with the given
+    /// action name and arguments dict. Clears the client on connection error.
     pub async fn proxy_invoke_action(
         &self,
         prefixed_id: &str,
@@ -445,21 +756,51 @@ impl Connector {
     /// On error, the persistent client is cleared to force reconnection on
     /// the next iteration.
     pub fn spawn_sync_task(connector: Arc<Connector>) -> tokio::task::JoinHandle<()> {
-        let interval_secs = connector.config.effective_sync_interval_secs();
+        let base_interval = connector.config.effective_sync_interval_secs();
+        let min_interval = base_interval / 2;
+        let max_interval = base_interval * 5;
+
         tokio::spawn(async move {
             loop {
+                let prev_count = connector.last_entity_count.load(Ordering::Relaxed);
+
                 match connector.sync().await {
                     Ok(count) => {
                         log::debug!("Synced {} entities from {}", count, connector.config.name);
+
+                        // Adaptive interval: increase when no changes, reset when changes detected.
+                        let current = connector.current_interval_secs.load(Ordering::Relaxed);
+                        let new_interval = if count as u64 == prev_count && prev_count > 0 {
+                            // No change — slow down (increase by 50%, capped at max).
+                            (current + current / 2).min(max_interval)
+                        } else {
+                            // Changes detected — reset to base interval.
+                            base_interval
+                        };
+                        connector
+                            .current_interval_secs
+                            .store(new_interval, Ordering::Relaxed);
+                        connector
+                            .last_entity_count
+                            .store(count as u64, Ordering::Relaxed);
                     }
                     Err(e) => {
                         log::error!("Sync failed for {}: {}", connector.config.name, e);
                         // Clear the client on error to force reconnection
                         *connector.client.write().await = None;
                         connector.connected.store(false, Ordering::Relaxed);
+                        // On error, use base interval for retry.
+                        connector
+                            .current_interval_secs
+                            .store(base_interval, Ordering::Relaxed);
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+
+                let sleep_secs = connector
+                    .current_interval_secs
+                    .load(Ordering::Relaxed)
+                    .max(min_interval);
+                tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
             }
         })
     }
@@ -471,6 +812,18 @@ fn build_read_all_grid() -> HGrid {
     let mut row = HDict::new();
     row.set("filter", Kind::Str("*".to_string()));
     HGrid::from_parts(HDict::new(), vec![HCol::new("filter")], vec![row])
+}
+
+/// Build a request grid for the `changes` op with the given version.
+fn build_changes_grid(since_version: u64) -> HGrid {
+    use haystack_core::data::HCol;
+    use haystack_core::kinds::Number;
+    let mut row = HDict::new();
+    row.set(
+        "version",
+        Kind::Number(Number::unitless(since_version as f64)),
+    );
+    HGrid::from_parts(HDict::new(), vec![HCol::new("version")], vec![row])
 }
 
 impl ConnectorConfig {
@@ -879,5 +1232,115 @@ mod tests {
 
         connector.remove_remote_watch("r-equip-2");
         assert_eq!(connector.remote_watch_count(), 0);
+    }
+
+    fn make_test_entities() -> Vec<HDict> {
+        let mut site = HDict::new();
+        site.set("id", Kind::Ref(HRef::from_val("site-1")));
+        site.set("site", Kind::Marker);
+        site.set("dis", Kind::Str("Main Site".into()));
+
+        let mut equip = HDict::new();
+        equip.set("id", Kind::Ref(HRef::from_val("equip-1")));
+        equip.set("equip", Kind::Marker);
+        equip.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
+
+        let mut point = HDict::new();
+        point.set("id", Kind::Ref(HRef::from_val("point-1")));
+        point.set("point", Kind::Marker);
+        point.set("sensor", Kind::Marker);
+        point.set("equipRef", Kind::Ref(HRef::from_val("equip-1")));
+
+        vec![site, equip, point]
+    }
+
+    #[test]
+    fn filter_cached_returns_matching_entities() {
+        let config = ConnectorConfig {
+            name: "test".to_string(),
+            url: "http://localhost:8080/api".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            id_prefix: None,
+            ws_url: None,
+            sync_interval_secs: None,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+        };
+        let connector = Connector::new(config);
+        connector.update_cache(make_test_entities());
+
+        // Filter for site
+        let results = connector.filter_cached("site", 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].get("id"),
+            Some(&Kind::Ref(HRef::from_val("site-1")))
+        );
+
+        // Filter for equip
+        let results = connector.filter_cached("equip", 0).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Filter for point and sensor
+        let results = connector.filter_cached("point and sensor", 0).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Filter for something that doesn't exist
+        let results = connector.filter_cached("ahu", 0).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn filter_cached_respects_limit() {
+        let config = ConnectorConfig {
+            name: "test".to_string(),
+            url: "http://localhost:8080/api".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            id_prefix: None,
+            ws_url: None,
+            sync_interval_secs: None,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+        };
+        let connector = Connector::new(config);
+
+        // Add multiple points
+        let mut entities = Vec::new();
+        for i in 0..10 {
+            let mut p = HDict::new();
+            p.set("id", Kind::Ref(HRef::from_val(&format!("point-{i}"))));
+            p.set("point", Kind::Marker);
+            entities.push(p);
+        }
+        connector.update_cache(entities);
+
+        let results = connector.filter_cached("point", 3).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn filter_cached_or_query() {
+        let config = ConnectorConfig {
+            name: "test".to_string(),
+            url: "http://localhost:8080/api".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            id_prefix: None,
+            ws_url: None,
+            sync_interval_secs: None,
+            client_cert: None,
+            client_key: None,
+            ca_cert: None,
+        };
+        let connector = Connector::new(config);
+        connector.update_cache(make_test_entities());
+
+        // site or equip should return 2
+        let results = connector.filter_cached("site or equip", 0).unwrap();
+        assert_eq!(results.len(), 2);
     }
 }

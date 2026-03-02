@@ -6,7 +6,10 @@ use crate::kinds::{HRef, Kind};
 use crate::ontology::DefNamespace;
 
 /// Callback type that resolves a `Ref` to the target entity dict.
-type ResolveRef<'a> = Option<&'a dyn Fn(&HRef) -> Option<HDict>>;
+///
+/// Returns a borrowed reference to the entity, avoiding cloning during
+/// multi-segment path traversal.
+type ResolveRef<'a> = Option<&'a dyn Fn(&HRef) -> Option<&'a HDict>>;
 
 /// Evaluate a filter against an entity dict.
 ///
@@ -15,22 +18,22 @@ type ResolveRef<'a> = Option<&'a dyn Fn(&HRef) -> Option<HDict>>;
 ///
 /// `namespace` is an optional ontology namespace used for SpecMatch evaluation
 /// (e.g. `ph::Ahu`). If `None`, SpecMatch always returns false.
-pub fn matches(node: &FilterNode, entity: &HDict, resolve_ref: ResolveRef<'_>) -> bool {
+pub fn matches<'a>(node: &FilterNode, entity: &'a HDict, resolve_ref: ResolveRef<'a>) -> bool {
     matches_with_ns(node, entity, resolve_ref, None)
 }
 
 /// Evaluate a filter with ontology namespace support for SpecMatch.
-pub fn matches_with_ns(
+pub fn matches_with_ns<'a>(
     node: &FilterNode,
-    entity: &HDict,
-    resolve_ref: ResolveRef<'_>,
+    entity: &'a HDict,
+    resolve_ref: ResolveRef<'a>,
     namespace: Option<&DefNamespace>,
 ) -> bool {
     match node {
         FilterNode::Has(path) => resolve_path(path, entity, resolve_ref).is_some(),
         FilterNode::Missing(path) => resolve_path(path, entity, resolve_ref).is_none(),
         FilterNode::Cmp { path, op, val } => match resolve_path(path, entity, resolve_ref) {
-            Some(actual) => compare(&actual, op, val),
+            Some(actual) => compare(actual, op, val),
             None => false,
         },
         FilterNode::And(left, right) => {
@@ -59,16 +62,20 @@ pub fn matches_with_ns(
 // Note: Unlike the Python reference which raises ValueError when resolve_ref
 // is None for multi-segment paths, we silently return false. This is intentional:
 // filters should evaluate to false for unresolvable paths rather than crashing.
-fn resolve_path(path: &Path, entity: &HDict, resolve_ref: ResolveRef<'_>) -> Option<Kind> {
+fn resolve_path<'a>(
+    path: &Path,
+    entity: &'a HDict,
+    resolve_ref: ResolveRef<'a>,
+) -> Option<&'a Kind> {
     if path.is_single() {
-        return entity.get(path.first()).cloned();
+        return entity.get(path.first());
     }
 
     // Multi-segment path: need resolve_ref
     let resolve = resolve_ref?;
 
     let segments = &path.0;
-    let mut current_entity = entity.clone();
+    let mut current_entity = entity;
 
     // Walk all segments except the last one — each intermediate value must be a Ref
     for seg in &segments[..segments.len() - 1] {
@@ -82,7 +89,7 @@ fn resolve_path(path: &Path, entity: &HDict, resolve_ref: ResolveRef<'_>) -> Opt
 
     // Return the final segment's value
     let last = &segments[segments.len() - 1];
-    current_entity.get(last).cloned()
+    current_entity.get(last)
 }
 
 /// Compare two Kind values using the given comparison operator.
@@ -360,13 +367,8 @@ mod tests {
     fn multi_segment_path_with_resolver() {
         let entity = make_equip_entity();
         let site = make_site_entity();
-        let resolver = move |r: &HRef| -> Option<HDict> {
-            if r.val == "site-1" {
-                Some(site.clone())
-            } else {
-                None
-            }
-        };
+        let resolver =
+            |r: &HRef| -> Option<&HDict> { if r.val == "site-1" { Some(&site) } else { None } };
         let filter = parse_filter("siteRef->dis == \"Main Site\"").unwrap();
         assert!(matches(&filter, &entity, Some(&resolver)));
     }
@@ -375,13 +377,8 @@ mod tests {
     fn multi_segment_path_has() {
         let entity = make_equip_entity();
         let site = make_site_entity();
-        let resolver = move |r: &HRef| -> Option<HDict> {
-            if r.val == "site-1" {
-                Some(site.clone())
-            } else {
-                None
-            }
-        };
+        let resolver =
+            |r: &HRef| -> Option<&HDict> { if r.val == "site-1" { Some(&site) } else { None } };
         let filter = parse_filter("siteRef->area").unwrap();
         assert!(matches(&filter, &entity, Some(&resolver)));
     }
@@ -389,7 +386,7 @@ mod tests {
     #[test]
     fn multi_segment_path_missing_intermediate() {
         let entity = make_equip_entity();
-        let resolver = |_r: &HRef| -> Option<HDict> { None };
+        let resolver = |_r: &HRef| -> Option<&HDict> { None };
         // siteRef resolves to a ref but resolver returns None
         let filter = parse_filter("siteRef->dis").unwrap();
         assert!(!matches(&filter, &entity, Some(&resolver)));
@@ -400,7 +397,7 @@ mod tests {
         let mut entity = HDict::new();
         // "dis" is a string, not a ref, so dis->foo should fail
         entity.set("dis", Kind::Str("hello".into()));
-        let resolver = |_r: &HRef| -> Option<HDict> { None };
+        let resolver = |_r: &HRef| -> Option<&HDict> { None };
         let filter = parse_filter("dis->foo").unwrap();
         assert!(!matches(&filter, &entity, Some(&resolver)));
     }
@@ -485,13 +482,8 @@ mod tests {
         // equip -> siteRef -> area
         let equip = make_equip_entity();
         let site = make_site_entity();
-        let resolver = move |r: &HRef| -> Option<HDict> {
-            if r.val == "site-1" {
-                Some(site.clone())
-            } else {
-                None
-            }
-        };
+        let resolver =
+            |r: &HRef| -> Option<&HDict> { if r.val == "site-1" { Some(&site) } else { None } };
         let filter = parse_filter("siteRef->area > 4000ft²").unwrap();
         assert!(matches(&filter, &equip, Some(&resolver)));
     }

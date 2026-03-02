@@ -1,10 +1,24 @@
 //! Haystack HTTP API op handlers and route registration.
+//!
+//! Each sub-module implements one or more Haystack ops as async Actix-Web
+//! handler functions. The [`configure`] function registers all routes under
+//! the `/api` scope.
+//!
+//! Standard ops: `about`, `ops`, `formats`, `read`, `nav`, `defs`, `libs`,
+//! `watchSub`/`watchPoll`/`watchUnsub`, `hisRead`/`hisWrite`,
+//! `pointWrite`, `invokeAction`, `close`.
+//!
+//! Extended ops: `changes`, `export`/`import`, `specs`/`spec`/`loadLib`/
+//! `unloadLib`/`exportLib`/`validate`, `system/status`/`backup`/`restore`,
+//! `federation/status`/`sync`, `rdf/turtle`/`rdf/jsonld`.
 
 pub mod about;
+pub mod changes;
 pub mod data;
 pub mod defs;
 pub mod federation;
 pub mod formats;
+pub mod graph;
 pub mod his;
 pub mod invoke;
 pub mod libs;
@@ -26,6 +40,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/ops", web::get().to(ops_handler::handle))
             .route("/formats", web::get().to(formats::handle))
             .route("/read", web::post().to(read::handle))
+            .route("/changes", web::post().to(changes::handle))
             .route("/nav", web::post().to(nav::handle))
             .route("/defs", web::post().to(defs::handle))
             .route("/libs", web::post().to(defs::handle_libs))
@@ -58,6 +73,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route("/status", web::get().to(federation::handle_status))
                     .route("/sync", web::post().to(federation::handle_sync))
                     .route("/sync/{name}", web::post().to(federation::handle_sync_one)),
+            )
+            .service(
+                web::scope("/graph")
+                    .route("/flow", web::post().to(graph::handle_flow))
+                    .route("/edges", web::post().to(graph::handle_edges))
+                    .route("/tree", web::post().to(graph::handle_tree))
+                    .route("/neighbors", web::post().to(graph::handle_neighbors))
+                    .route("/path", web::post().to(graph::handle_path))
+                    .route("/stats", web::get().to(graph::handle_stats)),
             ),
     );
 }

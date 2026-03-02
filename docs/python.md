@@ -329,6 +329,307 @@ slot.is_query   # -> False
 slot.is_maybe   # -> False
 ```
 
+## SharedGraph
+
+Thread-safe wrapper around `EntityGraph` using `Arc<RwLock>`. Safe to share across threads.
+
+```python
+graph = rh.SharedGraph()                    # empty graph
+graph = rh.SharedGraph(entity_graph)        # wrap existing EntityGraph
+
+# CRUD (same interface as EntityGraph)
+ref_val = graph.add(entity)                 # -> "site-1"
+entity = graph.get("site-1")               # -> HDict or None
+graph.update("site-1", rh.HDict({"dis": "New Name"}))
+removed = graph.remove("site-1")           # -> HDict
+
+# Query
+results = graph.read("site and area > 1000")       # -> HGrid
+results = graph.read("equip", limit=50)
+
+# Ref traversal
+graph.refs_from("ahu-1")                   # -> ["site-1"]
+graph.refs_from("ahu-1", ref_type="siteRef")
+graph.refs_to("site-1")                    # -> ["ahu-1", "ahu-2"]
+
+# Metadata
+graph.all()         # -> HGrid (all entities)
+graph.is_empty()    # -> bool
+graph.contains("site-1")  # -> bool
+graph.version()     # -> int
+
+# Change tracking
+diffs = graph.changes_since(old_version)   # -> list[GraphDiff]
+
+# Validation
+issues = graph.validate(namespace)         # -> list[str]
+fitting = graph.entities_fitting(namespace, "ahu")  # -> list[HDict]
+```
+
+### GraphDiff
+
+Represents a change to the graph (add, update, or remove).
+
+```python
+diff.op          # -> DiffOp.Add, DiffOp.Update, or DiffOp.Remove
+diff.ref_val     # -> "site-1"
+diff.old         # -> HDict or None (previous state, for Update/Remove)
+diff.new         # -> HDict or None (new state, for Add/Update)
+```
+
+## Filter Builder
+
+Programmatic filter construction using the `Filter` class.
+
+```python
+# Parse from string
+f = rh.Filter.parse("site and area > 1000")
+
+# Builder methods
+f = rh.Filter.has("site")
+f = rh.Filter.missing("deprecated")
+f = rh.Filter.cmp(rh.Path("area"), ">", rh.Number(1000))
+
+# Combine filters
+combined = f.and_filter(rh.Filter.has("geoCity"))
+combined = f.or_filter(rh.Filter.has("campus"))
+
+# Evaluate against an entity
+f.matches(entity)   # -> bool
+
+# String representation
+str(f)              # -> "site and area > 1000"
+```
+
+## HTTP Client
+
+Synchronous HTTP client for communicating with Haystack servers. All methods block the calling thread; the GIL is released during network I/O.
+
+```python
+# Connect with SCRAM SHA-256 authentication
+client = rh.HaystackClient.connect(
+    "http://localhost:8080/api",
+    "admin",
+    "s3cret",
+)
+
+# Server info
+about = client.about()       # -> HGrid
+ops = client.ops()           # -> HGrid
+formats = client.formats()   # -> HGrid
+libs = client.libs()         # -> HGrid
+
+# Read entities
+sites = client.read("site")                     # -> HGrid
+sites = client.read("site and area > 1000", limit=10)
+entities = client.read_by_ids(["site-1", "ahu-1"])
+
+# Navigation
+roots = client.nav()                    # -> HGrid (root nodes)
+children = client.nav(nav_id="site-1")  # -> HGrid (children)
+
+# Definitions
+all_defs = client.defs()
+equip_defs = client.defs(filter="equip")
+
+# History
+his = client.his_read("point-1", "today")
+his = client.his_read("point-1", "2024-01-01,2024-02-01")
+client.his_write("point-1", [
+    rh.HDict({"ts": rh.HDateTime(2024, 1, 15, 10, 0, 0, 0, "UTC"), "val": rh.Number(72)}),
+])
+
+# Point writes (priority levels 1-17)
+client.point_write("point-1", level=16, val=rh.Number(72))
+
+# Actions
+result = client.invoke_action("equip-1", "reboot", rh.HDict())
+
+# Watches
+sub = client.watch_sub(["point-1", "point-2"], lease="1min")
+changes = client.watch_poll("watch-id")
+client.watch_unsub("watch-id", ["point-1"])
+
+# Specs and libraries
+specs = client.specs()
+spec = client.spec("ph::Ahu")
+client.load_lib("myLib", xeto_source)
+client.unload_lib("myLib")
+exported = client.export_lib("myLib")
+
+# Validation
+results = client.validate([entity1, entity2])
+
+# Generic call
+result = client.call("customOp", request_grid)
+
+# Clean up
+client.close()
+```
+
+### WebSocket Client
+
+WebSocket transport with the same API. Uses Zinc encoding and JSON message envelope.
+
+```python
+client = rh.HaystackClient.connect_ws(
+    "http://localhost:8080/api",       # HTTP URL (for SCRAM auth)
+    "ws://localhost:8080/api/ws",      # WebSocket URL
+    "admin",
+    "s3cret",
+)
+
+# Same API as HTTP client
+sites = client.read("site")
+client.close()
+```
+
+### mTLS Client
+
+Connect with mutual TLS client certificates.
+
+```python
+client = rh.HaystackClient.connect_tls(
+    "https://secure-server:8443/api",
+    "admin",
+    "s3cret",
+    cert_path="/path/to/client.pem",
+    key_path="/path/to/client-key.pem",
+    ca_path="/path/to/ca.pem",        # optional
+)
+```
+
+## Embedded Server
+
+Run a Haystack server directly from Python. Useful for testing, prototyping, or embedding in larger applications.
+
+```python
+import rusty_haystack as rh
+
+# Build the graph
+graph = rh.SharedGraph()
+graph.add(rh.HDict({
+    "id": rh.Ref("site-1"),
+    "site": rh.Marker(),
+    "dis": "Demo Site",
+}))
+
+# Configure and start (blocks the thread)
+server = rh.HaystackServer(graph)
+server.port(8080)
+server.host("0.0.0.0")
+server.run()  # blocks until shutdown
+```
+
+### Background Server
+
+Start the server in a background thread for non-blocking usage (e.g., in Jupyter notebooks).
+
+```python
+server = rh.HaystackServer(graph)
+server.port(8080)
+server.run_background()
+
+# Server is running — use client to interact
+client = rh.HaystackClient.connect("http://localhost:8080/api", "admin", "pw")
+print(client.about())
+
+# Check for startup errors
+err = server.bg_error()  # -> str or None
+```
+
+### Server with Authentication
+
+```python
+auth = rh.AuthManager.from_toml("users.toml")
+# Or: auth = rh.AuthManager.from_toml_str(toml_string)
+
+server = rh.HaystackServer(graph)
+server.with_auth(auth)
+server.port(8080)
+server.run()
+```
+
+### Server with Ontology
+
+```python
+ns = rh.DefNamespace.load_standard()
+
+server = rh.HaystackServer(graph)
+server.with_namespace(ns)
+server.port(8080)
+server.run()
+```
+
+## Federation
+
+Aggregate entities from multiple remote Haystack servers.
+
+```python
+# Load from TOML config
+fed = rh.Federation.from_toml("federation.toml")
+
+# Or build programmatically
+fed = rh.Federation()
+fed.add(rh.ConnectorConfig(
+    name="Building A",
+    url="http://building-a:8080/api",
+    username="federation",
+    password="s3cret",
+    id_prefix="bldg-a-",
+    sync_interval_secs=30,
+))
+
+# Attach to server
+server = rh.HaystackServer(graph)
+server.with_federation(fed)
+server.port(8080)
+server.run()
+```
+
+### ConnectorConfig Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | `str` | Yes | Display name |
+| `url` | `str` | Yes | Remote API base URL |
+| `username` | `str` | Yes | SCRAM auth username |
+| `password` | `str` | Yes | SCRAM auth password |
+| `id_prefix` | `str` | No | Ref value prefix for namespacing |
+| `ws_url` | `str` | No | WebSocket URL override |
+| `sync_interval_secs` | `int` | No | Background sync interval (default: 60) |
+| `client_cert` | `str` | No | Path to mTLS client certificate |
+| `client_key` | `str` | No | Path to mTLS client private key |
+| `ca_cert` | `str` | No | Path to CA certificate |
+
+### Federation Status
+
+```python
+# Sync all connectors and get results
+results = fed.sync_all()  # -> list[tuple[str, str]] (name, status)
+
+# Query federated cache
+cached = fed.filter_cached("site")        # -> HGrid
+cached = fed.filter_cached("equip", limit=100)
+
+# Metadata
+fed.status()             # -> list[HDict] (per-connector status)
+fed.connector_count()    # -> int
+fed.is_enabled()         # -> bool
+```
+
+## SCRAM Authentication
+
+Low-level SCRAM SHA-256 utilities for custom auth flows.
+
+```python
+# Hash a password for storage
+hashed = rh.hash_password("s3cret")
+
+# Derive SCRAM credentials
+creds = rh.derive_credentials("s3cret", salt_bytes, iterations)
+```
+
 ## Type Conversion
 
 | Python | Haystack |

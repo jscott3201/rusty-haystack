@@ -118,7 +118,7 @@ impl SharedGraph {
 
     /// Get changelog entries since a given version.
     pub fn changes_since(&self, version: u64) -> Vec<super::changelog::GraphDiff> {
-        self.read(|g| g.changes_since(version).to_vec())
+        self.read(|g| g.changes_since(version).into_iter().cloned().collect())
     }
 
     /// Find all entities that structurally fit a spec/type name.
@@ -133,6 +133,41 @@ impl SharedGraph {
     /// See [`EntityGraph::validate`].
     pub fn validate(&self) -> Vec<ValidationIssue> {
         self.read(|g| g.validate())
+    }
+
+    /// Return all edges as `(source_ref, ref_tag, target_ref)` tuples.
+    pub fn all_edges(&self) -> Vec<(String, String, String)> {
+        self.read(|g| g.all_edges())
+    }
+
+    /// BFS neighborhood: entities and edges within `hops` of `ref_val`.
+    pub fn neighbors(
+        &self,
+        ref_val: &str,
+        hops: usize,
+        ref_types: Option<&[&str]>,
+    ) -> (Vec<HDict>, Vec<(String, String, String)>) {
+        self.read(|g| {
+            let (entities, edges) = g.neighbors(ref_val, hops, ref_types);
+            (entities.into_iter().cloned().collect(), edges)
+        })
+    }
+
+    /// BFS shortest path from `from` to `to`.
+    pub fn shortest_path(&self, from: &str, to: &str) -> Vec<String> {
+        self.read(|g| g.shortest_path(from, to))
+    }
+
+    /// Subtree rooted at `root` up to `max_depth` levels.
+    ///
+    /// Returns entities with their depth from root.
+    pub fn subtree(&self, root: &str, max_depth: usize) -> Vec<(HDict, usize)> {
+        self.read(|g| {
+            g.subtree(root, max_depth)
+                .into_iter()
+                .map(|(e, d)| (e.clone(), d))
+                .collect()
+        })
     }
 }
 

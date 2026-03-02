@@ -1,6 +1,52 @@
 //! The `hisRead` and `hisWrite` ops — historical time-series data.
 //!
-//! Backed by the in-memory `HisStore` stored in `AppState`.
+//! Backed by the in-memory [`HisStore`](crate::his_store::HisStore) stored
+//! in `AppState`.
+//!
+//! # hisRead
+//!
+//! `POST /api/hisRead` queries time-series history for a single point.
+//!
+//! ## Request Grid Columns
+//!
+//! | Column  | Kind | Description                                   |
+//! |---------|------|-----------------------------------------------|
+//! | `id`    | Ref  | Point entity reference                        |
+//! | `range` | Str  | Date range: `"today"`, `"yesterday"`, `"YYYY-MM-DD"`, or `"YYYY-MM-DD,YYYY-MM-DD"` |
+//!
+//! ## Response Grid Columns
+//!
+//! Grid meta contains `id` (Ref) echoing the requested point.
+//!
+//! | Column | Kind     | Description          |
+//! |--------|----------|----------------------|
+//! | `ts`   | DateTime | Sample timestamp     |
+//! | `val`  | *any*    | Sample value         |
+//!
+//! # hisWrite
+//!
+//! `POST /api/hisWrite` stores time-series samples for a single point.
+//!
+//! ## Request
+//!
+//! Grid meta must contain `id` (Ref). Rows carry:
+//!
+//! | Column | Kind     | Description        |
+//! |--------|----------|--------------------|
+//! | `ts`   | DateTime | Sample timestamp   |
+//! | `val`  | *any*    | Sample value       |
+//!
+//! ## Response
+//!
+//! Empty grid on success.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — missing `id` / `range` / `ts`, invalid range format,
+//!   or request decode failure.
+//! - **404 Not Found** — entity not in local graph and not owned by any
+//!   federation connector (hisWrite only).
+//! - **500 Internal Server Error** — federation proxy or encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};

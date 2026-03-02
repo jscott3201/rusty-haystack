@@ -1,9 +1,42 @@
 //! The `read` op — read entities by filter or by id.
+//!
+//! # Overview
+//!
+//! `POST /api/read` returns entity records matching a filter expression or a
+//! list of explicit IDs. Results include local entities and, when federation is
+//! enabled, matching entities from remote connectors.
+//!
+//! # Request Grid Columns
+//!
+//! Two mutually-exclusive request forms:
+//!
+//! **Filter read** — first row contains:
+//!
+//! | Column   | Kind   | Description                                      |
+//! |----------|--------|--------------------------------------------------|
+//! | `filter` | Str    | Haystack filter expression (e.g. `"site"`, `"point and siteRef==@s1"`) |
+//! | `limit`  | Number | *(optional)* Max entities to return (0 = no limit) |
+//!
+//! **ID read** — each row contains:
+//!
+//! | Column | Kind | Description      |
+//! |--------|------|------------------|
+//! | `id`   | Ref  | Entity reference |
+//!
+//! # Response Grid Columns
+//!
+//! The response grid has one column per unique tag across all matched entities.
+//! For ID reads, rows for unknown IDs appear as stubs with only the `id` column.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — missing `filter`/`id` column, invalid filter syntax, or
+//!   request decode failure.
+//! - **500 Internal Server Error** — graph or encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 
 use haystack_core::data::{HCol, HDict, HGrid};
-use haystack_core::filter::{matches, parse_filter};
 use haystack_core::kinds::{HRef, Kind};
 
 use crate::content;
@@ -93,27 +126,24 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
 
     // Merge federated entities if we have not yet hit the limit.
     if results.len() < effective_limit {
-        let federated = state.federation.all_cached_entities();
-        if !federated.is_empty() {
-            if is_wildcard {
-                // Wildcard: include all federated entities up to the limit.
-                for entity in federated {
-                    if results.len() >= effective_limit {
-                        break;
-                    }
-                    results.push(entity);
+        let remaining = effective_limit - results.len();
+        if is_wildcard {
+            // Wildcard: include all federated entities up to the limit.
+            let federated = state.federation.all_cached_entities();
+            for entity in federated {
+                if results.len() >= effective_limit {
+                    break;
                 }
-            } else {
-                let ast = parse_filter(filter)
-                    .map_err(|e| HaystackError::bad_request(format!("filter error: {e}")))?;
-
-                for entity in federated {
-                    if results.len() >= effective_limit {
-                        break;
-                    }
-                    if matches(&ast, &entity, None) {
-                        results.push(entity);
-                    }
+                results.push(entity);
+            }
+        } else {
+            // Use bitmap-accelerated filter on federated caches.
+            match state.federation.filter_cached_entities(filter, remaining) {
+                Ok(federated) => results.extend(federated),
+                Err(e) => {
+                    return Err(HaystackError::bad_request(format!(
+                        "federation filter error: {e}"
+                    )));
                 }
             }
         }
@@ -140,11 +170,17 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
 }
 
 /// Read entities by ID references.
+///
+/// First pass: resolve IDs from local graph.
+/// Second pass: batch-fetch remaining IDs from federation connectors
+/// (grouped by connector for O(1) indexed lookup per ID).
 fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackError> {
     let mut results: Vec<HDict> = Vec::new();
     let mut col_set: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut unknown_ids: Vec<String> = Vec::new();
 
+    // First pass: resolve from local graph, collect unknowns.
     for row in request_grid.rows.iter() {
         let ref_val = match row.get("id") {
             Some(Kind::Ref(r)) => &r.val,
@@ -158,32 +194,39 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
                 }
             }
             results.push(entity);
-        } else if let Some(connector) = state.federation.owner_of(ref_val) {
-            // Found in federation cache — return cached entity.
-            let cached = connector.cached_entities();
-            if let Some(entity) = cached
-                .iter()
-                .find(|e| matches!(e.get("id"), Some(Kind::Ref(r)) if r.val == *ref_val))
-            {
-                for name in entity.tag_names() {
-                    if seen.insert(name.to_string()) {
-                        col_set.push(name.to_string());
-                    }
-                }
-                results.push(entity.clone());
-            } else {
-                // Connector owns it but entity not in cache (shouldn't normally happen).
-                let mut missing = HDict::new();
-                missing.set("id", Kind::Ref(HRef::from_val(ref_val.as_str())));
-                if seen.insert("id".to_string()) {
-                    col_set.push("id".to_string());
-                }
-                results.push(missing);
-            }
         } else {
-            // Not found anywhere — return missing entity row.
+            unknown_ids.push(ref_val.clone());
+        }
+    }
+
+    // Second pass: batch fetch unknowns from federation.
+    if !unknown_ids.is_empty() && !state.federation.connectors.is_empty() {
+        let id_refs: Vec<&str> = unknown_ids.iter().map(|s| s.as_str()).collect();
+        let (found, still_missing) = state.federation.batch_read_by_id(id_refs);
+
+        for entity in found {
+            for name in entity.tag_names() {
+                if seen.insert(name.to_string()) {
+                    col_set.push(name.to_string());
+                }
+            }
+            results.push(entity);
+        }
+
+        // Add missing stubs for IDs not found anywhere.
+        for id in still_missing {
             let mut missing = HDict::new();
-            missing.set("id", Kind::Ref(HRef::from_val(ref_val.as_str())));
+            missing.set("id", Kind::Ref(HRef::from_val(id.as_str())));
+            if seen.insert("id".to_string()) {
+                col_set.push("id".to_string());
+            }
+            results.push(missing);
+        }
+    } else {
+        // No federation — add missing stubs directly.
+        for id in unknown_ids {
+            let mut missing = HDict::new();
+            missing.set("id", Kind::Ref(HRef::from_val(id.as_str())));
             if seen.insert("id".to_string()) {
                 col_set.push("id".to_string());
             }

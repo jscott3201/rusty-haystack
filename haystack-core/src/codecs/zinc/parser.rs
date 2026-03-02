@@ -382,6 +382,9 @@ impl<'a> ZincParser<'a> {
         self.pos += 5;
         // Optional :SS
         if self.peek() == Some(':') {
+            if self.remaining().len() < 3 {
+                return Err(self.err("incomplete seconds in time"));
+            }
             self.pos += 3; // :SS
             // Optional .FFF...
             if self.peek() == Some('.') {
@@ -408,9 +411,15 @@ impl<'a> ZincParser<'a> {
         }
         if self.peek() == Some('+') || self.peek() == Some('-') {
             let start = self.pos;
+            if self.remaining().len() < 3 {
+                return Err(self.err("incomplete UTC offset"));
+            }
             self.pos += 1; // sign
             self.pos += 2; // HH
             if self.peek() == Some(':') {
+                if self.remaining().len() < 3 {
+                    return Err(self.err("incomplete UTC offset minutes"));
+                }
                 self.pos += 3; // :MM
             }
             return Ok(self.src[start..self.pos].to_string());
@@ -562,19 +571,31 @@ impl<'a> ZincParser<'a> {
         while self.peek() != Some(',') && !self.at_end() {
             self.pos += 1;
         }
+        if self.at_end() {
+            return Err(self.err("unterminated coord literal, expected ','"));
+        }
         let lat: f64 = self.src[start..self.pos]
             .trim()
             .parse()
             .map_err(|_| self.err("invalid coord latitude"))?;
+        if !(-90.0..=90.0).contains(&lat) {
+            return Err(self.err("coord latitude must be between -90 and 90"));
+        }
         self.pos += 1; // skip comma
         let start = self.pos;
         while self.peek() != Some(')') && !self.at_end() {
             self.pos += 1;
         }
+        if self.at_end() {
+            return Err(self.err("unterminated coord literal, expected ')'"));
+        }
         let lng: f64 = self.src[start..self.pos]
             .trim()
             .parse()
             .map_err(|_| self.err("invalid coord longitude"))?;
+        if !(-180.0..=180.0).contains(&lng) {
+            return Err(self.err("coord longitude must be between -180 and 180"));
+        }
         self.pos += 1; // skip )
         Ok(Kind::Coord(Coord::new(lat, lng)))
     }

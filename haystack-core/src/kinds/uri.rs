@@ -1,15 +1,20 @@
 use std::fmt;
 
-/// Universal Resource Identifier.
-/// Zinc: `` `http://example.com` ``
+/// A Haystack URI value wrapping an arbitrary string.
+///
+/// URIs represent resource identifiers such as URLs, file paths, or URNs.
+/// In Zinc encoding a URI is delimited by back-ticks: `` `http://example.com` ``.
+/// No validation is performed on the contained string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Uri(pub String);
 
 impl Uri {
+    /// Creates a new [`Uri`] from any value that can be converted into a `String`.
     pub fn new(val: impl Into<String>) -> Self {
         Self(val.into())
     }
 
+    /// Returns a string slice of the underlying URI value.
     pub fn val(&self) -> &str {
         &self.0
     }

@@ -1,4 +1,16 @@
 //! RDF export endpoints — Turtle and JSON-LD serialization of all entities.
+//!
+//! # Overview
+//!
+//! These read-only endpoints serialize the entire entity graph into standard
+//! RDF formats. No request grid is needed.
+//!
+//! - `GET /api/rdf/turtle` — returns `text/turtle`
+//! - `GET /api/rdf/jsonld` — returns `application/ld+json`
+//!
+//! # Errors
+//!
+//! - **500 Internal Server Error** — graph read failure.
 
 use actix_web::{HttpResponse, web};
 

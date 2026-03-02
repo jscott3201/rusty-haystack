@@ -12,7 +12,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -339,7 +339,11 @@ pub fn server_verify_final(
     // Validate combined nonce
     let combined_nonce = parse_scram_param(parts[1], "r=")?;
     let expected_combined = format!("{}{}", handshake.client_nonce, handshake.server_nonce);
-    if combined_nonce != expected_combined {
+    if !bool::from(
+        combined_nonce
+            .as_bytes()
+            .ct_eq(expected_combined.as_bytes()),
+    ) {
         return Err(AuthError::HandshakeFailed("nonce mismatch".to_string()));
     }
 

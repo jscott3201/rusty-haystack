@@ -1,6 +1,19 @@
 //! WebSocket handler and watch subscription manager.
+//!
+//! This module provides two major components:
+//!
+//! 1. **`WatchManager`** — a thread-safe subscription registry that manages
+//!    watch lifecycles (subscribe, poll, unsubscribe, add/remove IDs). Each
+//!    watch tracks a set of entity IDs and the graph version at last poll,
+//!    enabling efficient change detection.
+//!
+//! 2. **`ws_handler`** — an Actix-Web WebSocket upgrade endpoint (`GET /api/ws`)
+//!    that handles Haystack watch operations over JSON messages. Supports
+//!    server-initiated ping/pong liveness, deflate compression for large
+//!    payloads, and automatic server-push of graph changes to watching clients.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use parking_lot::RwLock;
@@ -14,11 +27,29 @@ use haystack_core::graph::SharedGraph;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// Watch growth caps
+// Tuning constants
 // ---------------------------------------------------------------------------
 
 const MAX_WATCHES: usize = 100;
 const MAX_ENTITY_IDS_PER_WATCH: usize = 10_000;
+/// Maximum watches a single user can hold at once.
+const MAX_WATCHES_PER_USER: usize = 20;
+
+/// Server-initiated ping interval for liveness detection.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// If no pong is received within this duration after a ping, the connection
+/// is considered dead and will be closed.
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// mpsc channel capacity for outbound messages.
+const CHANNEL_CAPACITY: usize = 64;
+
+/// Number of consecutive `try_send` failures before closing a slow client.
+const MAX_SEND_FAILURES: u32 = 3;
+
+/// Minimum payload size (bytes) to consider compressing with deflate.
+const COMPRESSION_THRESHOLD: usize = 512;
 
 // ---------------------------------------------------------------------------
 // WebSocket message types
@@ -200,8 +231,8 @@ fn handle_watch_unsub(req: &WsRequest, username: &str, state: &AppState) -> WsRe
 
 /// A single watch subscription.
 struct Watch {
-    /// Entity IDs being watched.
-    entity_ids: Vec<String>,
+    /// Entity IDs being watched (HashSet for O(1) membership tests).
+    entity_ids: HashSet<String>,
     /// Graph version at last poll.
     last_version: u64,
     /// Username of the watch owner.
@@ -209,8 +240,17 @@ struct Watch {
 }
 
 /// Manages watch subscriptions for change polling.
+///
+/// Watches are keyed by a UUID watch ID and owned by a specific user.
+/// The manager enforces global and per-user watch limits, per-watch entity
+/// ID limits, and provides an entity encoding cache for efficient
+/// WebSocket server-push serialization.
 pub struct WatchManager {
     watches: RwLock<HashMap<String, Watch>>,
+    /// Cached entity encodings keyed by (ref_val, version) for watch poll.
+    encode_cache: RwLock<HashMap<(String, u64), Value>>,
+    /// Graph version at which the encode cache was last validated.
+    cache_version: RwLock<u64>,
 }
 
 impl WatchManager {
@@ -218,6 +258,8 @@ impl WatchManager {
     pub fn new() -> Self {
         Self {
             watches: RwLock::new(HashMap::new()),
+            encode_cache: RwLock::new(HashMap::new()),
+            cache_version: RwLock::new(0),
         }
     }
 
@@ -234,6 +276,13 @@ impl WatchManager {
         if watches.len() >= MAX_WATCHES {
             return Err("maximum number of watches reached".to_string());
         }
+        let user_count = watches.values().filter(|w| w.owner == username).count();
+        if user_count >= MAX_WATCHES_PER_USER {
+            return Err(format!(
+                "user '{}' has reached the maximum of {} watches",
+                username, MAX_WATCHES_PER_USER
+            ));
+        }
         if ids.len() > MAX_ENTITY_IDS_PER_WATCH {
             return Err(format!(
                 "too many entity IDs (max {})",
@@ -242,7 +291,7 @@ impl WatchManager {
         }
         let watch_id = Uuid::new_v4().to_string();
         let watch = Watch {
-            entity_ids: ids,
+            entity_ids: ids.into_iter().collect(),
             last_version: graph_version,
             owner: username.to_string(),
         };
@@ -279,8 +328,7 @@ impl WatchManager {
 
         // Graph reads happen without the WatchManager write lock held.
         let changes = graph.changes_since(last_version);
-        let changed_refs: std::collections::HashSet<&str> =
-            changes.iter().map(|d| d.ref_val.as_str()).collect();
+        let changed_refs: HashSet<&str> = changes.iter().map(|d| d.ref_val.as_str()).collect();
 
         Some(
             entity_ids
@@ -335,8 +383,9 @@ impl WatchManager {
             if watch.owner != username {
                 return false;
             }
-            let to_remove: std::collections::HashSet<&String> = ids.iter().collect();
-            watch.entity_ids.retain(|id| !to_remove.contains(id));
+            for id in ids {
+                watch.entity_ids.remove(id);
+            }
             true
         } else {
             false
@@ -348,7 +397,9 @@ impl WatchManager {
     /// Returns `None` if the watch does not exist.
     pub fn get_ids(&self, watch_id: &str) -> Option<Vec<String>> {
         let watches = self.watches.read();
-        watches.get(watch_id).map(|w| w.entity_ids.clone())
+        watches
+            .get(watch_id)
+            .map(|w| w.entity_ids.iter().cloned().collect())
     }
 
     /// Return the number of active watches.
@@ -360,6 +411,60 @@ impl WatchManager {
     pub fn is_empty(&self) -> bool {
         self.watches.read().is_empty()
     }
+
+    /// Encode an entity using the cache. Returns cached value if the entity
+    /// version hasn't changed; otherwise encodes and caches the result.
+    pub fn encode_cached(&self, ref_val: &str, graph_version: u64, entity: &HDict) -> Value {
+        // Invalidate entire cache when graph version advances beyond what we've seen.
+        {
+            let mut cv = self.cache_version.write();
+            if graph_version > *cv {
+                self.encode_cache.write().clear();
+                *cv = graph_version;
+            }
+        }
+
+        let key = (ref_val.to_string(), graph_version);
+        if let Some(cached) = self.encode_cache.read().get(&key) {
+            return cached.clone();
+        }
+
+        let encoded = encode_entity(entity);
+        self.encode_cache.write().insert(key, encoded.clone());
+        encoded
+    }
+
+    /// Get the IDs of all entities watched by any watch, for server-push
+    /// change detection.
+    pub fn all_watched_ids(&self) -> HashSet<String> {
+        let watches = self.watches.read();
+        watches
+            .values()
+            .flat_map(|w| w.entity_ids.iter().cloned())
+            .collect()
+    }
+
+    /// Find watches that contain any of the given changed ref_vals.
+    /// Returns (watch_id, owner, changed_entity_ids) tuples.
+    pub fn watches_affected_by(
+        &self,
+        changed_refs: &HashSet<&str>,
+    ) -> Vec<(String, String, Vec<String>)> {
+        let watches = self.watches.read();
+        let mut affected = Vec::new();
+        for (wid, watch) in watches.iter() {
+            let matched: Vec<String> = watch
+                .entity_ids
+                .iter()
+                .filter(|id| changed_refs.contains(id.as_str()))
+                .cloned()
+                .collect();
+            if !matched.is_empty() {
+                affected.push((wid.clone(), watch.owner.clone(), matched));
+            }
+        }
+        affected
+    }
 }
 
 impl Default for WatchManager {
@@ -368,22 +473,92 @@ impl Default for WatchManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Compression helpers (application-level deflate)
+// ---------------------------------------------------------------------------
+
+/// Compress a response string with deflate if it exceeds the threshold.
+/// Returns the original text if compression doesn't save space.
+fn maybe_compress_response(text: &str) -> WsPayload {
+    if text.len() < COMPRESSION_THRESHOLD {
+        return WsPayload::Text(text.to_string());
+    }
+    let compressed = compress_deflate(text.as_bytes());
+    if compressed.len() < text.len() {
+        WsPayload::Binary(compressed)
+    } else {
+        WsPayload::Text(text.to_string())
+    }
+}
+
+fn compress_deflate(data: &[u8]) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::DeflateEncoder;
+    use std::io::Write;
+
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_else(|_| data.to_vec())
+}
+
+/// Maximum decompressed payload size (10 MB) to prevent zip bomb attacks.
+const MAX_DECOMPRESSED_SIZE: u64 = 10 * 1024 * 1024;
+
+fn decompress_deflate(data: &[u8]) -> Result<String, std::io::Error> {
+    use flate2::read::DeflateDecoder;
+    use std::io::Read;
+
+    let decoder = DeflateDecoder::new(data);
+    let mut limited = decoder.take(MAX_DECOMPRESSED_SIZE);
+    let mut output = String::new();
+    limited.read_to_string(&mut output)?;
+    Ok(output)
+}
+
+enum WsPayload {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket handler
+// ---------------------------------------------------------------------------
+
 /// WebSocket upgrade handler for `/api/ws`.
 ///
 /// Upgrades the HTTP connection to a WebSocket and handles Haystack
 /// watch operations (watchSub, watchPoll, watchUnsub) over JSON
 /// messages.  Each client request may include a `reqId` field which
 /// is echoed back in the response for correlation.
+///
+/// Features:
+/// - Server-initiated ping every [`PING_INTERVAL`] for liveness detection
+/// - Backpressure: slow clients are disconnected after [`MAX_SEND_FAILURES`]
+/// - Deflate compression for large responses (binary frames)
+/// - Server-push: graph changes are pushed to watching clients automatically
 pub async fn ws_handler(
     req: HttpRequest,
     stream: web::Payload,
     state: web::Data<AppState>,
 ) -> actix_web::Result<HttpResponse> {
-    let username = req
-        .extensions()
-        .get::<crate::auth::AuthUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "anonymous".to_string());
+    // Require authenticated user when auth is enabled
+    let username = if state.auth.is_enabled() {
+        match req.extensions().get::<crate::auth::AuthUser>() {
+            Some(u) => u.username.clone(),
+            None => {
+                return Err(crate::error::HaystackError::new(
+                    "authentication required for WebSocket connections",
+                    actix_web::http::StatusCode::UNAUTHORIZED,
+                )
+                .into());
+            }
+        }
+    } else {
+        req.extensions()
+            .get::<crate::auth::AuthUser>()
+            .map(|u| u.username.clone())
+            .unwrap_or_else(|| "anonymous".to_string())
+    };
 
     let (response, mut session, mut msg_stream) = actix_ws::handle(&req, stream)?;
 
@@ -391,37 +566,138 @@ pub async fn ws_handler(
         use actix_ws::Message;
         use tokio::sync::mpsc;
 
-        let (tx, mut rx) = mpsc::channel::<String>(32);
+        let (tx, mut rx) = mpsc::channel::<WsPayload>(CHANNEL_CAPACITY);
 
-        // Spawn a task to forward messages from the channel to the WS session
+        // Spawn a task to forward messages from the channel to the WS session.
         let mut session_clone = session.clone();
         actix_rt::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                let _ = session_clone.text(msg).await;
+            while let Some(payload) = rx.recv().await {
+                let result = match payload {
+                    WsPayload::Text(text) => session_clone.text(text).await,
+                    WsPayload::Binary(data) => session_clone.binary(data).await,
+                };
+                if result.is_err() {
+                    break;
+                }
             }
         });
 
-        // Process incoming messages
+        // Track connection liveness.
+        let mut last_activity = Instant::now();
+        let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+        ping_interval.tick().await; // consume the immediate first tick
+        let mut awaiting_pong = false;
+        let mut send_failures: u32 = 0;
+
+        // Track graph version for server-push change detection.
+        let mut last_push_version = state.graph.version();
+
+        // Server-push check interval (faster than ping but slower than a busy loop).
+        let mut push_interval = tokio::time::interval(Duration::from_millis(500));
+        push_interval.tick().await;
+
         use futures_util::StreamExt as _;
-        while let Some(Ok(msg)) = msg_stream.next().await {
-            match msg {
-                Message::Text(text) => {
-                    let response_text = match serde_json::from_str::<WsRequest>(&text) {
-                        Ok(ws_req) => handle_ws_request(&ws_req, &username, &state),
-                        Err(e) => {
-                            let err = WsResponse::error(None, format!("invalid request: {e}"));
-                            serde_json::to_string(&err).unwrap()
+
+        loop {
+            tokio::select! {
+                // ── Incoming WS messages ──
+                msg = msg_stream.next() => {
+                    let Some(Ok(msg)) = msg else { break };
+                    last_activity = Instant::now();
+                    awaiting_pong = false;
+
+                    match msg {
+                        Message::Text(text) => {
+                            let response_text = match serde_json::from_str::<WsRequest>(&text) {
+                                Ok(ws_req) => handle_ws_request(&ws_req, &username, &state),
+                                Err(e) => {
+                                    let err = WsResponse::error(None, format!("invalid request: {e}"));
+                                    serde_json::to_string(&err).unwrap()
+                                }
+                            };
+                            let payload = maybe_compress_response(&response_text);
+                            if tx.try_send(payload).is_err() {
+                                send_failures += 1;
+                                if send_failures >= MAX_SEND_FAILURES {
+                                    log::warn!("closing slow WS client ({})", username);
+                                    break;
+                                }
+                            } else {
+                                send_failures = 0;
+                            }
                         }
-                    };
-                    let _ = tx.send(response_text).await;
+                        Message::Binary(data) => {
+                            // Compressed request from client.
+                            if let Ok(text) = decompress_deflate(&data) {
+                                let response_text = match serde_json::from_str::<WsRequest>(&text) {
+                                    Ok(ws_req) => handle_ws_request(&ws_req, &username, &state),
+                                    Err(e) => {
+                                        let err = WsResponse::error(None, format!("invalid request: {e}"));
+                                        serde_json::to_string(&err).unwrap()
+                                    }
+                                };
+                                let payload = maybe_compress_response(&response_text);
+                                let _ = tx.try_send(payload);
+                            }
+                        }
+                        Message::Ping(bytes) => {
+                            let _ = session.pong(&bytes).await;
+                        }
+                        Message::Pong(_) => {
+                            awaiting_pong = false;
+                        }
+                        Message::Close(_) => {
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
-                Message::Ping(bytes) => {
-                    let _ = session.pong(&bytes).await;
+
+                // ── Server-initiated ping for liveness ──
+                _ = ping_interval.tick() => {
+                    if awaiting_pong && last_activity.elapsed() > PONG_TIMEOUT {
+                        log::info!("closing stale WS connection ({}): no pong", username);
+                        break;
+                    }
+                    let _ = session.ping(b"").await;
+                    awaiting_pong = true;
                 }
-                Message::Close(_) => {
-                    break;
+
+                // ── Server-push: check for graph changes ──
+                _ = push_interval.tick() => {
+                    let current_version = state.graph.version();
+                    if current_version > last_push_version {
+                        let changes = state.graph.changes_since(last_push_version);
+                        let changed_refs: HashSet<&str> =
+                            changes.iter().map(|d| d.ref_val.as_str()).collect();
+
+                        let affected = state.watches.watches_affected_by(&changed_refs);
+                        for (watch_id, owner, changed_ids) in &affected {
+                            if owner != &username {
+                                continue;
+                            }
+                            let rows: Vec<Value> = changed_ids
+                                .iter()
+                                .filter_map(|id| {
+                                    let entity = state.graph.get(id)?;
+                                    Some(state.watches.encode_cached(id, current_version, &entity))
+                                })
+                                .collect();
+                            if !rows.is_empty() {
+                                let push_msg = serde_json::json!({
+                                    "type": "push",
+                                    "watchId": watch_id,
+                                    "rows": rows,
+                                });
+                                if let Ok(text) = serde_json::to_string(&push_msg) {
+                                    let payload = maybe_compress_response(&text);
+                                    let _ = tx.try_send(payload);
+                                }
+                            }
+                        }
+                        last_push_version = current_version;
+                    }
                 }
-                _ => {}
             }
         }
 

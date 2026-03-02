@@ -43,16 +43,37 @@ pub fn parse_filter(expr: &str) -> Result<FilterNode, FilterError> {
     Ok(node)
 }
 
+/// Maximum nesting depth for filter expressions to prevent stack overflow.
+const MAX_DEPTH: usize = 100;
+
 // ── Internal parser state ──
 
 struct FilterParser<'a> {
     src: &'a str,
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> FilterParser<'a> {
     fn new(src: &'a str) -> Self {
-        Self { src, pos: 0 }
+        Self {
+            src,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    fn enter_depth(&mut self) -> Result<(), FilterError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            Err(self.err("filter expression exceeds maximum nesting depth"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn exit_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     fn at_end(&self) -> bool {
@@ -197,6 +218,7 @@ impl<'a> FilterParser<'a> {
 
     /// condOr := condAnd ("or" condAnd)*
     fn parse_cond_or(&mut self) -> Result<FilterNode, FilterError> {
+        self.enter_depth()?;
         let mut left = self.parse_cond_and()?;
         loop {
             self.skip_spaces();
@@ -208,11 +230,13 @@ impl<'a> FilterParser<'a> {
                 break;
             }
         }
+        self.exit_depth();
         Ok(left)
     }
 
     /// condAnd := term ("and" term)*
     fn parse_cond_and(&mut self) -> Result<FilterNode, FilterError> {
+        self.enter_depth()?;
         let mut left = self.parse_term()?;
         loop {
             self.skip_spaces();
@@ -224,6 +248,7 @@ impl<'a> FilterParser<'a> {
                 break;
             }
         }
+        self.exit_depth();
         Ok(left)
     }
 

@@ -153,7 +153,7 @@ See [Federation](federation.md) for full details on transport, sync behavior, wr
 
 The Dockerfile uses a multi-stage build:
 
-1. **Builder stage**: `rust:1.87-alpine` — compiles the CLI binary with static musl linking
+1. **Builder stage**: `rust:1.93-alpine` — compiles the CLI binary with static musl linking
 2. **Runtime stage**: `alpine:3.21` — minimal runtime (~15 MB)
 
 ```sh

@@ -1,4 +1,45 @@
 //! The `defs` and `libs` ops — query the definition namespace.
+//!
+//! # defs (`POST /api/defs`)
+//!
+//! Returns definitions from the ontology namespace, optionally filtered
+//! by a substring match on the def symbol.
+//!
+//! ## Request Grid Columns
+//!
+//! | Column   | Kind | Description                                    |
+//! |----------|------|------------------------------------------------|
+//! | `filter` | Str  | *(optional)* Substring to match against def symbols |
+//!
+//! An empty body returns all definitions.
+//!
+//! ## Response Grid Columns
+//!
+//! | Column | Kind   | Description              |
+//! |--------|--------|--------------------------|
+//! | `def`  | Symbol | Definition symbol        |
+//! | `lib`  | Symbol | Owning library name      |
+//! | `doc`  | Str    | Documentation string     |
+//!
+//! Rows are sorted by `def` symbol.
+//!
+//! # libs (`POST /api/libs`)
+//!
+//! Returns all loaded ontology libraries.
+//!
+//! ## Response Grid Columns
+//!
+//! | Column    | Kind | Description       |
+//! |-----------|------|-------------------|
+//! | `name`    | Str  | Library name      |
+//! | `version` | Str  | Library version   |
+//!
+//! Rows are sorted by `name`.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — request grid decode failure.
+//! - **500 Internal Server Error** — encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 

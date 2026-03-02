@@ -1,4 +1,30 @@
 //! The `nav` op — navigate a project for entity discovery.
+//!
+//! # Overview
+//!
+//! `POST /api/nav` supports hierarchical entity browsing. With no `navId`
+//! it returns top-level sites; with a `navId` it returns children of that
+//! entity (equips under a site, points under an equip, etc.).
+//!
+//! # Request Grid Columns
+//!
+//! | Column  | Kind      | Description                               |
+//! |---------|-----------|-------------------------------------------|
+//! | `navId` | Ref / Str | *(optional)* Parent entity to navigate into. Omit for root. |
+//!
+//! # Response Grid Columns
+//!
+//! | Column  | Kind | Description                    |
+//! |---------|------|--------------------------------|
+//! | `id`    | Ref  | Entity reference               |
+//! | `dis`   | Str  | Display name                   |
+//! | `navId` | Str  | Navigation ID for drill-down   |
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — request grid decode failure.
+//! - **404 Not Found** — `navId` references a non-existent entity.
+//! - **500 Internal Server Error** — graph query or encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 

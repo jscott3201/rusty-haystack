@@ -1,4 +1,32 @@
 //! The `export` and `import` ops — bulk data import/export.
+//!
+//! # export (`POST /api/export`)
+//!
+//! No request grid. Returns all entities in the graph as a grid.
+//! The `Accept` header determines the response encoding (Zinc, JSON, etc.).
+//! Columns are derived from the union of all entity tags.
+//!
+//! # import (`POST /api/import`)
+//!
+//! ## Request Grid Columns
+//!
+//! Each row is an entity dict. Every row must have an `id` (Ref) tag.
+//! Additional columns are the entity tags to set.
+//!
+//! ## Response Grid Columns
+//!
+//! | Column  | Kind   | Description                      |
+//! |---------|--------|----------------------------------|
+//! | `count` | Number | Number of entities imported      |
+//!
+//! Existing entities are updated; new entities are added. Entities owned
+//! by a federation connector are proxied to the remote server.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — request grid decode failure.
+//! - **500 Internal Server Error** — graph add/update failure, federation proxy
+//!   error, or encoding error.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 

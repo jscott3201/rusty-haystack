@@ -72,6 +72,29 @@ impl Federation {
         all
     }
 
+    /// Filter cached entities across all connectors using bitmap-accelerated queries.
+    ///
+    /// Each connector uses its own bitmap tag index for fast filtering, then
+    /// results are merged up to the given limit. Much faster than linear scan
+    /// for tag-based queries over large federated entity sets.
+    pub fn filter_cached_entities(
+        &self,
+        filter_expr: &str,
+        limit: usize,
+    ) -> Result<Vec<HDict>, String> {
+        let effective_limit = if limit == 0 { usize::MAX } else { limit };
+        let mut all = Vec::new();
+        for connector in &self.connectors {
+            if all.len() >= effective_limit {
+                break;
+            }
+            let remaining = effective_limit - all.len();
+            let results = connector.filter_cached(filter_expr, remaining)?;
+            all.extend(results);
+        }
+        Ok(all)
+    }
+
     /// Returns the number of connectors.
     pub fn connector_count(&self) -> usize {
         self.connectors.len()
@@ -80,6 +103,44 @@ impl Federation {
     /// Returns the connector that owns the entity with the given ID, if any.
     pub fn owner_of(&self, id: &str) -> Option<&Arc<Connector>> {
         self.connectors.iter().find(|c| c.owns(id))
+    }
+
+    /// Batch read entities by ID across federated connectors.
+    ///
+    /// Groups IDs by owning connector and fetches each group in a single
+    /// indexed lookup (O(1) per ID via `cache_id_map`), avoiding repeated
+    /// linear scans. Returns `(found_entities, missing_ids)`.
+    pub fn batch_read_by_id<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> (Vec<HDict>, Vec<String>) {
+        // Group IDs by connector index.
+        let mut groups: HashMap<usize, Vec<&str>> = HashMap::new();
+        let mut not_owned: Vec<String> = Vec::new();
+
+        for id in ids {
+            let mut found = false;
+            for (idx, connector) in self.connectors.iter().enumerate() {
+                if connector.owns(id) {
+                    groups.entry(idx).or_default().push(id);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                not_owned.push(id.to_string());
+            }
+        }
+
+        // Fetch each group from its connector in a single pass.
+        let mut all_found = Vec::new();
+        for (idx, ids) in &groups {
+            let (found, mut missing) = self.connectors[*idx].batch_get_cached(ids);
+            all_found.extend(found);
+            not_owned.append(&mut missing);
+        }
+
+        (all_found, not_owned)
     }
 
     /// Returns `(name, entity_count)` for each connector.

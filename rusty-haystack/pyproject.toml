@@ -22,8 +22,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/justinscott/rusty-haystack"
-Repository = "https://github.com/justinscott/rusty-haystack"
+Homepage = "https://github.com/jscott3201/rusty-haystack"
+Repository = "https://github.com/jscott3201/rusty-haystack"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

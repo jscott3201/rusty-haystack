@@ -201,8 +201,8 @@ async fn auth_middleware(
                                 && !AuthManager::check_permission(&auth_user, required)
                             {
                                 return Err(crate::error::HaystackError::forbidden(format!(
-                                    "user '{}' lacks '{}' permission",
-                                    auth_user.username, required
+                                    "insufficient '{}' permission",
+                                    required
                                 ))
                                 .into());
                             }

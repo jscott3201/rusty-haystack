@@ -86,6 +86,18 @@ impl Default for RefAdjacency {
     }
 }
 
+impl RefAdjacency {
+    /// Read-only access to the forward edge map (for CSR construction).
+    pub fn forward_raw(&self) -> &HashMap<usize, SmallVec<[(String, String); 4]>> {
+        &self.forward
+    }
+
+    /// Read-only access to the reverse edge map (for CSR construction).
+    pub fn reverse_raw(&self) -> &HashMap<String, SmallVec<[(String, usize); 4]>> {
+        &self.reverse
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

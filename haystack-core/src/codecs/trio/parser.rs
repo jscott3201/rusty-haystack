@@ -73,8 +73,9 @@ fn parse_records(input: &str) -> Result<Vec<HDict>, CodecError> {
                 continue;
             } else {
                 // Non-indented line ends the multiline
-                let name = multiline_name.take().unwrap();
-                current_tags.push((name, Kind::Str(multiline_lines.join("\n"))));
+                if let Some(name) = multiline_name.take() {
+                    current_tags.push((name, Kind::Str(multiline_lines.join("\n"))));
+                }
                 multiline_lines.clear();
                 // Fall through to parse this line normally
             }

@@ -139,7 +139,7 @@ pub fn parse_password_hash(hash: &str) -> Result<ScramCredentials, String> {
 /// Returns the hash in the format accepted by [`parse_password_hash`].
 pub fn hash_password(password: &str) -> String {
     let mut salt = [0u8; 16];
-    use rand::Rng;
+    use rand::RngExt;
     rand::rng().fill(&mut salt);
 
     let creds = derive_credentials(password, &salt, DEFAULT_ITERATIONS);

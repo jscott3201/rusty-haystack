@@ -1,4 +1,55 @@
 //! Watch ops — subscribe, poll, and unsubscribe for entity changes.
+//!
+//! # Overview
+//!
+//! The watch ops allow clients to track changes to a set of entities.
+//! A watch is created via `watchSub`, polled via `watchPoll`, and
+//! torn down via `watchUnsub`.
+//!
+//! # watchSub (`POST /api/watchSub`)
+//!
+//! ## Request
+//!
+//! Grid meta may contain `watchId` (Str) to add IDs to an existing watch.
+//! Rows contain:
+//!
+//! | Column | Kind | Description            |
+//! |--------|------|------------------------|
+//! | `id`   | Ref  | Entity to subscribe to |
+//!
+//! ## Response
+//!
+//! Grid meta contains `watchId` (Str). Rows are the current state of
+//! each subscribed entity (one column per unique tag).
+//!
+//! # watchPoll (`POST /api/watchPoll`)
+//!
+//! ## Request
+//!
+//! Grid meta must contain `watchId` (Str). No rows required.
+//!
+//! ## Response
+//!
+//! Rows are entities that changed since the last poll. Empty grid if
+//! no changes occurred.
+//!
+//! # watchUnsub (`POST /api/watchUnsub`)
+//!
+//! ## Request
+//!
+//! Grid meta must contain `watchId` (Str). Rows may contain `id` (Ref)
+//! to selectively remove entities. If no rows are present, the entire
+//! watch is deleted.
+//!
+//! ## Response
+//!
+//! Empty grid on success.
+//!
+//! # Errors
+//!
+//! - **400 Bad Request** — missing `id` rows, missing `watchId` in meta, or
+//!   request decode failure.
+//! - **404 Not Found** — `watchId` does not exist or caller is not the owner.
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 

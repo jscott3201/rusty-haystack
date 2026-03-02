@@ -1,14 +1,22 @@
 use std::fmt;
 
-/// Geographic coordinate (latitude/longitude in decimal degrees).
-/// Zinc: `C(37.55,-77.45)`
+/// A geographic coordinate represented as latitude and longitude in decimal degrees.
+///
+/// This is the Haystack `Coord` scalar kind. Latitude must be in the range
+/// −90 to 90 and longitude in −180 to 180. Displayed in Zinc as `C(lat,lng)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coord {
+    /// Latitude in decimal degrees (−90 … 90).
     pub lat: f64,
+    /// Longitude in decimal degrees (−180 … 180).
     pub lng: f64,
 }
 
 impl Coord {
+    /// Creates a new `Coord` from the given latitude and longitude.
+    ///
+    /// Both values are stored as-is; callers are responsible for ensuring
+    /// that `lat` is within −90..=90 and `lng` is within −180..=180.
     pub fn new(lat: f64, lng: f64) -> Self {
         Self { lat, lng }
     }

@@ -1,8 +1,37 @@
-//! The `about` op — server info and SCRAM authentication handshake.
+//! The `about` op — server identity and SCRAM authentication handshake.
 //!
-//! GET /api/about is dual-purpose:
-//! - Unauthenticated (HELLO/SCRAM): handles the SCRAM handshake phases
-//! - Authenticated (BEARER): returns the server about grid
+//! # Overview
+//!
+//! `GET /api/about` is dual-purpose:
+//! - **Unauthenticated** (HELLO / SCRAM): drives the three-phase SCRAM
+//!   SHA-256 handshake (HELLO → server challenge, SCRAM → client proof
+//!   verification, BEARER → authenticated access).
+//! - **Authenticated** (BEARER token): returns the server about grid.
+//!
+//! `POST /api/close` revokes the bearer token (logout).
+//!
+//! # Request
+//!
+//! No request grid is required. Authentication state is conveyed via the
+//! `Authorization` header (`HELLO`, `SCRAM`, or `BEARER` scheme).
+//!
+//! # Response Grid Columns
+//!
+//! | Column          | Kind | Description                          |
+//! |-----------------|------|--------------------------------------|
+//! | `haystackVersion` | Str | Haystack specification version (e.g. `"4.0"`) |
+//! | `serverName`    | Str  | Server implementation name           |
+//! | `serverVersion` | Str  | Server software version              |
+//! | `productName`   | Str  | Product name                         |
+//! | `productUri`    | Uri  | Product homepage URI                 |
+//! | `moduleName`    | Str  | Module / crate name                  |
+//! | `moduleVersion` | Str  | Module / crate version               |
+//!
+//! # Errors
+//!
+//! - **401 Unauthorized** — missing or invalid `Authorization` header.
+//! - **403 Forbidden** — HELLO lookup failed or SCRAM proof verification failed.
+//! - **500 Internal Server Error** — grid encoding failure.
 
 use actix_web::http::StatusCode;
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
@@ -96,6 +125,9 @@ pub async fn handle(req: HttpRequest, state: web::Data<AppState>) -> HttpRespons
 }
 
 /// POST /api/close — revoke the bearer token (logout).
+///
+/// Invalidates the BEARER auth token supplied in the `Authorization`
+/// header and returns an empty grid on success.
 pub async fn handle_close(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let accept = req
         .headers()
@@ -129,16 +161,16 @@ fn respond_about_grid(accept: &str) -> HttpResponse {
     let mut row = HDict::new();
     row.set("haystackVersion", Kind::Str("4.0".to_string()));
     row.set("serverName", Kind::Str("rusty-haystack".to_string()));
-    row.set("serverVersion", Kind::Str("0.1.0".to_string()));
+    row.set("serverVersion", Kind::Str("0.5.0".to_string()));
     row.set("productName", Kind::Str("rusty-haystack".to_string()));
     row.set(
         "productUri",
         Kind::Uri(haystack_core::kinds::Uri::new(
-            "https://github.com/example/rusty-haystack",
+            "https://github.com/jscott3201/rusty-haystack",
         )),
     );
     row.set("moduleName", Kind::Str("haystack-server".to_string()));
-    row.set("moduleVersion", Kind::Str("0.1.0".to_string()));
+    row.set("moduleVersion", Kind::Str("0.5.0".to_string()));
 
     let cols = vec![
         HCol::new("haystackVersion"),

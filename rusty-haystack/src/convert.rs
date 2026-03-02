@@ -11,7 +11,7 @@ use crate::kinds::{
 };
 
 /// Convert a Rust Kind to a Python object.
-pub fn kind_to_py(py: Python<'_>, kind: &Kind) -> PyResult<PyObject> {
+pub fn kind_to_py(py: Python<'_>, kind: &Kind) -> PyResult<Py<PyAny>> {
     match kind {
         Kind::Null => Ok(py.None()),
         Kind::Marker => Ok(PyMarker::new().into_pyobject(py)?.into_any().unbind()),
