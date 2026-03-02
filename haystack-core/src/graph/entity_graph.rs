@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 
 use crate::data::{HCol, HDict, HGrid};
-use crate::filter::{matches_with_ns, parse_filter};
+use crate::filter::{FilterNode, matches_with_ns, parse_filter};
 use crate::kinds::{HRef, Kind};
 use crate::ontology::{DefNamespace, ValidationIssue};
 
@@ -56,6 +57,8 @@ pub struct EntityGraph {
     /// LRU query cache: (filter, version) → matching ref_vals.
     /// Uses Mutex for interior mutability since read_all takes &self.
     query_cache: Mutex<QueryCache>,
+    /// Parsed filter AST cache: filter_string → AST (version-independent).
+    ast_cache: Mutex<HashMap<String, FilterNode>>,
     /// Optional B-Tree value indexes for comparison-based filter acceleration.
     value_index: ValueIndex,
     /// CSR snapshot of adjacency for cache-friendly traversal.
@@ -67,61 +70,53 @@ pub struct EntityGraph {
     columnar: ColumnarStore,
 }
 
-/// Simple fixed-capacity LRU cache for filter query results.
+/// Fixed-capacity LRU cache for filter query results using IndexMap for O(1) ops.
 struct QueryCache {
-    entries: Vec<QueryCacheEntry>,
+    /// (filter, version) → matching ref_vals. Most-recently-used at the back.
+    entries: IndexMap<(String, u64), Vec<String>>,
     capacity: usize,
-}
-
-struct QueryCacheEntry {
-    filter: String,
-    version: u64,
-    ref_vals: Vec<String>,
 }
 
 impl QueryCache {
     fn new(capacity: usize) -> Self {
         Self {
-            entries: Vec::with_capacity(capacity),
+            entries: IndexMap::with_capacity(capacity),
             capacity,
         }
     }
 
     fn get(&mut self, filter: &str, version: u64) -> Option<&[String]> {
-        let pos = self
-            .entries
-            .iter()
-            .position(|e| e.version == version && e.filter == filter)?;
-        // Move to front (most recently used)
-        if pos > 0 {
-            let entry = self.entries.remove(pos);
-            self.entries.insert(0, entry);
-        }
-        Some(&self.entries[0].ref_vals)
+        // Move to back (most recently used) on access.
+        let key = (filter.to_string(), version);
+        let idx = self.entries.get_index_of(&key)?;
+        self.entries.move_index(idx, self.entries.len() - 1);
+        self.entries.get(&key).map(|v| v.as_slice())
     }
 
     fn insert(&mut self, filter: String, version: u64, ref_vals: Vec<String>) {
-        // Evict oldest if at capacity
         if self.entries.len() >= self.capacity {
-            self.entries.pop();
+            // Evict least recently used (front).
+            self.entries.shift_remove_index(0);
         }
-        self.entries.insert(
-            0,
-            QueryCacheEntry {
-                filter,
-                version,
-                ref_vals,
-            },
-        );
+        self.entries.insert((filter, version), ref_vals);
     }
 }
 
 const MAX_CHANGELOG: usize = 10_000;
 const QUERY_CACHE_CAPACITY: usize = 256;
 
+/// Common Haystack fields to auto-index for O(log N) value lookups.
+const AUTO_INDEX_FIELDS: &[&str] = &[
+    "siteRef", "equipRef", "dis", "curVal", "area", "geoCity", "kind", "unit",
+];
+
 impl EntityGraph {
-    /// Create an empty entity graph.
+    /// Create an empty entity graph with standard Haystack fields auto-indexed.
     pub fn new() -> Self {
+        let mut value_index = ValueIndex::new();
+        for field in AUTO_INDEX_FIELDS {
+            value_index.index_field(field);
+        }
         Self {
             entities: HashMap::new(),
             id_map: HashMap::new(),
@@ -133,7 +128,8 @@ impl EntityGraph {
             version: 0,
             changelog: std::collections::VecDeque::new(),
             query_cache: Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
-            value_index: ValueIndex::new(),
+            ast_cache: Mutex::new(HashMap::new()),
+            value_index,
             csr: None,
             csr_version: 0,
             columnar: ColumnarStore::new(),
@@ -371,14 +367,26 @@ impl EntityGraph {
             }
         }
 
-        let ast = parse_filter(filter_expr).map_err(|e| GraphError::Filter(e.to_string()))?;
+        // Use cached AST or parse and cache it (ASTs are version-independent).
+        let ast = {
+            let mut ast_cache = self.ast_cache.lock();
+            if let Some(cached) = ast_cache.get(filter_expr) {
+                cached.clone()
+            } else {
+                let parsed =
+                    parse_filter(filter_expr).map_err(|e| GraphError::Filter(e.to_string()))?;
+                ast_cache.insert(filter_expr.to_string(), parsed.clone());
+                parsed
+            }
+        };
 
-        // Phase 1: bitmap acceleration (with value index enhancement).
+        // Phase 1: bitmap acceleration (with value index + adjacency).
         let max_id = self.next_id;
         let candidates = query_planner::bitmap_candidates_with_values(
             &ast,
             &self.tag_index,
             &self.value_index,
+            &self.adjacency,
             max_id,
         );
 
@@ -386,16 +394,17 @@ impl EntityGraph {
         let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
         let ns = self.namespace.as_ref();
 
-        /// Threshold for parallel evaluation — below this, sequential is faster.
+        // Use parallel evaluation only for large unlimited queries where rayon
+        // overhead is worthwhile. Bounded queries always use sequential + early exit.
         const PARALLEL_THRESHOLD: usize = 500;
+        let use_parallel = effective_limit == usize::MAX;
 
         let mut results: Vec<&HDict>;
 
         if let Some(ref bitmap) = candidates {
             let candidate_ids: Vec<usize> = TagBitmapIndex::iter_set_bits(bitmap).collect();
 
-            if candidate_ids.len() >= PARALLEL_THRESHOLD && effective_limit == usize::MAX {
-                // Parallel path for large, unlimited queries.
+            if candidate_ids.len() >= PARALLEL_THRESHOLD && use_parallel {
                 results = candidate_ids
                     .par_iter()
                     .filter_map(|&eid| {
@@ -409,7 +418,6 @@ impl EntityGraph {
                     })
                     .collect();
             } else {
-                // Sequential path for small sets or limited queries.
                 results = Vec::new();
                 for eid in TagBitmapIndex::iter_set_bits(bitmap) {
                     if results.len() >= effective_limit {
@@ -426,8 +434,7 @@ impl EntityGraph {
         } else {
             let entity_count = self.entities.len();
 
-            if entity_count >= PARALLEL_THRESHOLD && effective_limit == usize::MAX {
-                // Parallel full scan for large, unlimited queries.
+            if entity_count >= PARALLEL_THRESHOLD && use_parallel {
                 results = self
                     .entities
                     .par_iter()
@@ -440,7 +447,6 @@ impl EntityGraph {
                     })
                     .collect();
             } else {
-                // Sequential full scan.
                 results = Vec::new();
                 for entity in self.entities.values() {
                     if results.len() >= effective_limit {
@@ -453,7 +459,6 @@ impl EntityGraph {
             }
         }
 
-        // Apply limit to parallel results.
         if results.len() > effective_limit {
             results.truncate(effective_limit);
         }
@@ -552,43 +557,53 @@ impl EntityGraph {
     ) -> (Vec<&HDict>, Vec<(String, String, String)>) {
         use std::collections::{HashSet, VecDeque};
 
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        let start_eid = match self.id_map.get(ref_val) {
+            Some(&eid) => eid,
+            None => return (Vec::new(), Vec::new()),
+        };
+
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
         let mut result_entities: Vec<&HDict> = Vec::new();
         let mut result_edges: Vec<(String, String, String)> = Vec::new();
 
-        visited.insert(ref_val.to_string());
-        queue.push_back((ref_val.to_string(), 0));
+        visited.insert(start_eid);
+        queue.push_back((start_eid, 0));
 
         if let Some(entity) = self.entities.get(ref_val) {
             result_entities.push(entity);
         }
 
-        while let Some((current, depth)) = queue.pop_front() {
+        while let Some((current_eid, depth)) = queue.pop_front() {
             if depth >= hops {
                 continue;
             }
+            let current_ref = match self.reverse_id.get(&current_eid) {
+                Some(s) => s.as_str(),
+                None => continue,
+            };
+
             // Traverse forward edges
-            if let Some(&eid) = self.id_map.get(&current)
-                && let Some(fwd) = self.adjacency.forward_raw().get(&eid)
-            {
+            if let Some(fwd) = self.adjacency.forward_raw().get(&current_eid) {
                 for (ref_tag, target) in fwd {
                     if let Some(types) = ref_types
                         && !types.iter().any(|t| t == ref_tag)
                     {
                         continue;
                     }
-                    result_edges.push((current.clone(), ref_tag.clone(), target.clone()));
-                    if visited.insert(target.clone()) {
+                    result_edges.push((current_ref.to_string(), ref_tag.clone(), target.clone()));
+                    if let Some(&target_eid) = self.id_map.get(target.as_str())
+                        && visited.insert(target_eid)
+                    {
                         if let Some(entity) = self.entities.get(target.as_str()) {
                             result_entities.push(entity);
                         }
-                        queue.push_back((target.clone(), depth + 1));
+                        queue.push_back((target_eid, depth + 1));
                     }
                 }
             }
             // Traverse reverse edges
-            if let Some(rev) = self.adjacency.reverse_raw().get(&current) {
+            if let Some(rev) = self.adjacency.reverse_raw().get(current_ref) {
                 for (ref_tag, source_eid) in rev {
                     if let Some(types) = ref_types
                         && !types.iter().any(|t| t == ref_tag)
@@ -596,12 +611,16 @@ impl EntityGraph {
                         continue;
                     }
                     if let Some(source_ref) = self.reverse_id.get(source_eid) {
-                        result_edges.push((source_ref.clone(), ref_tag.clone(), current.clone()));
-                        if visited.insert(source_ref.clone()) {
+                        result_edges.push((
+                            source_ref.clone(),
+                            ref_tag.clone(),
+                            current_ref.to_string(),
+                        ));
+                        if visited.insert(*source_eid) {
                             if let Some(entity) = self.entities.get(source_ref.as_str()) {
                                 result_entities.push(entity);
                             }
-                            queue.push_back((source_ref.clone(), depth + 1));
+                            queue.push_back((*source_eid, depth + 1));
                         }
                     }
                 }
@@ -628,41 +647,59 @@ impl EntityGraph {
         if from == to {
             return vec![from.to_string()];
         }
-        if !self.entities.contains_key(from) || !self.entities.contains_key(to) {
-            return Vec::new();
-        }
+        let from_eid = match self.id_map.get(from) {
+            Some(&eid) => eid,
+            None => return Vec::new(),
+        };
+        let to_eid = match self.id_map.get(to) {
+            Some(&eid) => eid,
+            None => return Vec::new(),
+        };
 
-        let mut visited: StdHashMap<String, String> = StdHashMap::new(); // child -> parent
-        let mut queue: VecDeque<String> = VecDeque::new();
-        visited.insert(from.to_string(), String::new());
-        queue.push_back(from.to_string());
+        // parent map: child_eid -> parent_eid (usize::MAX = root sentinel)
+        let mut parents: StdHashMap<usize, usize> = StdHashMap::new();
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        parents.insert(from_eid, usize::MAX);
+        queue.push_back(from_eid);
 
-        while let Some(current) = queue.pop_front() {
+        while let Some(current_eid) = queue.pop_front() {
+            let current_ref = match self.reverse_id.get(&current_eid) {
+                Some(s) => s.as_str(),
+                None => continue,
+            };
+
             // Forward edges
-            if let Some(&eid) = self.id_map.get(&current)
-                && let Some(fwd) = self.adjacency.forward_raw().get(&eid)
-            {
+            if let Some(fwd) = self.adjacency.forward_raw().get(&current_eid) {
                 for (_, target) in fwd {
-                    if !visited.contains_key(target) {
-                        visited.insert(target.clone(), current.clone());
-                        if target == to {
-                            return Self::reconstruct_path(&visited, to);
+                    if let Some(&target_eid) = self.id_map.get(target.as_str())
+                        && let std::collections::hash_map::Entry::Vacant(e) =
+                            parents.entry(target_eid)
+                    {
+                        e.insert(current_eid);
+                        if target_eid == to_eid {
+                            return Self::reconstruct_path_usize(
+                                &parents,
+                                to_eid,
+                                &self.reverse_id,
+                            );
                         }
-                        queue.push_back(target.clone());
+                        queue.push_back(target_eid);
                     }
                 }
             }
             // Reverse edges
-            if let Some(rev) = self.adjacency.reverse_raw().get(&current) {
+            if let Some(rev) = self.adjacency.reverse_raw().get(current_ref) {
                 for (_, source_eid) in rev {
-                    if let Some(source_ref) = self.reverse_id.get(source_eid)
-                        && !visited.contains_key(source_ref)
-                    {
-                        visited.insert(source_ref.clone(), current.clone());
-                        if source_ref == to {
-                            return Self::reconstruct_path(&visited, to);
+                    if !parents.contains_key(source_eid) {
+                        parents.insert(*source_eid, current_eid);
+                        if *source_eid == to_eid {
+                            return Self::reconstruct_path_usize(
+                                &parents,
+                                to_eid,
+                                &self.reverse_id,
+                            );
                         }
-                        queue.push_back(source_ref.clone());
+                        queue.push_back(*source_eid);
                     }
                 }
             }
@@ -671,22 +708,26 @@ impl EntityGraph {
         Vec::new() // No path found
     }
 
-    /// Reconstruct path from BFS parent map.
-    fn reconstruct_path(
-        parents: &std::collections::HashMap<String, String>,
-        to: &str,
+    /// Reconstruct path from usize-based BFS parent map.
+    fn reconstruct_path_usize(
+        parents: &std::collections::HashMap<usize, usize>,
+        to_eid: usize,
+        reverse_id: &HashMap<usize, String>,
     ) -> Vec<String> {
-        let mut path = vec![to.to_string()];
-        let mut current = to.to_string();
-        while let Some(parent) = parents.get(&current) {
-            if parent.is_empty() {
+        let mut path_eids = vec![to_eid];
+        let mut current = to_eid;
+        while let Some(&parent) = parents.get(&current) {
+            if parent == usize::MAX {
                 break;
             }
-            path.push(parent.clone());
-            current = parent.clone();
+            path_eids.push(parent);
+            current = parent;
         }
-        path.reverse();
-        path
+        path_eids.reverse();
+        path_eids
+            .iter()
+            .filter_map(|eid| reverse_id.get(eid).cloned())
+            .collect()
     }
 
     /// Return the subtree rooted at `root` up to `max_depth` levels.

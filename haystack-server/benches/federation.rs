@@ -113,6 +113,7 @@ impl TestServer {
         auth: Option<AuthManager>,
         federation: Option<Federation>,
     ) -> Self {
+        haystack_client::ensure_crypto_provider();
         let port = free_port();
         let ns = DefNamespace::load_standard().unwrap();
 

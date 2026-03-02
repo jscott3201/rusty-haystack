@@ -124,6 +124,8 @@ pub fn encode_meta(d: &HDict) -> Result<String, CodecError> {
 
 /// Encode an HGrid to the Zinc wire format.
 pub fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
+    use std::fmt::Write;
+
     let mut buf = String::new();
 
     // Line 1: version + grid meta
@@ -134,37 +136,34 @@ pub fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
     }
     buf.push('\n');
 
-    // Line 2: columns
+    // Line 2: columns — write directly, comma-delimited.
     if grid.cols.is_empty() {
         buf.push_str("empty\n");
     } else {
-        let col_parts: Result<Vec<String>, CodecError> = grid
-            .cols
-            .iter()
-            .map(|col| {
-                let mut s = col.name.clone();
-                if !col.meta.is_empty() {
-                    s.push(' ');
-                    s.push_str(&encode_meta(&col.meta)?);
-                }
-                Ok(s)
-            })
-            .collect();
-        buf.push_str(&col_parts?.join(","));
+        for (i, col) in grid.cols.iter().enumerate() {
+            if i > 0 {
+                buf.push(',');
+            }
+            buf.push_str(&col.name);
+            if !col.meta.is_empty() {
+                buf.push(' ');
+                buf.push_str(&encode_meta(&col.meta)?);
+            }
+        }
         buf.push('\n');
     }
 
-    // Rows
+    // Rows — write cells directly, comma-delimited.
     for row in &grid.rows {
-        let cells: Result<Vec<String>, CodecError> = grid
-            .cols
-            .iter()
-            .map(|col| match row.get(&col.name) {
-                Some(val) => encode_scalar(val),
-                None => Ok("N".to_string()),
-            })
-            .collect();
-        buf.push_str(&cells?.join(","));
+        for (i, col) in grid.cols.iter().enumerate() {
+            if i > 0 {
+                buf.push(',');
+            }
+            match row.get(&col.name) {
+                Some(val) => write!(buf, "{}", encode_scalar(val)?).unwrap(),
+                None => buf.push('N'),
+            }
+        }
         buf.push('\n');
     }
 

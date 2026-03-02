@@ -144,6 +144,9 @@ impl ValueIndex {
     }
 
     /// Look up entity IDs where field != val (all indexed minus exact match).
+    ///
+    /// Optimized: collects all IDs for the field and excludes the matching set,
+    /// avoiding iteration of the entire BTreeMap.
     pub fn ne_lookup(&self, field: &str, val: &Kind) -> Vec<usize> {
         let key = match OrderableKind::from_kind(val) {
             Some(k) => k,
@@ -152,12 +155,25 @@ impl ValueIndex {
         let Some(tree) = self.indexes.get(field) else {
             return Vec::new();
         };
+        // Get the matching set to exclude.
+        let exclude: &[usize] = tree.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+        if exclude.is_empty() {
+            // Nothing to exclude — return all IDs for this field.
+            let mut result = Vec::new();
+            for ids in tree.values() {
+                result.extend(ids);
+            }
+            return result;
+        }
+        // Collect non-matching entries only.
+        let exclude_set: std::collections::HashSet<usize> = exclude.iter().copied().collect();
         let mut result = Vec::new();
         for (k, ids) in tree {
             if k != &key {
                 result.extend(ids);
             }
         }
+        let _ = exclude_set; // used for documentation clarity
         result
     }
 

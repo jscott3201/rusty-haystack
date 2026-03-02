@@ -44,6 +44,6 @@ pub use error::ClientError;
 ///
 /// Called automatically by client constructors. Safe to call multiple times;
 /// only the first call has effect.
-fn ensure_crypto_provider() {
+pub fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

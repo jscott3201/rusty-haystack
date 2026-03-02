@@ -96,6 +96,21 @@ impl RefAdjacency {
     pub fn reverse_raw(&self) -> &HashMap<String, SmallVec<[(String, usize); 4]>> {
         &self.reverse
     }
+
+    /// Get entity IDs that reference `target_ref_val` via `ref_tag`.
+    ///
+    /// Used by the query planner to produce bitmap candidates for ref equality
+    /// filters (e.g. `siteRef == @site-0`) without a full entity scan.
+    pub fn sources_for(&self, ref_tag: &str, target_ref_val: &str) -> Vec<usize> {
+        match self.reverse.get(target_ref_val) {
+            Some(edges) => edges
+                .iter()
+                .filter(|(rt, _)| rt == ref_tag)
+                .map(|(_, eid)| *eid)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

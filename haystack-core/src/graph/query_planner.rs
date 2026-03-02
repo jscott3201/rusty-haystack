@@ -10,9 +10,25 @@
 // comparison nodes), causing the caller to fall back to a full scan.
 
 use crate::filter::{CmpOp, FilterNode};
+use crate::kinds::Kind;
 
+use super::adjacency::RefAdjacency;
 use super::bitmap::TagBitmapIndex;
 use super::value_index::ValueIndex;
+
+/// Helper: convert a list of entity IDs into a bitmap.
+fn ids_to_bitmap(entity_ids: &[usize], max_id: usize) -> Vec<u64> {
+    if max_id == 0 {
+        return Vec::new();
+    }
+    let mut bitmap = vec![0u64; max_id.div_ceil(64)];
+    for &eid in entity_ids {
+        if eid < max_id {
+            bitmap[eid / 64] |= 1u64 << (eid % 64);
+        }
+    }
+    bitmap
+}
 
 /// Compute a bitmap of candidate entity ids that *may* match the given
 /// filter node, using tag presence bitmaps only.
@@ -99,21 +115,36 @@ pub fn bitmap_candidates(
     }
 }
 
-/// Enhanced candidate computation that uses B-Tree value indexes for Cmp nodes
-/// in addition to tag bitmap indexes.
+/// Enhanced candidate computation that uses B-Tree value indexes and
+/// ref adjacency for Cmp nodes in addition to tag bitmap indexes.
 ///
 /// When a `Cmp` node references a single-segment path with an available value
 /// index, this produces a precise candidate set (only entities whose value
 /// satisfies the comparison) rather than just tag-existence candidates.
+///
+/// For Ref equality (`siteRef == @site-0`), uses the adjacency reverse map
+/// to produce an exact bitmap without scanning entities.
 ///
 /// Falls back to `bitmap_candidates` behavior for non-indexed fields.
 pub fn bitmap_candidates_with_values(
     node: &FilterNode,
     tag_index: &TagBitmapIndex,
     value_index: &ValueIndex,
+    adjacency: &RefAdjacency,
     max_id: usize,
 ) -> Option<Vec<u64>> {
     match node {
+        // Ref equality: use adjacency reverse map for O(1) lookup.
+        FilterNode::Cmp {
+            path,
+            op: CmpOp::Eq,
+            val: Kind::Ref(r),
+        } if path.is_single() => {
+            let field = path.first();
+            let entity_ids = adjacency.sources_for(field, &r.val);
+            Some(ids_to_bitmap(&entity_ids, max_id))
+        }
+
         FilterNode::Cmp { path, op, val }
             if path.is_single() && value_index.has_index(path.first()) =>
         {
@@ -127,19 +158,12 @@ pub fn bitmap_candidates_with_values(
                 CmpOp::Ge => value_index.ge_lookup(field, val),
             };
 
-            // Convert entity IDs to a bitmap.
-            let mut bitmap = vec![0u64; max_id.div_ceil(64)];
-            for eid in entity_ids {
-                if eid < max_id {
-                    bitmap[eid / 64] |= 1u64 << (eid % 64);
-                }
-            }
-            Some(bitmap)
+            Some(ids_to_bitmap(&entity_ids, max_id))
         }
 
         FilterNode::And(left, right) => {
-            let l = bitmap_candidates_with_values(left, tag_index, value_index, max_id);
-            let r = bitmap_candidates_with_values(right, tag_index, value_index, max_id);
+            let l = bitmap_candidates_with_values(left, tag_index, value_index, adjacency, max_id);
+            let r = bitmap_candidates_with_values(right, tag_index, value_index, adjacency, max_id);
             match (l, r) {
                 (Some(lb), Some(rb)) => {
                     let lc = TagBitmapIndex::count_ones(&lb);
@@ -159,8 +183,8 @@ pub fn bitmap_candidates_with_values(
         }
 
         FilterNode::Or(left, right) => {
-            let l = bitmap_candidates_with_values(left, tag_index, value_index, max_id);
-            let r = bitmap_candidates_with_values(right, tag_index, value_index, max_id);
+            let l = bitmap_candidates_with_values(left, tag_index, value_index, adjacency, max_id);
+            let r = bitmap_candidates_with_values(right, tag_index, value_index, adjacency, max_id);
             match (l, r) {
                 (Some(lb), Some(rb)) => Some(TagBitmapIndex::union(&[&lb, &rb])),
                 _ => None,

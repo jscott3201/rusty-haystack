@@ -145,18 +145,72 @@ pub struct ConnectorConfig {
 /// A connector that can fetch entities from a remote Haystack server.
 ///
 /// Holds a persistent connection, a local entity cache with bitmap index,
+/// Consolidated cache state — entities, ownership set, bitmap index, and ID map
+/// bundled under a single lock for atomic reads/updates and consistency.
+struct CacheState {
+    entities: Vec<HDict>,
+    owned_ids: HashSet<String>,
+    tag_index: TagBitmapIndex,
+    id_map: HashMap<String, usize>,
+}
+
+impl CacheState {
+    fn empty() -> Self {
+        Self {
+            entities: Vec::new(),
+            owned_ids: HashSet::new(),
+            tag_index: TagBitmapIndex::new(),
+            id_map: HashMap::new(),
+        }
+    }
+
+    /// Build a fully indexed cache state from a list of entities.
+    fn build(entities: Vec<HDict>) -> Self {
+        let mut owned_ids = HashSet::with_capacity(entities.len());
+        let mut tag_index = TagBitmapIndex::new();
+        let mut id_map = HashMap::with_capacity(entities.len());
+
+        for (eid, entity) in entities.iter().enumerate() {
+            if let Some(Kind::Ref(r)) = entity.get("id") {
+                owned_ids.insert(r.val.clone());
+                id_map.insert(r.val.clone(), eid);
+            }
+            let tags: Vec<String> = entity.tag_names().map(|s| s.to_string()).collect();
+            tag_index.add(eid, &tags);
+        }
+
+        Self {
+            entities,
+            owned_ids,
+            tag_index,
+            id_map,
+        }
+    }
+
+    /// Rebuild tag index and id_map from current entities.
+    fn rebuild_index(&mut self) {
+        self.owned_ids.clear();
+        self.tag_index = TagBitmapIndex::new();
+        self.id_map.clear();
+
+        for (eid, entity) in self.entities.iter().enumerate() {
+            if let Some(Kind::Ref(r)) = entity.get("id") {
+                self.owned_ids.insert(r.val.clone());
+                self.id_map.insert(r.val.clone(), eid);
+            }
+            let tags: Vec<String> = entity.tag_names().map(|s| s.to_string()).collect();
+            self.tag_index.add(eid, &tags);
+        }
+    }
+}
+
 /// and state for adaptive sync and federation proxy operations. See the
 /// [module-level documentation](self) for the full lifecycle.
 pub struct Connector {
     pub config: ConnectorConfig,
-    /// Cached entities from last sync.
-    cache: RwLock<Vec<HDict>>,
-    /// Set of entity IDs owned by this connector (populated during sync/update_cache).
-    owned_ids: RwLock<HashSet<String>>,
-    /// Bitmap tag index over cached entities for fast filtered reads.
-    cache_index: RwLock<TagBitmapIndex>,
-    /// Maps entity ref_val → numeric cache index for bitmap lookups.
-    cache_id_map: RwLock<HashMap<String, usize>>,
+    /// Consolidated cache state: entities, ownership index, bitmap tag index, and
+    /// ID→position map — all under a single lock for atomic consistency.
+    cache_state: RwLock<CacheState>,
     /// Entity IDs being watched remotely (prefixed IDs).
     remote_watch_ids: RwLock<HashSet<String>>,
     /// Transport protocol (HTTP or WebSocket).
@@ -186,10 +240,7 @@ impl Connector {
         let base_interval = config.effective_sync_interval_secs();
         Self {
             config,
-            cache: RwLock::new(Vec::new()),
-            owned_ids: RwLock::new(HashSet::new()),
-            cache_index: RwLock::new(TagBitmapIndex::new()),
-            cache_id_map: RwLock::new(HashMap::new()),
+            cache_state: RwLock::new(CacheState::empty()),
             remote_watch_ids: RwLock::new(HashSet::new()),
             transport_mode: AtomicU8::new(TransportMode::Http as u8),
             connected: AtomicBool::new(false),
@@ -373,12 +424,11 @@ impl Connector {
         if grid.rows.is_empty() {
             *self.last_remote_version.write() = Some(cur_ver);
             *self.last_sync.write() = Some(Utc::now());
-            return Ok(self.cache.read().len());
+            return Ok(self.cache_state.read().entities.len());
         }
 
-        // Apply diffs to a mutable copy of the cache.
-        let mut cache = self.cache.read().clone();
-        let mut id_to_idx: HashMap<String, usize> = self.cache_id_map.read().clone();
+        // Apply diffs in-place under a single write lock.
+        let mut state = self.cache_state.write();
         let prefix = self.config.id_prefix.as_deref();
 
         for row in &grid.rows {
@@ -398,7 +448,6 @@ impl Connector {
                         if let Some(pfx) = prefix {
                             prefix_refs(&mut entity, pfx);
                         }
-                        // Get the (potentially prefixed) ID.
                         let entity_id = entity.get("id").and_then(|k| {
                             if let Kind::Ref(r) = k {
                                 Some(r.val.clone())
@@ -408,14 +457,14 @@ impl Connector {
                         });
 
                         if let Some(ref eid) = entity_id {
-                            if let Some(&idx) = id_to_idx.get(eid.as_str()) {
+                            if let Some(&idx) = state.id_map.get(eid.as_str()) {
                                 // Update in place.
-                                cache[idx] = entity;
+                                state.entities[idx] = entity;
                             } else {
                                 // Add new entity.
-                                let idx = cache.len();
-                                id_to_idx.insert(eid.clone(), idx);
-                                cache.push(entity);
+                                let idx = state.entities.len();
+                                state.id_map.insert(eid.clone(), idx);
+                                state.entities.push(entity);
                             }
                         }
                     }
@@ -425,32 +474,36 @@ impl Connector {
                         Some(pfx) => format!("{pfx}{ref_val}"),
                         None => ref_val,
                     };
-                    if let Some(&idx) = id_to_idx.get(prefixed_ref.as_str()) {
-                        // Swap-remove and fix up the id_to_idx map.
-                        let last_idx = cache.len() - 1;
+                    if let Some(&idx) = state.id_map.get(prefixed_ref.as_str()) {
+                        // Swap-remove and fix up the id_map.
+                        let last_idx = state.entities.len() - 1;
                         if idx != last_idx {
-                            let last_id = cache[last_idx].get("id").and_then(|k| {
+                            let last_id = state.entities[last_idx].get("id").and_then(|k| {
                                 if let Kind::Ref(r) = k {
                                     Some(r.val.clone())
                                 } else {
                                     None
                                 }
                             });
-                            cache.swap(idx, last_idx);
+                            state.entities.swap(idx, last_idx);
                             if let Some(lid) = last_id {
-                                id_to_idx.insert(lid, idx);
+                                state.id_map.insert(lid, idx);
                             }
                         }
-                        cache.pop();
-                        id_to_idx.remove(prefixed_ref.as_str());
+                        state.entities.pop();
+                        state.id_map.remove(prefixed_ref.as_str());
                     }
                 }
                 _ => {}
             }
         }
 
-        let count = cache.len();
-        self.update_cache(cache);
+        // Rebuild index after in-place mutations.
+        state.rebuild_index();
+
+        let count = state.entities.len();
+        drop(state);
+
         *self.last_remote_version.write() = Some(cur_ver);
         *self.last_sync.write() = Some(Utc::now());
         self.connected.store(true, Ordering::Relaxed);
@@ -463,48 +516,33 @@ impl Connector {
     /// builds a bitmap tag index for fast filtered reads, then atomically
     /// replaces the cache, ownership set, and index.
     pub fn update_cache(&self, entities: Vec<HDict>) {
-        let mut ids = HashSet::with_capacity(entities.len());
-        let mut tag_index = TagBitmapIndex::new();
-        let mut id_map = HashMap::with_capacity(entities.len());
-
-        for (eid, entity) in entities.iter().enumerate() {
-            if let Some(Kind::Ref(r)) = entity.get("id") {
-                ids.insert(r.val.clone());
-                id_map.insert(r.val.clone(), eid);
-            }
-
-            let tags: Vec<String> = entity.tag_names().map(|s| s.to_string()).collect();
-            tag_index.add(eid, &tags);
-        }
-
-        *self.cache.write() = entities;
-        *self.owned_ids.write() = ids;
-        *self.cache_index.write() = tag_index;
-        *self.cache_id_map.write() = id_map;
+        *self.cache_state.write() = CacheState::build(entities);
     }
 
     /// Returns `true` if this connector owns an entity with the given ID.
     pub fn owns(&self, id: &str) -> bool {
-        self.owned_ids.read().contains(id)
+        self.cache_state.read().owned_ids.contains(id)
     }
 
     /// Look up a single cached entity by ID using the O(1) id_map index.
     pub fn get_cached_entity(&self, id: &str) -> Option<HDict> {
-        let id_map = self.cache_id_map.read();
-        let cache = self.cache.read();
-        id_map.get(id).and_then(|&idx| cache.get(idx)).cloned()
+        let state = self.cache_state.read();
+        state
+            .id_map
+            .get(id)
+            .and_then(|&idx| state.entities.get(idx))
+            .cloned()
     }
 
     /// Look up multiple cached entities by ID in a single pass.
     /// Returns found entities and missing IDs.
     pub fn batch_get_cached(&self, ids: &[&str]) -> (Vec<HDict>, Vec<String>) {
-        let id_map = self.cache_id_map.read();
-        let cache = self.cache.read();
+        let state = self.cache_state.read();
         let mut found = Vec::with_capacity(ids.len());
         let mut missing = Vec::new();
         for &id in ids {
-            if let Some(&idx) = id_map.get(id) {
-                if let Some(entity) = cache.get(idx) {
+            if let Some(&idx) = state.id_map.get(id) {
+                if let Some(entity) = state.entities.get(idx) {
                     found.push(entity.clone());
                 } else {
                     missing.push(id.to_string());
@@ -518,12 +556,12 @@ impl Connector {
 
     /// Returns a clone of all cached entities.
     pub fn cached_entities(&self) -> Vec<HDict> {
-        self.cache.read().clone()
+        self.cache_state.read().entities.clone()
     }
 
     /// Returns the number of cached entities.
     pub fn entity_count(&self) -> usize {
-        self.cache.read().len()
+        self.cache_state.read().entities.len()
     }
 
     /// Filter cached entities using the bitmap tag index for acceleration.
@@ -535,11 +573,10 @@ impl Connector {
 
         let ast = parse_filter(filter_expr).map_err(|e| format!("filter error: {e}"))?;
 
-        let cache = self.cache.read();
-        let tag_index = self.cache_index.read();
-        let max_id = cache.len();
+        let state = self.cache_state.read();
+        let max_id = state.entities.len();
 
-        let candidates = query_planner::bitmap_candidates(&ast, &tag_index, max_id);
+        let candidates = query_planner::bitmap_candidates(&ast, &state.tag_index, max_id);
 
         let mut results = Vec::new();
 
@@ -548,14 +585,14 @@ impl Connector {
                 if results.len() >= effective_limit {
                     break;
                 }
-                if let Some(entity) = cache.get(eid)
+                if let Some(entity) = state.entities.get(eid)
                     && matches(&ast, entity, None)
                 {
                     results.push(entity.clone());
                 }
             }
         } else {
-            for entity in cache.iter() {
+            for entity in state.entities.iter() {
                 if results.len() >= effective_limit {
                     break;
                 }

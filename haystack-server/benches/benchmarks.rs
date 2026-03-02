@@ -87,6 +87,7 @@ struct TestServer {
 impl TestServer {
     /// Start a test server with the given shared graph (auth disabled).
     fn start(graph: SharedGraph) -> Self {
+        haystack_client::ensure_crypto_provider();
         let port = free_port();
         let ns = DefNamespace::load_standard().unwrap();
 

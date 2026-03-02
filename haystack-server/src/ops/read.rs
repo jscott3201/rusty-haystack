@@ -153,18 +153,18 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
         return Ok(HGrid::new());
     }
 
-    // Build column set from all result entities.
-    let mut col_set: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    // Build column set from all result entities using borrowed &str.
+    let mut col_set: Vec<&str> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for entity in &results {
         for name in entity.tag_names() {
-            if seen.insert(name.to_string()) {
-                col_set.push(name.to_string());
+            if seen.insert(name) {
+                col_set.push(name);
             }
         }
     }
-    col_set.sort();
-    let cols: Vec<HCol> = col_set.iter().map(|n| HCol::new(n.as_str())).collect();
+    col_set.sort_unstable();
+    let cols: Vec<HCol> = col_set.iter().map(|&n| HCol::new(n)).collect();
 
     Ok(HGrid::from_parts(HDict::new(), cols, results))
 }
@@ -176,8 +176,6 @@ fn read_by_filter(request_grid: &HGrid, state: &AppState) -> Result<HGrid, Hayst
 /// (grouped by connector for O(1) indexed lookup per ID).
 fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackError> {
     let mut results: Vec<HDict> = Vec::new();
-    let mut col_set: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
     let mut unknown_ids: Vec<String> = Vec::new();
 
     // First pass: resolve from local graph, collect unknowns.
@@ -188,11 +186,6 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
         };
 
         if let Some(entity) = state.graph.get(ref_val) {
-            for name in entity.tag_names() {
-                if seen.insert(name.to_string()) {
-                    col_set.push(name.to_string());
-                }
-            }
             results.push(entity);
         } else {
             unknown_ids.push(ref_val.clone());
@@ -203,23 +196,12 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
     if !unknown_ids.is_empty() && !state.federation.connectors.is_empty() {
         let id_refs: Vec<&str> = unknown_ids.iter().map(|s| s.as_str()).collect();
         let (found, still_missing) = state.federation.batch_read_by_id(id_refs);
-
-        for entity in found {
-            for name in entity.tag_names() {
-                if seen.insert(name.to_string()) {
-                    col_set.push(name.to_string());
-                }
-            }
-            results.push(entity);
-        }
+        results.extend(found);
 
         // Add missing stubs for IDs not found anywhere.
         for id in still_missing {
             let mut missing = HDict::new();
             missing.set("id", Kind::Ref(HRef::from_val(id.as_str())));
-            if seen.insert("id".to_string()) {
-                col_set.push("id".to_string());
-            }
             results.push(missing);
         }
     } else {
@@ -227,9 +209,6 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
         for id in unknown_ids {
             let mut missing = HDict::new();
             missing.set("id", Kind::Ref(HRef::from_val(id.as_str())));
-            if seen.insert("id".to_string()) {
-                col_set.push("id".to_string());
-            }
             results.push(missing);
         }
     }
@@ -238,7 +217,18 @@ fn read_by_id(request_grid: &HGrid, state: &AppState) -> Result<HGrid, HaystackE
         return Ok(HGrid::new());
     }
 
-    col_set.sort();
-    let cols: Vec<HCol> = col_set.iter().map(|n| HCol::new(n.as_str())).collect();
+    // Build column set using borrowed &str from entities.
+    let mut col_set: Vec<&str> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for entity in &results {
+        for name in entity.tag_names() {
+            if seen.insert(name) {
+                col_set.push(name);
+            }
+        }
+    }
+
+    col_set.sort_unstable();
+    let cols: Vec<HCol> = col_set.iter().map(|&n| HCol::new(n)).collect();
     Ok(HGrid::from_parts(HDict::new(), cols, results))
 }

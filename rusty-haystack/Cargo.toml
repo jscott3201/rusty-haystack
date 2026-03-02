@@ -8,9 +8,9 @@ name = "rusty_haystack"
 crate-type = ["cdylib"]
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.5.3", path = "../haystack-core" }
-haystack-client = { package = "rusty-haystack-client", version = "0.5.3", path = "../haystack-client" }
-haystack-server = { package = "rusty-haystack-server", version = "0.5.3", path = "../haystack-server" }
+haystack-core = { package = "rusty-haystack-core", version = "0.5.4", path = "../haystack-core" }
+haystack-client = { package = "rusty-haystack-client", version = "0.5.4", path = "../haystack-client" }
+haystack-server = { package = "rusty-haystack-server", version = "0.5.4", path = "../haystack-server" }
 pyo3 = { version = "0.28", features = ["extension-module"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread"] }
