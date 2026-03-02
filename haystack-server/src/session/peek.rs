@@ -21,14 +21,14 @@ where
         count += 1;
         items.push(item);
 
-        if let Some(lim) = limit {
-            if items.len() >= lim {
-                return PeekResult {
-                    items,
-                    satisfied: true,
-                    sampled: count,
-                };
-            }
+        if let Some(lim) = limit
+            && items.len() >= lim
+        {
+            return PeekResult {
+                items,
+                satisfied: true,
+                sampled: count,
+            };
         }
 
         if count >= peek_size {

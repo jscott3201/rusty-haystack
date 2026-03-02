@@ -78,7 +78,7 @@ impl SnapshotWriter {
                     col_names.insert(key.to_owned());
                 }
             }
-            let cols: Vec<HCol> = col_names.iter().map(|n| HCol::new(n)).collect();
+            let cols: Vec<HCol> = col_names.iter().map(HCol::new).collect();
             let rows: Vec<HDict> = entities.into_iter().cloned().collect();
             let grid = HGrid::from_parts(HDict::new(), cols, rows);
             (grid, version)

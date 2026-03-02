@@ -488,7 +488,7 @@ impl<'de> Deserialize<'de> for HCol {
                     }
                 }
                 let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
-                let meta = meta.unwrap_or_else(HDict::new);
+                let meta = meta.unwrap_or_default();
                 Ok(HCol { name, meta })
             }
         }
@@ -556,7 +556,7 @@ impl<'de> Deserialize<'de> for HGrid {
                         }
                     }
                 }
-                let meta = meta.unwrap_or_else(HDict::new);
+                let meta = meta.unwrap_or_default();
                 let cols = cols.ok_or_else(|| de::Error::missing_field("cols"))?;
                 let rows = rows.ok_or_else(|| de::Error::missing_field("rows"))?;
                 Ok(HGrid { meta, cols, rows })

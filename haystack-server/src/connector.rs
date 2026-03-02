@@ -206,11 +206,11 @@ impl CacheState {
 
         for entity in entities {
             // Validate entity: skip oversized IDs or excessive tag counts
-            if let Some(Kind::Ref(r)) = entity.get("id") {
-                if r.val.len() > Self::MAX_ENTITY_ID_LEN {
-                    log::warn!("skipping entity with oversized ID ({} bytes)", r.val.len());
-                    continue;
-                }
+            if let Some(Kind::Ref(r)) = entity.get("id")
+                && r.val.len() > Self::MAX_ENTITY_ID_LEN
+            {
+                log::warn!("skipping entity with oversized ID ({} bytes)", r.val.len());
+                continue;
             }
             if entity.len() > Self::MAX_ENTITY_TAGS {
                 log::warn!("skipping entity with too many tags ({})", entity.len());

@@ -155,6 +155,7 @@ pub fn decode_request_grid_bytes(body: &[u8], content_type: &str) -> Result<HGri
 /// Rows are batched into groups of ~500 to balance streaming granularity against
 /// allocation overhead. For codecs without streaming support (or HBF), the header
 /// contains the full response and `row_batches` is empty.
+#[allow(clippy::type_complexity)]
 pub fn encode_response_streaming(
     grid: &HGrid,
     accept: &str,
@@ -310,7 +311,7 @@ mod tests {
             let mut d = HDict::new();
             d.set(
                 String::from("id"),
-                Kind::Ref(HRef::from_val(&format!("r{i}"))),
+                Kind::Ref(HRef::from_val(format!("r{i}"))),
             );
             d.set(String::from("dis"), Kind::Str(format!("Row {i}")));
             rows.push(d);

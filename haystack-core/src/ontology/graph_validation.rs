@@ -87,10 +87,10 @@ pub fn validate_graph(graph: &EntityGraph, ns: &DefNamespace) -> ValidationRepor
             if tag_name == "id" {
                 continue;
             }
-            if let Kind::Ref(href) = val {
-                if !id_set.contains(href.val.as_str()) {
-                    dangling_refs.push((entity_id.clone(), tag_name.to_string(), href.val.clone()));
-                }
+            if let Kind::Ref(href) = val
+                && !id_set.contains(href.val.as_str())
+            {
+                dangling_refs.push((entity_id.clone(), tag_name.to_string(), href.val.clone()));
             }
         }
 

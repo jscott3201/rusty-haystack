@@ -116,12 +116,12 @@ fn read_id_grid(id: &str) -> HGrid {
 #[actix_web::test]
 async fn federation_status_with_connectors() {
     let mut fed = Federation::new();
-    fed.add(connector_config(
+    let _ = fed.add(connector_config(
         "Remote A",
         "http://remote-a:8080/api",
         Some("ra-"),
     ));
-    fed.add(connector_config(
+    let _ = fed.add(connector_config(
         "Remote B",
         "http://remote-b:8080/api",
         Some("rb-"),
@@ -226,7 +226,7 @@ async fn federation_status_no_connectors() {
 #[actix_web::test]
 async fn filter_read_merges_federated_entities() {
     let mut fed = Federation::new();
-    fed.add(connector_config(
+    let _ = fed.add(connector_config(
         "Remote A",
         "http://remote-a:8080/api",
         Some("ra-"),
@@ -296,7 +296,7 @@ async fn filter_read_merges_federated_entities() {
 #[actix_web::test]
 async fn id_read_returns_federated_entity() {
     let mut fed = Federation::new();
-    fed.add(connector_config(
+    let _ = fed.add(connector_config(
         "Remote A",
         "http://remote-a:8080/api",
         Some("ra-"),
@@ -350,7 +350,7 @@ async fn id_read_returns_federated_entity() {
 #[actix_web::test]
 async fn id_read_prefers_local_over_federated() {
     let mut fed = Federation::new();
-    fed.add(connector_config(
+    let _ = fed.add(connector_config(
         "Remote A",
         "http://remote-a:8080/api",
         Some("ra-"),
@@ -411,7 +411,7 @@ async fn id_read_prefers_local_over_federated() {
 #[actix_web::test]
 async fn sync_one_nonexistent_connector() {
     let mut fed = Federation::new();
-    fed.add(connector_config(
+    let _ = fed.add(connector_config(
         "Remote A",
         "http://remote-a:8080/api",
         Some("ra-"),

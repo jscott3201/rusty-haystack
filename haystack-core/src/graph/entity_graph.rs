@@ -851,12 +851,11 @@ impl EntityGraph {
             return self.entities.get(&r.val);
         }
         // Walk equipRef → siteRef.
-        if let Some(Kind::Ref(r)) = entity.get("equipRef") {
-            if let Some(equip) = self.entities.get(&r.val) {
-                if let Some(Kind::Ref(sr)) = equip.get("siteRef") {
-                    return self.entities.get(&sr.val);
-                }
-            }
+        if let Some(Kind::Ref(r)) = entity.get("equipRef")
+            && let Some(equip) = self.entities.get(&r.val)
+            && let Some(Kind::Ref(sr)) = equip.get("siteRef")
+        {
+            return self.entities.get(&sr.val);
         }
         None
     }

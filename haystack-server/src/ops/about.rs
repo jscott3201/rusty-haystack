@@ -161,7 +161,7 @@ fn respond_about_grid(accept: &str) -> HttpResponse {
     let mut row = HDict::new();
     row.set("haystackVersion", Kind::Str("4.0".to_string()));
     row.set("serverName", Kind::Str("rusty-haystack".to_string()));
-    row.set("serverVersion", Kind::Str("0.6.0".to_string()));
+    row.set("serverVersion", Kind::Str("0.6.1".to_string()));
     row.set("productName", Kind::Str("rusty-haystack".to_string()));
     row.set(
         "productUri",
@@ -170,7 +170,7 @@ fn respond_about_grid(accept: &str) -> HttpResponse {
         )),
     );
     row.set("moduleName", Kind::Str("haystack-server".to_string()));
-    row.set("moduleVersion", Kind::Str("0.6.0".to_string()));
+    row.set("moduleVersion", Kind::Str("0.6.1".to_string()));
 
     let cols = vec![
         HCol::new("haystackVersion"),
