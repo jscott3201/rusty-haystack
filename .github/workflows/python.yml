@@ -38,6 +38,8 @@ jobs:
           args: --release --out dist -m rusty-haystack/Cargo.toml -i 3.11 3.12 3.13
           manylinux: auto
           sccache: true
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
 
       - uses: actions/upload-artifact@v4
         with:
