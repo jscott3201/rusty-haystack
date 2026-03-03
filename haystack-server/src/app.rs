@@ -1,5 +1,7 @@
 //! Server builder and startup.
 
+use std::sync::Arc;
+
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::from_fn;
@@ -18,6 +20,8 @@ use crate::state::AppState;
 use crate::ws;
 use crate::ws::WatchManager;
 
+type ConfigureFn = dyn Fn(&mut web::ServiceConfig) + Send + Sync + 'static;
+
 /// Builder for the Haystack HTTP server.
 pub struct HaystackServer {
     graph: SharedGraph,
@@ -25,6 +29,8 @@ pub struct HaystackServer {
     auth_manager: AuthManager,
     actions: ActionRegistry,
     federation: Federation,
+    custom_configures: Vec<Arc<ConfigureFn>>,
+    history_provider: Option<Box<dyn crate::his_provider::HistoryProvider>>,
     port: u16,
     host: String,
 }
@@ -38,6 +44,8 @@ impl HaystackServer {
             auth_manager: AuthManager::empty(),
             actions: ActionRegistry::new(),
             federation: Federation::new(),
+            custom_configures: Vec::new(),
+            history_provider: None,
             port: 8080,
             host: "127.0.0.1".to_string(),
         }
@@ -79,15 +87,40 @@ impl HaystackServer {
         self
     }
 
+    /// Register a custom route configuration function.
+    ///
+    /// The function receives a mutable `ServiceConfig` and can add routes,
+    /// scopes, and app data. Called during server startup.
+    pub fn with_configure<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut web::ServiceConfig) + Send + Sync + 'static,
+    {
+        self.custom_configures.push(Arc::new(f));
+        self
+    }
+
+    /// Set the history storage provider (default: in-memory [`HisStore`]).
+    pub fn with_history_provider(
+        mut self,
+        provider: Box<dyn crate::his_provider::HistoryProvider>,
+    ) -> Self {
+        self.history_provider = Some(provider);
+        self
+    }
+
     /// Start the HTTP server. This blocks until the server is stopped.
     pub async fn run(self) -> std::io::Result<()> {
+        let his: Box<dyn crate::his_provider::HistoryProvider> = self
+            .history_provider
+            .unwrap_or_else(|| Box::new(HisStore::new()));
+
         let state = web::Data::new(AppState {
             graph: self.graph,
             namespace: parking_lot::RwLock::new(self.namespace),
             auth: self.auth_manager,
             watches: WatchManager::new(),
             actions: self.actions,
-            his: HisStore::new(),
+            his,
             started_at: std::time::Instant::now(),
             federation: self.federation,
         });
@@ -95,15 +128,24 @@ impl HaystackServer {
         // Start federation background sync tasks
         let _sync_handles = state.federation.start_background_sync();
 
+        let custom_configures = self.custom_configures.clone();
+
         log::info!("Starting haystack-server on {}:{}", self.host, self.port);
 
         HttpServer::new(move || {
-            App::new()
+            let mut app = App::new()
                 .app_data(state.clone())
                 .app_data(actix_web::web::PayloadConfig::default().limit(2 * 1024 * 1024))
                 .wrap(from_fn(auth_middleware))
                 .configure(ops::configure)
-                .route("/api/ws", web::get().to(ws::ws_handler))
+                .route("/api/ws", web::get().to(ws::ws_handler));
+
+            for configure_fn in &custom_configures {
+                let f = Arc::clone(configure_fn);
+                app = app.configure(move |cfg| f(cfg));
+            }
+
+            app
         })
         .bind((self.host.as_str(), self.port))?
         .run()
@@ -307,7 +349,7 @@ permissions = ["read"]
             auth,
             watches: WatchManager::new(),
             actions: ActionRegistry::new(),
-            his: HisStore::new(),
+            his: Box::new(HisStore::new()),
             started_at: std::time::Instant::now(),
             federation: Federation::new(),
         })

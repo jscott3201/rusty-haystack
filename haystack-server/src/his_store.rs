@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use chrono::{DateTime, FixedOffset};
 use parking_lot::RwLock;
 
+use async_trait::async_trait;
 use haystack_core::kinds::Kind;
+
+use crate::his_provider::HistoryProvider;
 
 const MAX_ITEMS_PER_SERIES: usize = 1_000_000;
 
@@ -101,10 +104,31 @@ impl HisStore {
             .collect()
     }
 
+    /// Whether the store has no items for the given point.
+    pub fn is_empty(&self, id: &str) -> bool {
+        self.len(id) == 0
+    }
+
     /// Return the count of history items stored for a given point.
     pub fn len(&self, id: &str) -> usize {
         let map = self.items.read();
         map.get(id).map_or(0, |s| s.len())
+    }
+}
+
+#[async_trait]
+impl HistoryProvider for HisStore {
+    async fn his_read(
+        &self,
+        id: &str,
+        start: Option<DateTime<FixedOffset>>,
+        end: Option<DateTime<FixedOffset>>,
+    ) -> Vec<HisItem> {
+        self.read(id, start, end)
+    }
+
+    async fn his_write(&self, id: &str, items: Vec<HisItem>) {
+        self.write(id, items);
     }
 }
 

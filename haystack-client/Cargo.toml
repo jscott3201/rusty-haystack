@@ -13,7 +13,7 @@ categories.workspace = true
 name = "haystack_client"
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.7.1", path = "../haystack-core", features = ["haystack-serde"] }
+haystack-core = { package = "rusty-haystack-core", version = "0.7.2", path = "../haystack-core", features = ["haystack-serde"] }
 reqwest = { version = "0.13", features = ["rustls-no-provider"], default-features = false }
 rustls = { version = "0.23", features = ["ring", "tls12", "std"], default-features = false }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }

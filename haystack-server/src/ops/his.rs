@@ -1,7 +1,8 @@
 //! The `hisRead` and `hisWrite` ops — historical time-series data.
 //!
-//! Backed by the in-memory [`HisStore`](crate::his_store::HisStore) stored
-//! in `AppState`.
+//! Backed by a pluggable [`HistoryProvider`](crate::his_provider::HistoryProvider)
+//! stored in `AppState`. The default provider is the in-memory
+//! [`HisStore`](crate::his_store::HisStore).
 //!
 //! # hisRead
 //!
@@ -134,7 +135,7 @@ pub async fn handle_read(
         .map_err(|e| HaystackError::bad_request(format!("hisRead: bad range: {e}")))?;
 
     // Query the store.
-    let items = state.his.read(&id, Some(start), Some(end));
+    let items = state.his.his_read(&id, Some(start), Some(end)).await;
 
     // Build response grid.
     let cols = vec![HCol::new("ts"), HCol::new("val")];
@@ -285,7 +286,7 @@ pub async fn handle_write(
     }
 
     let count = items.len();
-    state.his.write(&id, items);
+    state.his.his_write(&id, items).await;
 
     log::info!("hisWrite: stored {} items for point {}", count, id);
     let grid = HGrid::new();

@@ -193,7 +193,7 @@ mod tests {
             auth: AuthManager::empty(),
             watches: WatchManager::new(),
             actions: ActionRegistry::new(),
-            his: HisStore::new(),
+            his: Box::new(HisStore::new()),
             started_at: std::time::Instant::now(),
             federation: crate::federation::Federation::new(),
         })

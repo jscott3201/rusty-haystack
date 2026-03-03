@@ -534,6 +534,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2515,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "chrono",
  "pyo3",
@@ -2527,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "clap",
  "env_logger",
@@ -2541,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-client"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64",
  "dashmap",
@@ -2563,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "arrow",
  "base64",
@@ -2597,12 +2608,13 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-server"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "actix-http",
  "actix-rt",
  "actix-web",
  "actix-ws",
+ "async-trait",
  "base64",
  "chrono",
  "criterion",

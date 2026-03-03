@@ -6,7 +6,7 @@ use haystack_core::ontology::DefNamespace;
 use crate::actions::ActionRegistry;
 use crate::auth::AuthManager;
 use crate::federation::Federation;
-use crate::his_store::HisStore;
+use crate::his_provider::HistoryProvider;
 use crate::ws::WatchManager;
 
 /// Shared application state injected into every Actix handler via `web::Data`.
@@ -21,8 +21,8 @@ pub struct AppState {
     pub watches: WatchManager,
     /// Action dispatch registry for the `invokeAction` op.
     pub actions: ActionRegistry,
-    /// In-memory time-series history store for hisRead/hisWrite.
-    pub his: HisStore,
+    /// Pluggable time-series history store for hisRead/hisWrite.
+    pub his: Box<dyn HistoryProvider>,
     /// Instant when the server was started, used for uptime calculation.
     pub started_at: std::time::Instant,
     /// Federation manager for remote connector queries.
