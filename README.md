@@ -175,6 +175,21 @@ The `graph/flow` and `graph/neighbors` endpoints return a nodes grid with an edg
 | flate2 | 1.x | Deflate compression for WebSocket |
 | criterion | 0.8 | Benchmarking |
 | parking_lot | 0.12 | Fast synchronization primitives |
+| roaring | 0.10 | Compressed bitmap indexes (RoaringBitmap) |
+| rustc-hash | 2 | Fast non-cryptographic hashing (FxHasher) |
+
+## What's New in v0.7.0
+
+- **Roaring bitmap indexes** — TagBitmapIndex migrated from hand-rolled `Vec<u64>` to RoaringBitmap with automatic compression and SIMD acceleration
+- **Delta indexing** — `update()` re-indexes only changed tags, **3.4x faster** entity updates (6.73µs → 1.96µs)
+- **Incremental CSR adjacency** — patch buffer overlays base CSR, auto-compacts at 1,000 ops; avoids full rebuild on every mutation
+- **WL structural fingerprinting** — Weisfeiler-Leman colour refinement produces per-entity structural fingerprints for topology-aware partitioning and anomaly detection
+- **ID freelist recycling** — deleted entity IDs are reused in O(1), preventing unbounded ID growth
+- **Bulk load path** — `add_bulk()` / `finalize_bulk()` skips per-entity changelog and indexing for **2.3x faster** batch ingestion
+- **Configurable query cache** — cache capacity auto-scales with entity count, clamped to [256, 1024]
+- **Changelog binary search** — `changes_since()` uses `partition_point()` for O(log n) version lookup
+- **Entity ID safety** — `MAX_ENTITY_ID` gate prevents overflow into roaring bitmap's u32 address space
+- **Structural DoS bounds** — adaptive WL depth with hard entity caps (50K full WL, 200K tag-hash-only)
 
 ## What's New in v0.6.0
 

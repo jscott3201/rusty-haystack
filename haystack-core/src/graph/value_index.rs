@@ -166,14 +166,12 @@ impl ValueIndex {
             return result;
         }
         // Collect non-matching entries only.
-        let exclude_set: std::collections::HashSet<usize> = exclude.iter().copied().collect();
         let mut result = Vec::new();
         for (k, ids) in tree {
             if k != &key {
                 result.extend(ids);
             }
         }
-        let _ = exclude_set; // used for documentation clarity
         result
     }
 

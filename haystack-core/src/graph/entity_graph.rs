@@ -32,7 +32,12 @@ pub enum GraphError {
     NotFound(String),
     #[error("filter error: {0}")]
     Filter(String),
+    #[error("entity ID space exhausted (max {MAX_ENTITY_ID})")]
+    IdExhausted,
 }
+
+/// Maximum entity ID — constrained by RoaringBitmap (u32) and snapshot format.
+const MAX_ENTITY_ID: usize = u32::MAX as usize;
 
 /// Core entity graph with bitmap tag indexing and bidirectional ref adjacency.
 pub struct EntityGraph {
@@ -44,6 +49,8 @@ pub struct EntityGraph {
     reverse_id: HashMap<usize, String>,
     /// Next internal id to assign.
     next_id: usize,
+    /// Freelist of recycled entity IDs from removed entities.
+    free_ids: Vec<usize>,
     /// Tag bitmap index for fast has/missing queries.
     tag_index: TagBitmapIndex,
     /// Bidirectional ref adjacency for graph traversal.
@@ -70,8 +77,12 @@ pub struct EntityGraph {
     csr: Option<CsrAdjacency>,
     /// Version at which the CSR was last rebuilt (for staleness detection).
     csr_version: u64,
+    /// Patch buffer for incremental CSR updates.
+    csr_patch: super::csr::CsrPatch,
     /// Columnar storage for cache-friendly single-tag scans.
     columnar: ColumnarStore,
+    /// WL structural fingerprint index.
+    structural: super::structural::StructuralIndex,
 }
 
 /// Fixed-capacity LRU cache for filter query results using IndexMap for O(1) ops.
@@ -116,9 +127,18 @@ impl QueryCache {
     }
 }
 
-const QUERY_CACHE_CAPACITY: usize = 256;
+/// Compute query cache capacity based on entity count.
+/// Scales with graph size but bounded: min 256, max 1024.
+fn query_cache_capacity_for(entity_count: usize) -> usize {
+    (entity_count / 100).clamp(256, 1024)
+}
+
+const DEFAULT_QUERY_CACHE_CAPACITY: usize = 256;
 
 /// Common Haystack fields to auto-index for O(log N) value lookups.
+/// Number of CSR patch ops before triggering a full rebuild.
+const CSR_PATCH_THRESHOLD: usize = 1000;
+
 const AUTO_INDEX_FIELDS: &[&str] = &[
     "siteRef", "equipRef", "dis", "curVal", "area", "geoCity", "kind", "unit",
 ];
@@ -142,6 +162,7 @@ impl EntityGraph {
             id_map: HashMap::new(),
             reverse_id: HashMap::new(),
             next_id: 0,
+            free_ids: Vec::new(),
             tag_index: TagBitmapIndex::new(),
             adjacency: RefAdjacency::new(),
             namespace: None,
@@ -149,12 +170,14 @@ impl EntityGraph {
             changelog: std::collections::VecDeque::new(),
             changelog_capacity: capacity,
             floor_version: 0,
-            query_cache: Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
+            query_cache: Mutex::new(QueryCache::new(DEFAULT_QUERY_CACHE_CAPACITY)),
             ast_cache: Mutex::new(HashMap::new()),
             value_index,
             csr: None,
             csr_version: 0,
+            csr_patch: super::csr::CsrPatch::new(),
             columnar: ColumnarStore::new(),
+            structural: super::structural::StructuralIndex::new(),
         }
     }
 
@@ -236,8 +259,16 @@ impl EntityGraph {
             return Err(GraphError::DuplicateRef(ref_val));
         }
 
-        let eid = self.next_id;
-        self.next_id = self.next_id.checked_add(1).ok_or(GraphError::InvalidId)?;
+        let eid = if let Some(recycled) = self.free_ids.pop() {
+            recycled
+        } else {
+            if self.next_id > MAX_ENTITY_ID {
+                return Err(GraphError::IdExhausted);
+            }
+            let id = self.next_id;
+            self.next_id = self.next_id.checked_add(1).ok_or(GraphError::InvalidId)?;
+            id
+        };
 
         self.id_map.insert(ref_val.clone(), eid);
         self.reverse_id.insert(eid, ref_val.clone());
@@ -251,7 +282,22 @@ impl EntityGraph {
         self.entities.insert(ref_val.clone(), entity);
 
         self.version += 1;
-        self.csr = None; // Invalidate CSR snapshot on mutation.
+        // Patch CSR instead of invalidating.
+        if self.csr.is_some() {
+            if let Some(entity) = self.entities.get(&ref_val) {
+                for (name, val) in entity.iter() {
+                    if let Kind::Ref(r) = val
+                        && name != "id"
+                    {
+                        self.csr_patch.add_edge(eid, name, &r.val);
+                    }
+                }
+            }
+            if self.csr_patch.len() > CSR_PATCH_THRESHOLD {
+                self.rebuild_csr();
+                self.csr_patch = super::csr::CsrPatch::new();
+            }
+        }
         self.push_changelog(GraphDiff {
             version: self.version,
             timestamp: 0,
@@ -263,7 +309,51 @@ impl EntityGraph {
             previous_tags: None,
         });
 
+        // Resize query cache if entity count crossed a threshold.
+        let target_cap = query_cache_capacity_for(self.entities.len());
+        let mut cache = self.query_cache.lock();
+        if cache.capacity < target_cap {
+            cache.capacity = target_cap;
+        }
+
+        self.structural.mark_stale();
         Ok(ref_val)
+    }
+
+    /// Add an entity without changelog tracking or version bump.
+    ///
+    /// Used for bulk restore from snapshots. Caller must call `finalize_bulk()`
+    /// after all bulk adds to rebuild CSR and set version.
+    pub fn add_bulk(&mut self, entity: HDict) -> Result<String, GraphError> {
+        let ref_val = extract_ref_val(&entity)?;
+        if self.entities.contains_key(&ref_val) {
+            return Err(GraphError::DuplicateRef(ref_val));
+        }
+
+        let eid = if let Some(recycled) = self.free_ids.pop() {
+            recycled
+        } else {
+            if self.next_id > MAX_ENTITY_ID {
+                return Err(GraphError::IdExhausted);
+            }
+            let id = self.next_id;
+            self.next_id = self.next_id.checked_add(1).ok_or(GraphError::InvalidId)?;
+            id
+        };
+
+        self.id_map.insert(ref_val.clone(), eid);
+        self.reverse_id.insert(eid, ref_val.clone());
+        self.index_tags(eid, &entity);
+        self.index_refs(eid, &entity);
+        self.entities.insert(ref_val.clone(), entity);
+
+        Ok(ref_val)
+    }
+
+    /// Finalize bulk load: rebuild CSR and set version.
+    pub fn finalize_bulk(&mut self, target_version: u64) {
+        self.version = target_version;
+        self.rebuild_csr();
     }
 
     /// Get a reference to an entity by ref value.
@@ -281,16 +371,12 @@ impl EntityGraph {
             .get(ref_val)
             .ok_or_else(|| GraphError::NotFound(ref_val.to_string()))?;
 
-        // Remove the old entity from the map (avoids an extra clone).
         let mut old_entity = self
             .entities
             .remove(ref_val)
             .ok_or_else(|| GraphError::NotFound(ref_val.to_string()))?;
 
-        // Remove old indexing.
-        self.remove_indexing(eid, &old_entity);
-
-        // Compute delta: capture only the tags being changed.
+        // Compute delta for changelog before mutating.
         let mut prev_tags = HDict::new();
         let mut changed = HDict::new();
         for (key, new_val) in changes.iter() {
@@ -300,17 +386,36 @@ impl EntityGraph {
             changed.set(key, new_val.clone());
         }
 
-        // Merge in-place.
+        // Clone old for delta comparison, then merge.
+        let old_snapshot = old_entity.clone();
         old_entity.merge(&changes);
 
-        // Re-index before re-inserting (entity is a local value, no borrow conflict).
-        self.index_tags(eid, &old_entity);
-        self.index_refs(eid, &old_entity);
+        // Delta indexing: only update what changed.
+        self.update_tags_delta(eid, &old_snapshot, &old_entity);
+
+        // Re-index refs only if ref edges changed.
+        if Self::refs_changed(&old_snapshot, &old_entity) {
+            self.adjacency.remove(eid);
+            self.index_refs(eid, &old_entity);
+            if self.csr.is_some() {
+                self.csr_patch.remove_entity(eid);
+                for (name, val) in old_entity.iter() {
+                    if let Kind::Ref(r) = val
+                        && name != "id"
+                    {
+                        self.csr_patch.add_edge(eid, name, &r.val);
+                    }
+                }
+                if self.csr_patch.len() > CSR_PATCH_THRESHOLD {
+                    self.rebuild_csr();
+                    self.csr_patch = super::csr::CsrPatch::new();
+                }
+            }
+        }
 
         self.entities.insert(ref_val.to_string(), old_entity);
 
         self.version += 1;
-        self.csr = None; // Invalidate CSR snapshot on mutation.
         self.push_changelog(GraphDiff {
             version: self.version,
             timestamp: 0,
@@ -322,6 +427,10 @@ impl EntityGraph {
             previous_tags: Some(prev_tags),
         });
 
+        // Invalidate query cache.
+        self.query_cache.lock().entries.clear();
+
+        self.structural.mark_stale();
         Ok(())
     }
 
@@ -340,9 +449,16 @@ impl EntityGraph {
             .ok_or_else(|| GraphError::NotFound(ref_val.to_string()))?;
 
         self.remove_indexing(eid, &entity);
+        self.free_ids.push(eid);
 
         self.version += 1;
-        self.csr = None; // Invalidate CSR snapshot on mutation.
+        if self.csr.is_some() {
+            self.csr_patch.remove_entity(eid);
+            if self.csr_patch.len() > CSR_PATCH_THRESHOLD {
+                self.rebuild_csr();
+                self.csr_patch = super::csr::CsrPatch::new();
+            }
+        }
         self.push_changelog(GraphDiff {
             version: self.version,
             timestamp: 0,
@@ -354,7 +470,33 @@ impl EntityGraph {
             previous_tags: None,
         });
 
+        self.structural.mark_stale();
         Ok(entity)
+    }
+
+    // ── Structural Index ──
+
+    /// Get the structural index if it has been computed and is current.
+    /// Returns `None` if stale — call `recompute_structural()` under a
+    /// write lock first.
+    pub fn structural_index(&self) -> Option<&super::structural::StructuralIndex> {
+        if self.structural.is_stale() {
+            None
+        } else {
+            Some(&self.structural)
+        }
+    }
+
+    /// Force recomputation of structural fingerprints.
+    pub fn recompute_structural(&mut self) {
+        let entities = &self.entities;
+        let id_map = &self.id_map;
+        let adjacency = &self.adjacency;
+        self.structural
+            .compute(entities, id_map, |ref_val| match id_map.get(ref_val) {
+                Some(&eid) => adjacency.targets_from(eid, None),
+                None => Vec::new(),
+            });
     }
 
     // ── Query ──
@@ -526,7 +668,7 @@ impl EntityGraph {
         match self.id_map.get(ref_val) {
             Some(&eid) => {
                 if let Some(csr) = &self.csr {
-                    csr.targets_from(eid, ref_type)
+                    csr.targets_from_patched(eid, ref_type, &self.csr_patch)
                 } else {
                     self.adjacency.targets_from(eid, ref_type)
                 }
@@ -538,7 +680,7 @@ impl EntityGraph {
     /// Get ref values of entities that point to the given entity.
     pub fn refs_to(&self, ref_val: &str, ref_type: Option<&str>) -> Vec<String> {
         if let Some(csr) = &self.csr {
-            csr.sources_to(ref_val, ref_type)
+            csr.sources_to_patched(ref_val, ref_type, &self.csr_patch)
                 .iter()
                 .filter_map(|eid| self.reverse_id.get(eid).cloned())
                 .collect()
@@ -557,6 +699,7 @@ impl EntityGraph {
         let max_id = if self.next_id > 0 { self.next_id } else { 0 };
         self.csr = Some(CsrAdjacency::from_ref_adjacency(&self.adjacency, max_id));
         self.csr_version = self.version;
+        self.csr_patch = super::csr::CsrPatch::new();
     }
 
     /// Returns true if the CSR snapshot is stale (version mismatch).
@@ -1017,12 +1160,10 @@ impl EntityGraph {
                 floor_version: self.floor_version,
             });
         }
-        // VecDeque may not be contiguous, so collect matching entries.
-        Ok(self
-            .changelog
-            .iter()
-            .filter(|d| d.version >= target)
-            .collect())
+        // Binary search: versions are monotonically increasing in the VecDeque.
+        // partition_point finds the first entry where version >= target.
+        let start = self.changelog.partition_point(|d| d.version < target);
+        Ok(self.changelog.iter().skip(start).collect())
     }
 
     /// The lowest version still retained in the changelog.
@@ -1035,6 +1176,11 @@ impl EntityGraph {
     /// The configured changelog capacity.
     pub fn changelog_capacity(&self) -> usize {
         self.changelog_capacity
+    }
+
+    /// Current query cache capacity.
+    pub fn query_cache_capacity(&self) -> usize {
+        self.query_cache.lock().capacity
     }
 
     /// Current graph version (monotonically increasing).
@@ -1111,6 +1257,78 @@ impl EntityGraph {
 
         // Clear columnar data for this entity.
         self.columnar.clear_entity(entity_id);
+    }
+
+    /// Update only the changed tags in the tag bitmap index.
+    fn update_tags_delta(&mut self, entity_id: usize, old: &HDict, new: &HDict) {
+        let old_tags: std::collections::HashSet<&str> = old.tag_names().collect();
+        let new_tags: std::collections::HashSet<&str> = new.tag_names().collect();
+
+        // Tags removed: clear bits.
+        let removed: Vec<String> = old_tags
+            .difference(&new_tags)
+            .map(|s| s.to_string())
+            .collect();
+        if !removed.is_empty() {
+            self.tag_index.remove(entity_id, &removed);
+        }
+
+        // Tags added: set bits.
+        let added: Vec<String> = new_tags
+            .difference(&old_tags)
+            .map(|s| s.to_string())
+            .collect();
+        if !added.is_empty() {
+            self.tag_index.add(entity_id, &added);
+        }
+
+        // Update value indexes for changed fields only.
+        for (name, new_val) in new.iter() {
+            if self.value_index.has_index(name) {
+                if let Some(old_val) = old.get(name) {
+                    if old_val != new_val {
+                        self.value_index.remove(entity_id, name, old_val);
+                        self.value_index.add(entity_id, name, new_val);
+                    }
+                } else {
+                    self.value_index.add(entity_id, name, new_val);
+                }
+            }
+            if self.columnar.is_tracked(name) {
+                self.columnar.set(entity_id, name, new_val);
+            }
+        }
+
+        // Remove value indexes for removed fields.
+        for name in &removed {
+            if self.value_index.has_index(name)
+                && let Some(old_val) = old.get(name.as_str())
+            {
+                self.value_index.remove(entity_id, name, old_val);
+            }
+        }
+    }
+
+    /// Check if ref edges changed between old and new entity.
+    fn refs_changed(old: &HDict, new: &HDict) -> bool {
+        for (name, val) in new.iter() {
+            if name != "id"
+                && let Kind::Ref(_) = val
+                && old.get(name) != Some(val)
+            {
+                return true;
+            }
+        }
+        // Check for removed refs.
+        for (name, val) in old.iter() {
+            if name != "id"
+                && let Kind::Ref(_) = val
+                && new.get(name).is_none()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Build a full hierarchy subtree as a structured tree.
@@ -1347,6 +1565,29 @@ mod tests {
         let mut g = EntityGraph::new();
         let err = g.remove("nonexistent").unwrap_err();
         assert!(matches!(err, GraphError::NotFound(_)));
+    }
+
+    #[test]
+    fn id_freelist_recycles_removed_ids() {
+        let mut g = EntityGraph::new();
+
+        // Add 3 entities: IDs 0, 1, 2
+        for i in 0..3 {
+            let mut e = HDict::new();
+            e.set("id", Kind::Ref(HRef::from_val(format!("e-{i}"))));
+            g.add(e).unwrap();
+        }
+
+        // Remove entity 1 (frees ID 1)
+        g.remove("e-1").unwrap();
+
+        // Add a new entity — should reuse ID 1, not allocate ID 3
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val("e-new")));
+        g.add(e).unwrap();
+
+        // Graph should have 3 entities and next_id should still be 3
+        assert_eq!(g.len(), 3);
     }
 
     // ── Version / changelog tests ──
@@ -1631,6 +1872,21 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
+    #[test]
+    fn query_cache_capacity_scales_with_entity_count() {
+        let mut g = EntityGraph::new();
+        // Default cache should start at 256
+        assert_eq!(g.query_cache_capacity(), 256);
+        for i in 0..500 {
+            let mut e = HDict::new();
+            e.set("id", Kind::Ref(HRef::from_val(format!("e-{i}"))));
+            e.set("site", Kind::Marker);
+            g.add(e).unwrap();
+        }
+        // For 500 entities: (500/100).clamp(256, 1024) = 256 (still minimum)
+        assert!(g.query_cache_capacity() >= 256);
+    }
+
     // ── Ref traversal tests ──
 
     #[test]
@@ -1678,6 +1934,38 @@ mod tests {
     fn refs_to_nonexistent_entity() {
         let g = EntityGraph::new();
         assert!(g.refs_to("nonexistent", None).is_empty());
+    }
+
+    #[test]
+    fn csr_survives_single_mutation() {
+        let mut g = EntityGraph::new();
+        let mut site = HDict::new();
+        site.set("id", Kind::Ref(HRef::from_val("site-1")));
+        site.set("site", Kind::Marker);
+        g.add(site).unwrap();
+
+        let mut equip = HDict::new();
+        equip.set("id", Kind::Ref(HRef::from_val("equip-1")));
+        equip.set("equip", Kind::Marker);
+        equip.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
+        g.add(equip).unwrap();
+
+        g.rebuild_csr();
+
+        // Mutate: add a new entity (should NOT destroy CSR)
+        let mut point = HDict::new();
+        point.set("id", Kind::Ref(HRef::from_val("point-1")));
+        point.set("point", Kind::Marker);
+        point.set("equipRef", Kind::Ref(HRef::from_val("equip-1")));
+        g.add(point).unwrap();
+
+        // Forward refs should still work (CSR + patch overlay)
+        let refs = g.refs_from("equip-1", Some("siteRef"));
+        assert_eq!(refs, vec!["site-1".to_string()]);
+
+        // New entity's refs should be found via patch
+        let refs = g.refs_from("point-1", Some("equipRef"));
+        assert_eq!(refs, vec!["equip-1".to_string()]);
     }
 
     // ── Serialization tests ──
@@ -1740,6 +2028,35 @@ mod tests {
 
         assert_eq!(g.refs_from("equip-1", None), vec!["site-2".to_string()]);
         assert!(g.refs_to("site-1", None).is_empty());
+    }
+
+    #[test]
+    fn update_delta_indexing_preserves_unchanged_tags() {
+        let mut g = EntityGraph::new();
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val("p-1")));
+        e.set("point", Kind::Marker);
+        e.set("sensor", Kind::Marker);
+        e.set("curVal", Kind::Number(Number::unitless(72.0)));
+        e.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
+        g.add(e).unwrap();
+
+        // Update only curVal — point, sensor, siteRef should remain indexed.
+        let mut changes = HDict::new();
+        changes.set("curVal", Kind::Number(Number::unitless(75.0)));
+        g.update("p-1", changes).unwrap();
+
+        // Verify tag bitmap still has point and sensor.
+        let results = g.read_all("point and sensor", 0).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Verify ref adjacency still works.
+        let refs = g.refs_from("p-1", Some("siteRef"));
+        assert_eq!(refs, vec!["site-1".to_string()]);
+
+        // Verify value index has the new curVal.
+        let results = g.read_all("curVal >= 74", 0).unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     // ── Dangling ref validation ──
@@ -2169,5 +2486,36 @@ mod tests {
         d.set("custom", Kind::Marker);
         g.add(d).unwrap();
         assert!(g.classify("x1").is_none());
+    }
+
+    #[test]
+    fn changes_since_binary_search_equivalence() {
+        let mut g = EntityGraph::new();
+        for i in 0..100 {
+            let mut e = HDict::new();
+            e.set("id", Kind::Ref(HRef::from_val(format!("e-{i}"))));
+            e.set("site", Kind::Marker);
+            g.add(e).unwrap();
+        }
+        // After 100 adds, version is 100.
+        // changes_since(50) should return versions 51..=100 (50 entries).
+        let changes = g.changes_since(50).unwrap();
+        assert_eq!(changes.len(), 50);
+        assert_eq!(changes.first().unwrap().version, 51);
+        assert_eq!(changes.last().unwrap().version, 100);
+    }
+
+    #[test]
+    fn add_bulk_skips_changelog() {
+        let mut g = EntityGraph::new();
+        for i in 0..10 {
+            let mut e = HDict::new();
+            e.set("id", Kind::Ref(HRef::from_val(format!("e-{i}"))));
+            e.set("site", Kind::Marker);
+            g.add_bulk(e).unwrap();
+        }
+        assert_eq!(g.len(), 10);
+        assert_eq!(g.version(), 0); // version not bumped during bulk load
+        assert!(g.changes_since(0).unwrap().is_empty()); // no changelog entries
     }
 }

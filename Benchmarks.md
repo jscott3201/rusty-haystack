@@ -8,10 +8,10 @@
 | CPU | Apple M2 |
 | Memory | 8 GB |
 | Rust | 1.93.1 |
-| Version | 0.6.3 |
+| Version | 0.7.0 |
 | Profile | release (optimized) |
 | Framework | Criterion 0.8 |
-| Date | 2026-07-17 |
+| Date | 2026-03-03 |
 
 ---
 
@@ -21,160 +21,187 @@
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `zinc_encode_scalar` | 89.5 ns | 11,173,000 | Single Number scalar |
-| `zinc_decode_scalar` | 138.1 ns | 7,241,000 | Single Number scalar |
-| `zinc_encode_100_rows` | 52.1 µs | 19,194 | 100-row grid, 7 columns |
-| `zinc_decode_100_rows` | 108.6 µs | 9,208 | 100-row grid, 7 columns |
-| `zinc_encode_1000_rows` | 520.1 µs | 1,923 | 1000-row grid, 7 columns |
-| `zinc_decode_1000_rows` | 1.126 ms | 888 | 1000-row grid, 7 columns |
-| `json4_encode_100_rows` | 131.0 µs | 7,634 | JSON v4, 100 rows |
-| `json4_decode_100_rows` | 193.8 µs | 5,160 | JSON v4, 100 rows |
-| `json4_encode_1000_rows` | 1.329 ms | 753 | JSON v4, 1000 rows |
-| `json4_decode_1000_rows` | 1.927 ms | 519 | JSON v4, 1000 rows |
-| `csv_encode_1000_rows` | 794.7 µs | 1,258 | CSV, 1000 rows (encode only) |
-| `codec_roundtrip_mixed_types` | 409.5 µs | 2,442 | Zinc encode+decode, 100 rows, 9 mixed types |
+| `zinc_encode_scalar` | 84.9 ns | 11,779,000 | Single Number scalar |
+| `zinc_decode_scalar` | 124.0 ns | 8,065,000 | Single Number scalar |
+| `zinc_encode_100_rows` | 54.1 µs | 18,488 | 100-row grid, 7 columns |
+| `zinc_decode_100_rows` | 105.6 µs | 9,470 | 100-row grid, 7 columns |
+| `zinc_encode_1000_rows` | 541.3 µs | 1,847 | 1000-row grid, 7 columns |
+| `zinc_decode_1000_rows` | 1.095 ms | 913 | 1000-row grid, 7 columns |
+| `json4_encode_100_rows` | 136.2 µs | 7,342 | JSON v4, 100 rows |
+| `json4_decode_100_rows` | 202.9 µs | 4,929 | JSON v4, 100 rows |
+| `json4_encode_1000_rows` | 1.357 ms | 737 | JSON v4, 1000 rows |
+| `json4_decode_1000_rows` | 2.174 ms | 460 | JSON v4, 1000 rows |
+| `csv_encode_1000_rows` | 787.7 µs | 1,270 | CSV, 1000 rows (encode only) |
+| `codec_roundtrip_mixed_types` | 422.7 µs | 2,366 | Zinc encode+decode, 100 rows, 9 mixed types |
 
 **Observations:**
-- Zinc remains the fastest text codec: ~2.6x faster encode and ~1.8x faster decode vs JSON at 100 rows
-- 100-row Zinc encode at 52.1µs = ~1.92M rows/sec throughput
+- Zinc remains the fastest text codec: ~2.5x faster encode and ~1.9x faster decode vs JSON at 100 rows
+- 100-row Zinc encode at 54.1µs = ~1.85M rows/sec throughput
 - CSV encode-only sits between Zinc and JSON
 
 ### HBF — Haystack Binary Format (feature: `haystack-serde`)
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `hbf_encode_100_rows` | 27.4 µs | 36,496 | Binary encode 100-row grid |
-| `hbf_decode_100_rows` | 76.5 µs | 13,072 | Binary decode 100-row grid |
-| `hbf_encode_1000_rows` | 236.3 µs | 4,232 | Binary encode 1000-row grid |
-| `hbf_decode_1000_rows` | 754.2 µs | 1,326 | Binary decode 1000-row grid |
-
-**Payload sizes (100-row grid):**
-
-| Format | Size | vs Zinc | vs JSON |
-|--------|------|---------|---------|
-| Zinc | 3,927 bytes | — | 17% |
-| HBF | 8,132 bytes | 207% | 36% |
-| JSON | 22,528 bytes | 574% | — |
+| `hbf_encode_100_rows` | 27.3 µs | 36,630 | Binary encode 100-row grid |
+| `hbf_decode_100_rows` | 76.7 µs | 13,038 | Binary decode 100-row grid |
+| `hbf_encode_1000_rows` | 235.3 µs | 4,250 | Binary encode 1000-row grid |
+| `hbf_decode_1000_rows` | 755.2 µs | 1,324 | Binary decode 1000-row grid |
 
 **Observations:**
-- HBF encode is **1.9x faster** than Zinc encode (27.4µs vs 52.1µs) and **4.8x faster** than JSON encode (27.4µs vs 131.0µs)
-- HBF decode is **1.4x faster** than Zinc decode (76.5µs vs 108.6µs) and **2.5x faster** than JSON decode
-- HBF 1000-row encode (236.3µs) is **2.2x faster** than Zinc (520.1µs) and **5.6x faster** than JSON (1.329ms)
-- HBF payload is 36% the size of JSON but 207% of Zinc — Zinc's text format is surprisingly compact for Haystack data due to short tag names
+- HBF encode is **2.0x faster** than Zinc encode (27.3µs vs 54.1µs) and **5.0x faster** than JSON encode
+- HBF decode is **1.4x faster** than Zinc decode (76.7µs vs 105.6µs) and **2.6x faster** than JSON decode
+- HBF 1000-row encode (235.3µs) is **2.3x faster** than Zinc (541.3µs) and **5.8x faster** than JSON (1.357ms)
 - For federation sync and WebSocket watches, HBF's encode speed advantage (2-6x) outweighs the payload size trade-off
 
 ### Filter — Parse & Evaluate
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `filter_parse_simple` | 108.8 ns | 9,191,000 | Parse `site` |
-| `filter_parse_complex` | 631.1 ns | 1,585,000 | Parse `site and equip and point and temp > 70°F` |
-| `filter_eval_simple` | 12.4 ns | 80,645,000 | Evaluate marker check |
-| `filter_eval_complex` | 58.4 ns | 17,123,000 | Evaluate 4-clause filter with comparison |
+| `filter_parse_simple` | 110.8 ns | 9,026,000 | Parse `site` |
+| `filter_parse_complex` | 644.9 ns | 1,551,000 | Parse `site and equip and point and temp > 70°F` |
+| `filter_eval_simple` | 11.6 ns | 86,207,000 | Evaluate marker check |
+| `filter_eval_complex` | 55.6 ns | 17,986,000 | Evaluate 4-clause filter with comparison |
 
 **Observations:**
-- Simple filter evaluation at ~12ns = ~80.6M ops/sec
-- Complex 4-clause evaluation at ~58ns = ~17.1M ops/sec
+- Simple filter evaluation at ~12ns = ~86.2M ops/sec
+- Complex 4-clause evaluation at ~56ns = ~18.0M ops/sec
 - AST caching eliminates re-parsing overhead for repeated queries
 
-### Expression Evaluator (new in v0.6.0)
+### Expression Evaluator
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `expr_parse_simple` | 160.5 ns | 6,231,000 | Parse `$x + 1` |
-| `expr_parse_complex` | 860.8 ns | 1,162,000 | Parse `min($x, max($y, $z * 2.0)) + abs($a - $b)` |
-| `expr_eval_simple` | 47.5 ns | 21,053,000 | Evaluate simple arithmetic |
-| `expr_eval_complex` | 187.6 ns | 5,330,000 | Evaluate nested functions (min, max, abs) |
+| `expr_parse_simple` | 173.8 ns | 5,755,000 | Parse `$x + 1` |
+| `expr_parse_complex` | 871.0 ns | 1,148,000 | Parse `min($x, max($y, $z * 2.0)) + abs($a - $b)` |
+| `expr_eval_simple` | 42.3 ns | 23,641,000 | Evaluate simple arithmetic |
+| `expr_eval_complex` | 190.0 ns | 5,263,000 | Evaluate nested functions (min, max, abs) |
 
 **Observations:**
 - Expression parser handles complex nested-function expressions in < 1µs
-- Simple arithmetic evaluation at ~48ns = ~21M ops/sec — suitable for real-time computed points
-- Complex expression with 5 variables and 3 function calls: ~188ns = ~5.3M ops/sec
-- Parse once, evaluate many: parsed expressions are reusable AST objects
+- Simple arithmetic evaluation at ~42ns = ~23.6M ops/sec — suitable for real-time computed points
+- Complex expression with 5 variables and 3 function calls: ~190ns = ~5.3M ops/sec
 
-### Unit Conversion (new in v0.6.0)
+### Unit Conversion
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `unit_convert_temperature` | 93.4 ns | 10,707,000 | Convert °F → °C |
-| `unit_compatible_check` | 72.3 ns | 13,832,000 | Check °F ↔ °C compatibility |
-| `unit_quantity_lookup` | 37.7 ns | 26,525,000 | Look up quantity for unit |
+| `unit_convert_temperature` | 92.4 ns | 10,823,000 | Convert °F → °C |
+| `unit_compatible_check` | 69.6 ns | 14,368,000 | Check °F ↔ °C compatibility |
+| `unit_quantity_lookup` | 28.0 ns | 35,714,000 | Look up quantity for unit |
 
 **Observations:**
-- Temperature conversion (affine transform) at ~93ns = ~10.7M ops/sec
-- Compatibility check at ~72ns = ~13.8M ops/sec — fast enough for inline validation
-- Quantity lookup at ~38ns = ~26.5M ops/sec — hash table lookup
+- Temperature conversion (affine transform) at ~92ns = ~10.8M ops/sec
+- Compatibility check at ~70ns = ~14.4M ops/sec — fast enough for inline validation
+- Quantity lookup at ~28ns = ~35.7M ops/sec — hash table lookup
 
 ### Graph — Entity Operations
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `graph_get_entity` | 16.1 ns | 62,112,000 | Get by ID from 1000-entity graph |
-| `graph_add_entity` | 944.6 ns | 1,059,000 | Add single entity |
-| `graph_add_1000_entities` | 2.270 ms | 441 | Bulk insert 1000 entities into fresh graph |
-| `graph_update_entity` | 7.03 µs | 142,248 | Update entity in 1000-entity graph |
-| `graph_remove_entity` | 2.46 µs | 406,504 | Remove + re-add cycle |
-| `graph_filter_1000_entities` | 644.5 µs | 1,552 | Filter 1000 entities (`point and temp > 70°F`) |
-| `graph_filter_10000_entities` | 7.901 ms | 127 | Filter 10,000 entities (same filter) |
-| `graph_changes_since` | 2.05 ns | 487,800,000 | Query changelog at midpoint version |
-| `shared_graph_concurrent_rw` | 312.6 µs | 3,199 | 4 reader threads + 1 writer thread, 100 entities |
+| `graph_get_entity` | 18.3 ns | 54,645,000 | Get by ID from 1000-entity graph |
+| `graph_add_entity` | 918.0 ns | 1,089,000 | Add single entity (with changelog, CSR patch) |
+| `graph_add_1000_entities` | 2.190 ms | 457 | Add 1000 entities into fresh graph |
+| `graph_update_entity` | 1.959 µs | 510,464 | Update 2 tags in 1000-entity graph (delta indexing) |
+| `graph_remove_entity` | 2.527 µs | 395,726 | Remove + re-add cycle (with freelist) |
+| `graph_filter_1000_entities` | 609.2 µs | 1,641 | Filter 1000 entities (`point and temp > 70°F`) |
+| `graph_filter_10000_entities` | 6.632 ms | 151 | Filter 10,000 homogeneous entities (same filter) |
+| `graph_changes_since` | 1.8 ns | 555,556,000 | Binary search changelog at midpoint version |
+| `shared_graph_concurrent_rw` | 311.1 µs | 3,215 | 4 reader threads + 1 writer thread, 100 entities |
 
 **Observations:**
-- Entity lookup at ~16ns = ~62.1M ops/sec
-- `changes_since` at ~2ns is now essentially a version comparison + slice operation — ~488M ops/sec
-- Auto-indexed fields (siteRef, equipRef, dis, curVal, area, geoCity, kind, unit) add slight mutation overhead but enable fast ref-based queries
+- Entity lookup at ~18ns = ~54.6M ops/sec — single HashMap get
+- **`graph_update_entity` at 1.96µs is 3.4x faster than v0.6.x** (was 6.73µs) — delta indexing only re-indexes changed tags
+- `changes_since` at ~1.8ns uses binary search on VecDeque — ~556M ops/sec
+- Freelist ID recycling keeps entity IDs compact after remove+re-add cycles
 
-### Graph — Traversal Helpers (new in v0.6.0)
+### Graph — Bulk & Optimization Operations (new in v0.7.0)
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `graph_hierarchy_tree` | 56.6 µs | 17,668 | Build hierarchy tree from site (2 sites, 10 equips, 100 points) |
-| `graph_classify` | 72.7 ns | 13,755,000 | Classify entity type from markers |
-| `graph_ref_chain` | 195.7 ns | 5,110,000 | Walk point → equipRef → siteRef chain |
-| `graph_children` | 3.32 µs | 301,205 | Find all children of a site |
-| `graph_site_for` | 56.5 ns | 17,699,000 | Resolve site for a point |
-| `graph_equip_points` | 949.0 ns | 1,054,000 | Find all points for an equip |
+| `graph_bulk_add_10000` | 9.600 ms | 104 | Bulk-load 10K entities via `add_bulk`/`finalize_bulk` |
+| `graph_update_delta_10000` | 2.560 µs | 390,625 | Update 2 tags on 10K realistic graph (delta path) |
+| `graph_filter_realistic_10000` | 838.1 µs | 1,193 | Filter 10K diverse entities (`point and sensor and temp`) |
+| `graph_filter_compound_10000` | 12.1 µs | 82,645 | Compound filter with ref equality on 10K entities |
+| `graph_filter_range_10000` | 1.622 ms | 617 | Value-range filter (`curVal > 73°F`) on 10K entities |
+| `graph_csr_rebuild_10000` | 1.539 ms | 650 | Full CSR adjacency rebuild for 10K entities |
+| `graph_freelist_recycle_1000` | 1.374 ms | 728 | Remove + re-add 1000 entities using freelist recycling |
 
 **Observations:**
-- `site_for` at ~57ns = ~17.7M ops/sec — follows ref chain, returns in < 60ns
-- `ref_chain` at ~196ns walks a 2-hop chain (point→equip→site)
-- `classify` at ~73ns = ~13.8M ops/sec — determines entity type from markers
-- `equip_points` at ~949ns returns ~10 points per equip including filter evaluation
-- `hierarchy_tree` builds a full 112-entity tree (2 sites × 5 equips × 10 points) in ~57µs
+- **Bulk add is ~2.3x faster per entity than incremental add** — skips changelog, version bumps, CSR patching, and cache resizing (9.6ms / 10K vs ~21.9ms extrapolated from `add_1000`)
+- **Compound filter at 12.1µs on 10K entities** — roaring bitmap intersection prunes candidates before filter eval, yielding 82K queries/sec
+- Delta update holds steady at ~2.6µs regardless of graph size (1K vs 10K) — only touches changed tags
+- CSR rebuild at 1.54ms for 10K entities is fast enough for the 1000-op patch threshold
+- The realistic 10K dataset uses 8 entity types (sites, AHUs, VAVs, boilers, meters, weather stations, 9 point kinds) giving diverse tag sets for bitmap filtering
 
-### Snapshot — Write / Read (new in v0.6.0)
+### Graph — Structural Fingerprinting (new in v0.7.0)
+
+| Benchmark | Mean | Ops/sec | Description |
+|-----------|------|---------|-------------|
+| `structural_compute_5000` | 5.420 ms | 184 | Full WL recomputation on 5K diverse entities (depth=2) |
+| `structural_fingerprint_lookup` | 12.4 ns | 80,645,000 | Look up fingerprint for a single entity |
+| `structural_partitions_with_tags` | 2.916 µs | 343,000 | Find all partition bitmaps matching tag set |
+| `structural_histogram` | 1.196 µs | 836,120 | Build fingerprint frequency histogram |
+
+**Observations:**
+- Full WL structural recomputation at 5.4ms for 5K entities — ~1.08µs per entity amortized
+- Fingerprint lookup at ~12ns is a single HashMap get — ~80.6M ops/sec
+- Partitions-with-tags query at ~2.9µs scans partition tag sets and unions matching bitmaps
+- Adaptive depth: full WL refinement < 50K entities, tag-hash-only 50K-200K, skipped > 200K
+
+### Graph — Traversal Helpers
+
+| Benchmark | Mean | Ops/sec | Description |
+|-----------|------|---------|-------------|
+| `graph_hierarchy_tree` | 52.4 µs | 19,084 | Build hierarchy tree from site (2 sites, 10 equips, 100 points) |
+| `graph_classify` | 69.9 ns | 14,306,000 | Classify entity type from markers |
+| `graph_ref_chain` | 167.2 ns | 5,981,000 | Walk point → equipRef → siteRef chain |
+| `graph_children` | 3.160 µs | 316,456 | Find all children of a site |
+| `graph_site_for` | 54.7 ns | 18,282,000 | Resolve site for a point |
+| `graph_equip_points` | 880.5 ns | 1,135,700 | Find all points for an equip |
+
+**Observations:**
+- `site_for` at ~55ns = ~18.3M ops/sec — follows ref chain, returns in < 60ns
+- `ref_chain` at ~167ns walks a 2-hop chain (point→equip→site)
+- `classify` at ~70ns = ~14.3M ops/sec — determines entity type from markers
+- `hierarchy_tree` builds a full 112-entity tree (2 sites × 5 equips × 10 points) in ~52µs
+
+### Snapshot — Write / Read
 
 | Benchmark | Mean | Description |
 |-----------|------|-------------|
-| `snapshot_write_1000` | 1.459 ms | Write 1001-entity graph to HLSS snapshot (Zstd compressed) |
-| `snapshot_read_1000` | 3.185 ms | Read HLSS snapshot and load into graph |
+| `snapshot_write_1000` | 1.393 ms | Write 1001-entity graph to HLSS snapshot (Zstd compressed) |
+| `snapshot_read_1000` | 2.814 ms | Read HLSS snapshot and load into graph (uses `add_bulk`) |
+| `snapshot_write_10000_realistic` | 22.60 ms | Write 10K diverse-entity graph to HLSS snapshot |
+| `snapshot_read_10000_realistic` | 50.64 ms | Read HLSS snapshot and bulk-load 10K entities |
 
 **Observations:**
-- Snapshot write at ~1.5ms for 1000 entities = ~685k entities/sec write throughput
-- Snapshot read at ~3.2ms for 1000 entities = ~314k entities/sec load throughput
+- 1K snapshot write at ~1.4ms = ~718K entities/sec write throughput
+- 1K snapshot read at ~2.8ms = ~355K entities/sec load throughput
+- **10K realistic write at ~22.6ms = ~443K entities/sec** — diverse tags add ~38% overhead vs homogeneous data
+- **10K realistic read at ~50.6ms = ~198K entities/sec** — dominated by Zinc decode + bulk index build
 - Pipeline: Zinc encode → Zstd compress → CRC32 → atomic write
-- Suitable for periodic snapshots at 60-120s intervals with minimal server impact
+- Read path uses `add_bulk` / `finalize_bulk` — skips changelog and per-entity version bumps
 
-### Graph Validation (new in v0.6.0)
+### Graph Validation
 
 | Benchmark | Mean | Description |
 |-----------|------|-------------|
-| `validate_graph_1000` | 502.9 µs | Validate 1001 entities against standard ontology |
+| `validate_graph_1000` | 343.0 µs | Validate 1001 entities against standard ontology |
 
 **Observations:**
-- Graph validation at ~503µs for 1000 entities = ~1.99M entities/sec
+- Graph validation at ~343µs for 1000 entities = ~2.92M entities/sec
 - Validates: spec conformance, tag types, dangling refs, spec coverage
-- Fast enough for on-demand validation in CLI tooling and server health checks
 
 ### Ontology — Namespace Operations
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `ontology_load_standard` | 4.672 ms | 214 | Load standard namespace from bundled data |
-| `ontology_fits_check` | 114.0 ns | 8,772,000 | Check if entity fits `ahu` type |
-| `ontology_is_subtype` | 104.4 ns | 9,579,000 | Check `ahu` is subtype of `equip` |
-| `ontology_mandatory_tags` | 75.4 ns | 13,263,000 | Get mandatory tags for `ahu` |
-| `ontology_validate_entity` | 394.1 ns | 2,538,000 | Validate entity against ontology |
+| `ontology_load_standard` | 4.710 ms | 212 | Load standard namespace from bundled data |
+| `ontology_fits_check` | 98.8 ns | 10,121,000 | Check if entity fits `ahu` type |
+| `ontology_is_subtype` | 112.6 ns | 8,881,000 | Check `ahu` is subtype of `equip` |
+| `ontology_mandatory_tags` | 76.7 ns | 13,038,000 | Get mandatory tags for `ahu` |
+| `ontology_validate_entity` | 353.6 ns | 2,828,000 | Validate entity against ontology |
 
 **Observations:**
 - Namespace loading (~4.7ms) is a one-time startup cost
@@ -184,15 +211,15 @@
 
 | Benchmark | Mean | Ops/sec | Description |
 |-----------|------|---------|-------------|
-| `xeto_fits_ahu` | 402.4 ns | 2,485,000 | Fits check: entity with ahu+equip markers |
-| `xeto_fits_missing_marker` | 474.3 ns | 2,108,000 | Fits check: entity missing required marker (fail path) |
-| `xeto_fits_explain` | 476.5 ns | 2,099,000 | Fits with issue explanation (fail path) |
-| `xeto_fits_site` | 306.6 ns | 3,262,000 | Fits check: simple site entity |
-| `xeto_effective_slots` | 170.2 ns | 5,876,000 | Resolve effective slots for a spec |
-| `xeto_effective_slots_inherited` | 173.7 ns | 5,757,000 | Resolve effective slots with base chain |
+| `xeto_fits_ahu` | 409.7 ns | 2,441,000 | Fits check: entity with ahu+equip markers |
+| `xeto_fits_missing_marker` | 473.8 ns | 2,111,000 | Fits check: entity missing required marker (fail path) |
+| `xeto_fits_explain` | 473.6 ns | 2,111,000 | Fits with issue explanation (fail path) |
+| `xeto_fits_site` | 322.8 ns | 3,098,000 | Fits check: simple site entity |
+| `xeto_effective_slots` | 183.9 ns | 5,438,000 | Resolve effective slots for a spec |
+| `xeto_effective_slots_inherited` | 177.8 ns | 5,624,000 | Resolve effective slots with base chain |
 
 **Observations:**
-- Effective slot resolution at ~170ns = ~5.9M ops/sec
+- Effective slot resolution at ~178-184ns = ~5.4-5.6M ops/sec
 - Xeto fitting stable at ~2-3M ops/sec
 
 ---
@@ -279,34 +306,70 @@ Federation benchmarks using 3 in-process servers: 1 lead server with 2 federated
 
 ---
 
-## Version Comparison (0.4.x → 0.5.3 → 0.5.4 → 0.6.0)
+## Version Comparison (0.4.x → 0.6.x → 0.7.0)
 
-Key improvements across versions. v0.6.0 adds HBF binary codec, expression evaluator, unit conversion, graph traversal helpers, HLSS snapshots, graph-wide validation, and HBF-over-HTTP for federation.
+Key improvements across versions. v0.7.0 adds roaring bitmap indexing, delta tag indexing, incremental CSR adjacency, bulk entity loading, ID freelist recycling, and WL structural fingerprinting.
 
-| Benchmark | v0.4.x | v0.5.3 | v0.5.4 | v0.6.0 | v0.5.4→v0.6.0 |
+| Benchmark | v0.4.x | v0.5.4 | v0.6.x | v0.7.0 | v0.6.x→v0.7.0 |
 |-----------|--------|--------|--------|--------|----------------|
-| `zinc_encode_100_rows` | 64.2 µs | 60.1 µs | 53.6 µs | 52.1 µs | ↑3% |
-| `zinc_encode_1000_rows` | 640.1 µs | 591.7 µs | 549.2 µs | 520.1 µs | ↑6% |
-| `filter_eval_simple` | 15.7 ns | 11.6 ns | 10.4 ns | 11.7 ns | ~(noise) |
-| `filter_eval_complex` | 84.6 ns | 55.5 ns | 51.4 ns | 57.7 ns | ~(noise) |
-| `graph_get_entity` | 22.3 ns | 18.6 ns | 16.7 ns | 18.0 ns | ~(noise) |
-| `graph_update_entity` | 32.1 µs | 6.55 µs | 7.10 µs | 6.73 µs | ↑5% |
-| `graph_changes_since` | — | — | 17.2 µs | 2.0 ns | **↑8,600x** |
-| `xeto_effective_slots` | 598.1 ns | 311.1 ns | 165.0 ns | 320.9 ns | ~(variance) |
-| `http_read_filter` | 820.1 µs | 501.8 µs | 459.1 µs | — | — |
-| `http_read_filter_large` | 4.302 ms | 3.699 ms | 3.404 ms | — | — |
-| `http_his_write_100` | 468.6 µs | 259.8 µs | 254.8 µs | — | — |
-| `fed. sync 10k` | — | 42.5 ms | 40.8 ms | 39.8 ms | ↑2% |
-| `fed. read_by_id` | 6.13 ms | 63.4 µs | 60.9 µs | 61.7 µs | ~(noise) |
-| `fed. read_by_id (HBF)` | — | — | — | 56.5 µs | **new** |
-| `fed. filter_site` | 13.65 ms | 75.2 µs | 72.8 µs | 74.4 µs | ~(noise) |
-| `fed. filter 20k` | — | 79.1 ms | 76.3 ms | 75.7 ms | ↑1% |
-| `fed. filter 20k (HBF)` | — | — | — | 58.6 ms | **23% faster** |
-| `fed. concurrent_reads_50` | 111.7 ms | 760.1 µs | 749.4 µs | 768.9 µs | ~(noise) |
+| `zinc_encode_100_rows` | 64.2 µs | 53.6 µs | 52.1 µs | 54.1 µs | ~(noise) |
+| `zinc_encode_1000_rows` | 640.1 µs | 549.2 µs | 520.1 µs | 541.3 µs | ~(noise) |
+| `filter_eval_simple` | 15.7 ns | 10.4 ns | 11.7 ns | 11.6 ns | ~(noise) |
+| `filter_eval_complex` | 84.6 ns | 51.4 ns | 57.7 ns | 55.6 ns | ~(noise) |
+| `graph_get_entity` | 22.3 ns | 16.7 ns | 18.0 ns | 18.3 ns | ~(noise) |
+| `graph_update_entity` | 32.1 µs | 7.10 µs | 6.73 µs | 1.96 µs | **↑3.4x** |
+| `graph_filter_10000` | — | — | 7.90 ms | 6.63 ms | **↑16%** |
+| `graph_changes_since` | — | 17.2 µs | 2.0 ns | 1.8 ns | ~(noise) |
+| `snapshot_read_1000` | — | — | 3.19 ms | 2.81 ms | **↑12%** |
+| `validate_graph_1000` | — | — | 502.9 µs | 343.0 µs | **↑32%** |
+| `xeto_effective_slots` | 598.1 ns | 165.0 ns | 320.9 ns | 183.9 ns | ↑43% |
+| `graph_bulk_add_10000` | — | — | — | 9.60 ms | **new** |
+| `graph_filter_compound_10000` | — | — | — | 12.1 µs | **new** |
+| `structural_compute_5000` | — | — | — | 5.42 ms | **new** |
+| `structural_fingerprint_lookup` | — | — | — | 12.4 ns | **new** |
+| `snapshot_write_10000_realistic` | — | — | — | 22.6 ms | **new** |
+| `snapshot_read_10000_realistic` | — | — | — | 50.6 ms | **new** |
 
-**v0.6.0 headlines:**
-- `graph_changes_since` went from 17.2µs (scanning changelog) to **2.0ns** (direct version comparison + slice) — an **8,600x improvement** from the reactive changelog rewrite.
-- **HBF over HTTP** delivers 23% faster federation queries for large payloads — binary encode/decode eliminates the dominant text serialization cost.
+**v0.7.0 headlines:**
+- **`graph_update_entity` 3.4x faster** — delta indexing only re-indexes changed tags instead of rebuilding the full index. The dominant cost moves from O(all_tags) to O(changed_tags).
+- **`graph_filter_10000` 16% faster** — roaring bitmap intersection replaces hand-rolled Vec<u64> bitsets. SIMD-accelerated AND/OR operations on compressed bitmaps.
+- **`snapshot_read_1000` 12% faster** — bulk load path (`add_bulk`/`finalize_bulk`) skips per-entity changelog, version bumps, and CSR patching.
+- **Compound filter at 12.1µs on 10K entities** — bitmap tag index prunes candidates to a narrow set before filter evaluation; 82K queries/sec for complex multi-clause filters with ref equality.
+- **Structural fingerprinting** — WL-inspired fingerprint computation at 5.4ms for 5K entities; individual lookups at 12.4ns (~80M ops/sec).
+
+---
+
+## Benchmark Data
+
+Test datasets used in benchmarks:
+
+| Dataset | Entity Count | Structure | Used By |
+|---------|-------------|-----------|---------|
+| Homogeneous 1K | 1,001 | 1 site + 1K identical points (7 tags each) | Existing graph benchmarks |
+| Homogeneous 10K | 10,001 | 1 site + 10K identical points | `graph_filter_10000_entities` |
+| Hierarchy 112 | 112 | 2 sites → 10 equips → 100 points | Traversal benchmarks |
+| Realistic 5K | ~5,000 | ~62 campuses × 80 entities (sites, AHUs, VAVs, boilers, meters, weather, 9 point kinds) | Structural benchmarks |
+| Realistic 10K | ~10,000 | ~125 campuses × 80 entities with diverse tag sets | Optimization + snapshot benchmarks |
+
+The "realistic" datasets model a multi-campus building portfolio with 8 equipment types and 9 point kinds (temp, pressure, flow, occupancy, damper, speed, setpoint, enable, alarm), providing ~25 distinct structural fingerprints for WL partitioning.
+
+---
+
+## Running Benchmarks
+
+```bash
+# All core benchmarks (default features)
+cargo bench -p rusty-haystack-core
+
+# Include HBF binary codec benchmarks
+cargo bench -p rusty-haystack-core --features haystack-serde
+
+# Run a specific benchmark
+cargo bench -p rusty-haystack-core -- graph_filter
+
+# Federation benchmarks (requires haystack-server)
+cargo bench -p rusty-haystack-server --bench federation
+```
 
 ---
 
@@ -314,34 +377,38 @@ Key improvements across versions. v0.6.0 adds HBF binary codec, expression evalu
 
 | Category | Highlight | Throughput |
 |----------|-----------|------------|
-| **Codec (Zinc encode)** | 52.1µs / 100 rows | ~1.92M rows/sec |
-| **Codec (Zinc decode)** | 108.6µs / 100 rows | ~921k rows/sec |
-| **Codec (HBF encode)** | 27.4µs / 100 rows | ~3.65M rows/sec |
-| **Codec (HBF decode)** | 76.5µs / 100 rows | ~1.31M rows/sec |
-| Graph lookup | 18.0ns per get | ~55.6M ops/sec |
-| Graph filtering | 610.1µs / 1000 entities | ~1.6k queries/sec |
-| Graph ref_chain | 167.3ns per walk | ~6.0M ops/sec |
-| Graph site_for | 61.6ns per resolve | ~16.2M ops/sec |
-| Graph hierarchy_tree | 52.3µs / 112 entities | ~19.1k trees/sec |
-| Filter evaluation | 57.7ns complex eval | ~17.3M ops/sec |
-| Expression eval | 186.1ns complex eval | ~5.4M ops/sec |
-| Unit conversion | 94.7ns per convert | ~10.6M ops/sec |
-| Ontology fitting | Sub-microsecond | ~8.9M ops/sec |
-| Xeto slot resolution | 320.9ns effective slots | ~3.1M ops/sec |
-| Snapshot write | 1.380ms / 1000 entities | ~725k entities/sec |
-| Snapshot read | 3.050ms / 1000 entities | ~328k entities/sec |
-| Graph validation | 334.9µs / 1000 entities | ~2.99M entities/sec |
-| HTTP read by ID | 58.6µs per request | ~17.1k req/sec |
-| HTTP filter (100 results) | 459.1µs per request | ~2.2k req/sec |
-| HTTP nav | 73.5µs per request | ~13.6k req/sec |
-| HTTP watch poll | 48.4µs per request | ~20.7k req/sec |
-| Concurrent reads (50) | 721.7µs total | ~69.3k effective req/sec |
-| History read (1000 items) | 1.900ms per request | ~526 req/sec |
-| Fed. sync (10k entities) | 39.8ms per remote | ~254k entities/sec |
-| Fed. read by ID (Zinc) | 61.7µs per request | ~16.2k req/sec |
-| **Fed. read by ID (HBF)** | **56.5µs per request** | **~17.7k req/sec** |
-| Fed. filter (20k, Zinc) | 75.7ms per request | ~13 req/sec |
-| **Fed. filter (20k, HBF)** | **58.6ms per request** | **~17 req/sec** |
-| Fed. proxy hisRead (1000) | 3.681ms per request | ~272 req/sec |
-| Fed. proxy pointWrite | 118.6µs per request | ~8.4k req/sec |
-| Fed. concurrent reads (50) | 768.9µs total | ~65.1k effective req/sec |
+| **Codec (Zinc encode)** | 54.1µs / 100 rows | ~1.85M rows/sec |
+| **Codec (Zinc decode)** | 105.6µs / 100 rows | ~947K rows/sec |
+| **Codec (HBF encode)** | 27.3µs / 100 rows | ~3.66M rows/sec |
+| **Codec (HBF decode)** | 76.7µs / 100 rows | ~1.30M rows/sec |
+| Graph lookup | 18.3ns per get | ~54.6M ops/sec |
+| **Graph update (delta)** | **1.96µs per update** | **~510K ops/sec** |
+| Graph add (single) | 918ns per entity | ~1.09M ops/sec |
+| **Graph bulk add** | **9.6ms / 10K entities** | **~1.04M entities/sec** |
+| Graph filtering (1K) | 609.2µs per query | ~1.6K queries/sec |
+| **Graph compound filter (10K)** | **12.1µs per query** | **~82.6K queries/sec** |
+| Graph ref_chain | 167.2ns per walk | ~6.0M ops/sec |
+| Graph site_for | 54.7ns per resolve | ~18.3M ops/sec |
+| Graph hierarchy_tree | 52.4µs / 112 entities | ~19.1K trees/sec |
+| Graph CSR rebuild | 1.54ms / 10K entities | ~6.50M edges/sec |
+| **Structural compute** | **5.42ms / 5K entities** | **~922K entities/sec** |
+| **Structural lookup** | **12.4ns per fingerprint** | **~80.6M ops/sec** |
+| Filter evaluation | 55.6ns complex eval | ~18.0M ops/sec |
+| Expression eval | 190.0ns complex eval | ~5.3M ops/sec |
+| Unit conversion | 92.4ns per convert | ~10.8M ops/sec |
+| Ontology fitting | Sub-microsecond | ~10.1M ops/sec |
+| Xeto slot resolution | 183.9ns effective slots | ~5.4M ops/sec |
+| Snapshot write (1K) | 1.39ms / 1K entities | ~718K entities/sec |
+| Snapshot read (1K) | 2.81ms / 1K entities | ~355K entities/sec |
+| **Snapshot write (10K)** | **22.6ms / 10K entities** | **~443K entities/sec** |
+| **Snapshot read (10K)** | **50.6ms / 10K entities** | **~198K entities/sec** |
+| Graph validation | 343.0µs / 1K entities | ~2.92M entities/sec |
+| HTTP read by ID | 58.6µs per request | ~17.1K req/sec |
+| HTTP filter (100 results) | 459.1µs per request | ~2.2K req/sec |
+| HTTP watch poll | 48.4µs per request | ~20.7K req/sec |
+| Concurrent reads (50) | 721.7µs total | ~69.3K effective req/sec |
+| Fed. sync (10K entities) | 39.8ms per remote | ~254K entities/sec |
+| **Fed. read by ID (HBF)** | **56.5µs per request** | **~17.7K req/sec** |
+| **Fed. filter (20K, HBF)** | **58.6ms per request** | **~17 req/sec** |
+| Fed. proxy pointWrite | 120.5µs per request | ~8.3K req/sec |
+| Fed. concurrent reads (50) | 749.4µs total | ~66.7K effective req/sec |

@@ -624,6 +624,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2373,6 +2385,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "roaring"
+version = "0.10.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2487,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -2499,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-cli"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "clap",
  "env_logger",
@@ -2513,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-client"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "base64",
  "dashmap",
@@ -2535,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-core"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "arrow",
  "base64",
@@ -2551,6 +2579,8 @@ dependencies = [
  "rand 0.10.0",
  "rayon",
  "regex",
+ "roaring",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",
@@ -2567,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-server"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "actix-http",
  "actix-rt",

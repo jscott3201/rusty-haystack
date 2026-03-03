@@ -9,6 +9,8 @@
 // Returns `None` when bitmap optimization is not applicable (e.g.
 // comparison nodes), causing the caller to fall back to a full scan.
 
+use roaring::RoaringBitmap;
+
 use crate::filter::{CmpOp, FilterNode};
 use crate::kinds::Kind;
 
@@ -16,18 +18,9 @@ use super::adjacency::RefAdjacency;
 use super::bitmap::TagBitmapIndex;
 use super::value_index::ValueIndex;
 
-/// Helper: convert a list of entity IDs into a bitmap.
-fn ids_to_bitmap(entity_ids: &[usize], max_id: usize) -> Vec<u64> {
-    if max_id == 0 {
-        return Vec::new();
-    }
-    let mut bitmap = vec![0u64; max_id.div_ceil(64)];
-    for &eid in entity_ids {
-        if eid < max_id {
-            bitmap[eid / 64] |= 1u64 << (eid % 64);
-        }
-    }
-    bitmap
+/// Helper: convert a list of entity IDs into a roaring bitmap.
+fn ids_to_bitmap(entity_ids: &[usize]) -> RoaringBitmap {
+    entity_ids.iter().map(|&id| id as u32).collect()
 }
 
 /// Compute a bitmap of candidate entity ids that *may* match the given
@@ -39,14 +32,13 @@ pub fn bitmap_candidates(
     node: &FilterNode,
     tag_index: &TagBitmapIndex,
     max_id: usize,
-) -> Option<Vec<u64>> {
+) -> Option<RoaringBitmap> {
     match node {
         FilterNode::Has(path) => {
             if !path.is_single() {
                 return None; // multi-segment paths need entity resolution
             }
-            let bm = tag_index.has_tag(path.first())?;
-            Some(bm.clone())
+            tag_index.has_tag(path.first()).cloned()
         }
 
         FilterNode::Missing(path) => {
@@ -58,9 +50,9 @@ pub fn bitmap_candidates(
                 None => {
                     // Tag never seen: all entities match "missing".
                     if max_id == 0 {
-                        Some(Vec::new())
+                        Some(RoaringBitmap::new())
                     } else {
-                        Some(TagBitmapIndex::negate(&[], max_id))
+                        Some(TagBitmapIndex::negate(&RoaringBitmap::new(), max_id))
                     }
                 }
             }
@@ -71,18 +63,10 @@ pub fn bitmap_candidates(
             let r = bitmap_candidates(right, tag_index, max_id);
             match (l, r) {
                 (Some(lb), Some(rb)) => {
-                    // Selectivity optimization: order by popcount.
-                    let lc = TagBitmapIndex::count_ones(&lb);
-                    let rc = TagBitmapIndex::count_ones(&rb);
-                    if lc == 0 || rc == 0 {
-                        // Short-circuit: one side is empty.
-                        return Some(Vec::new());
+                    if lb.is_empty() || rb.is_empty() {
+                        return Some(RoaringBitmap::new());
                     }
-                    if lc <= rc {
-                        Some(TagBitmapIndex::intersect(&[&lb, &rb]))
-                    } else {
-                        Some(TagBitmapIndex::intersect(&[&rb, &lb]))
-                    }
+                    Some(TagBitmapIndex::intersect(&[&lb, &rb]))
                 }
                 // If only one side is optimizable, use it as the candidate
                 // set; the other side will be checked during the scan phase.
@@ -117,22 +101,13 @@ pub fn bitmap_candidates(
 
 /// Enhanced candidate computation that uses B-Tree value indexes and
 /// ref adjacency for Cmp nodes in addition to tag bitmap indexes.
-///
-/// When a `Cmp` node references a single-segment path with an available value
-/// index, this produces a precise candidate set (only entities whose value
-/// satisfies the comparison) rather than just tag-existence candidates.
-///
-/// For Ref equality (`siteRef == @site-0`), uses the adjacency reverse map
-/// to produce an exact bitmap without scanning entities.
-///
-/// Falls back to `bitmap_candidates` behavior for non-indexed fields.
 pub fn bitmap_candidates_with_values(
     node: &FilterNode,
     tag_index: &TagBitmapIndex,
     value_index: &ValueIndex,
     adjacency: &RefAdjacency,
     max_id: usize,
-) -> Option<Vec<u64>> {
+) -> Option<RoaringBitmap> {
     match node {
         // Ref equality: use adjacency reverse map for O(1) lookup.
         FilterNode::Cmp {
@@ -142,7 +117,7 @@ pub fn bitmap_candidates_with_values(
         } if path.is_single() => {
             let field = path.first();
             let entity_ids = adjacency.sources_for(field, &r.val);
-            Some(ids_to_bitmap(&entity_ids, max_id))
+            Some(ids_to_bitmap(&entity_ids))
         }
 
         FilterNode::Cmp { path, op, val }
@@ -158,7 +133,7 @@ pub fn bitmap_candidates_with_values(
                 CmpOp::Ge => value_index.ge_lookup(field, val),
             };
 
-            Some(ids_to_bitmap(&entity_ids, max_id))
+            Some(ids_to_bitmap(&entity_ids))
         }
 
         FilterNode::And(left, right) => {
@@ -166,16 +141,10 @@ pub fn bitmap_candidates_with_values(
             let r = bitmap_candidates_with_values(right, tag_index, value_index, adjacency, max_id);
             match (l, r) {
                 (Some(lb), Some(rb)) => {
-                    let lc = TagBitmapIndex::count_ones(&lb);
-                    let rc = TagBitmapIndex::count_ones(&rb);
-                    if lc == 0 || rc == 0 {
-                        return Some(Vec::new());
+                    if lb.is_empty() || rb.is_empty() {
+                        return Some(RoaringBitmap::new());
                     }
-                    if lc <= rc {
-                        Some(TagBitmapIndex::intersect(&[&lb, &rb]))
-                    } else {
-                        Some(TagBitmapIndex::intersect(&[&rb, &lb]))
-                    }
+                    Some(TagBitmapIndex::intersect(&[&lb, &rb]))
                 }
                 (Some(bm), None) | (None, Some(bm)) => Some(bm),
                 (None, None) => None,
@@ -255,7 +224,6 @@ mod tests {
         let (idx, max_id) = build_test_index();
         let ast = parse_filter("geoCity == \"Richmond\"").unwrap();
         let bm = bitmap_candidates(&ast, &idx, max_id);
-        // Comparison on a single-segment path uses tag existence bitmap.
         assert!(bm.is_some());
         let bits: Vec<usize> = TagBitmapIndex::iter_set_bits(&bm.unwrap()).collect();
         assert_eq!(bits, vec![3]);
@@ -280,20 +248,16 @@ mod tests {
     #[test]
     fn and_with_one_side_optimizable() {
         let (idx, max_id) = build_test_index();
-        // "site" is optimizable, "dis == \"hello\"" is a comparison.
         let ast = parse_filter("site and dis == \"hello\"").unwrap();
         let bm = bitmap_candidates(&ast, &idx, max_id);
-        // Should still produce a bitmap (intersection of site and dis existence).
         assert!(bm.is_some());
     }
 
     #[test]
     fn or_with_one_side_not_optimizable() {
         let (idx, max_id) = build_test_index();
-        // "site" optimizable, "siteRef->area" is not.
         let ast = parse_filter("site or siteRef->area").unwrap();
         let bm = bitmap_candidates(&ast, &idx, max_id);
-        // Cannot optimize OR if one side is unknown.
         assert!(bm.is_none());
     }
 
@@ -302,7 +266,6 @@ mod tests {
         let idx = TagBitmapIndex::new();
         let ast = parse_filter("site").unwrap();
         let bm = bitmap_candidates(&ast, &idx, 0);
-        // No bitmap for unknown tag.
         assert!(bm.is_none());
     }
 
@@ -312,7 +275,6 @@ mod tests {
         let ast = parse_filter("not unknownTag").unwrap();
         let bm = bitmap_candidates(&ast, &idx, max_id).unwrap();
         let bits: Vec<usize> = TagBitmapIndex::iter_set_bits(&bm).collect();
-        // All 4 entities should match.
         assert_eq!(bits, vec![0, 1, 2, 3]);
     }
 }

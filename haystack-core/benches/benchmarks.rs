@@ -690,6 +690,239 @@ fn hbf_benchmarks(c: &mut Criterion) {
     );
 }
 
+/// Build a realistic Haystack graph with diverse entity types.
+///
+/// Structure per "campus" (repeats to reach target count):
+///   1 site, 3 AHUs, 2 VAVs, 1 boiler, 1 meter, 1 weather station,
+///   then ~10 points per equip with varying kinds (temp, pressure, flow, occ, cmd).
+/// Total per campus ≈ 80 entities (8 parents + ~72 points).
+fn build_realistic_graph(target: usize) -> EntityGraph {
+    let mut graph = EntityGraph::new();
+    let campuses = (target / 80).max(1);
+
+    for c in 0..campuses {
+        // Site
+        let site_id = format!("site-{c}");
+        let mut s = HDict::new();
+        s.set("id", Kind::Ref(HRef::from_val(&site_id)));
+        s.set("site", Kind::Marker);
+        s.set("dis", Kind::Str(format!("Campus {c}")));
+        s.set("geoCity", Kind::Str("Portland".into()));
+        s.set(
+            "area",
+            Kind::Number(Number::new(
+                50_000.0 + c as f64 * 1000.0,
+                Some("ft²".into()),
+            )),
+        );
+        graph.add(s).unwrap();
+
+        // Equips: 3 AHU, 2 VAV, 1 boiler, 1 meter, 1 weather
+        let equip_defs: Vec<(&str, &[&str])> = vec![
+            ("ahu", &["equip", "ahu", "hvac"][..]),
+            ("ahu", &["equip", "ahu", "hvac"]),
+            ("ahu", &["equip", "ahu", "hvac"]),
+            ("vav", &["equip", "vav", "hvac"]),
+            ("vav", &["equip", "vav", "hvac"]),
+            ("boiler", &["equip", "boiler", "hotWaterHeating"]),
+            ("meter", &["equip", "meter", "elecMeter"]),
+            ("weather", &["equip", "weatherStation"]),
+        ];
+
+        let mut equip_ids = Vec::new();
+        for (ei, (prefix, tags)) in equip_defs.iter().enumerate() {
+            let eid = format!("{prefix}-{c}-{ei}");
+            let mut e = HDict::new();
+            e.set("id", Kind::Ref(HRef::from_val(&eid)));
+            for tag in *tags {
+                e.set(*tag, Kind::Marker);
+            }
+            e.set("siteRef", Kind::Ref(HRef::from_val(&site_id)));
+            e.set("dis", Kind::Str(format!("{prefix} {c}-{ei}")));
+            graph.add(e).unwrap();
+            equip_ids.push(eid);
+        }
+
+        // Points: ~9 per equip with varying kinds
+        let point_kinds: &[(&str, &[&str], &str, f64)] = &[
+            ("temp", &["sensor", "temp", "air"], "°F", 72.0),
+            ("pressure", &["sensor", "pressure", "air"], "inH₂O", 1.2),
+            ("flow", &["sensor", "flow", "air"], "cfm", 1500.0),
+            ("occ", &["sensor", "occ"], "%", 85.0),
+            ("damper", &["cmd", "damper"], "%", 50.0),
+            ("speed", &["cmd", "speed", "fan"], "%", 75.0),
+            ("sp", &["sp", "temp", "air"], "°F", 72.0),
+            ("enable", &["cmd", "enable"], "", 1.0),
+            ("alarm", &["sensor", "alarm"], "", 0.0),
+        ];
+
+        for (ei, eq_id) in equip_ids.iter().enumerate() {
+            for (pi, (kind, tags, unit, base_val)) in point_kinds.iter().enumerate() {
+                let pid = format!("pt-{c}-{ei}-{kind}-{pi}");
+                let mut p = HDict::new();
+                p.set("id", Kind::Ref(HRef::from_val(&pid)));
+                p.set("point", Kind::Marker);
+                for tag in *tags {
+                    p.set(*tag, Kind::Marker);
+                }
+                p.set("kind", Kind::Str("Number".into()));
+                p.set("equipRef", Kind::Ref(HRef::from_val(eq_id)));
+                p.set("siteRef", Kind::Ref(HRef::from_val(&site_id)));
+                let val = base_val + (pi as f64 * 0.5) + (c as f64 * 0.1);
+                if unit.is_empty() {
+                    p.set("curVal", Kind::Number(Number::unitless(val)));
+                } else {
+                    p.set(
+                        "curVal",
+                        Kind::Number(Number::new(val, Some((*unit).into()))),
+                    );
+                }
+                graph.add(p).unwrap();
+            }
+        }
+    }
+    graph
+}
+
+fn graph_optimization_benchmarks(c: &mut Criterion) {
+    // ── Bulk Add vs Incremental Add ──
+
+    // Incremental add (existing bench uses add(), this uses add_bulk())
+    c.bench_function("graph_bulk_add_10000", |b| {
+        b.iter(|| {
+            let mut g = EntityGraph::new();
+            for i in 0..10_000 {
+                let mut d = HDict::new();
+                d.set("id", Kind::Ref(HRef::from_val(format!("b-{i}"))));
+                d.set("point", Kind::Marker);
+                d.set("siteRef", Kind::Ref(HRef::from_val("site-0")));
+                g.add_bulk(d).unwrap();
+            }
+            g.finalize_bulk(1);
+            g
+        });
+    });
+
+    // ── Delta Update (few tags changed on large graph) ──
+
+    let mut g10k = build_realistic_graph(10_000);
+    // Ensure CSR is built so updates exercise the patch path
+    g10k.rebuild_csr();
+
+    c.bench_function("graph_update_delta_10000", |b| {
+        b.iter(|| {
+            let mut changes = HDict::new();
+            changes.set("dis", Kind::Str("Updated".into()));
+            changes.set("curVal", Kind::Number(Number::new(99.0, Some("°F".into()))));
+            // Update a point in the middle of the graph
+            let _ = g10k.update(black_box("pt-60-2-temp-0"), changes);
+        });
+    });
+
+    // ── Filter Queries on Realistic Data ──
+
+    c.bench_function("graph_filter_realistic_10000", |b| {
+        b.iter(|| g10k.read(black_box("point and sensor and temp"), 0));
+    });
+
+    c.bench_function("graph_filter_compound_10000", |b| {
+        b.iter(|| {
+            g10k.read(
+                black_box("point and sensor and (temp or pressure) and siteRef == @site-0"),
+                0,
+            )
+        });
+    });
+
+    c.bench_function("graph_filter_range_10000", |b| {
+        b.iter(|| g10k.read(black_box("point and curVal > 73°F"), 0));
+    });
+
+    // ── CSR Rebuild ──
+
+    c.bench_function("graph_csr_rebuild_10000", |b| {
+        let mut g = build_realistic_graph(10_000);
+        b.iter(|| g.rebuild_csr());
+    });
+
+    // ── ID Freelist Recycle ──
+
+    c.bench_function("graph_freelist_recycle_1000", |b| {
+        let mut g = EntityGraph::new();
+        for i in 0..2000 {
+            let mut d = HDict::new();
+            d.set("id", Kind::Ref(HRef::from_val(format!("r-{i}"))));
+            d.set("point", Kind::Marker);
+            g.add(d).unwrap();
+        }
+        // Remove 1000 to populate freelist
+        for i in 0..1000 {
+            g.remove(&format!("r-{i}")).unwrap();
+        }
+        b.iter(|| {
+            // Re-add using recycled IDs
+            for i in 0..1000 {
+                let mut d = HDict::new();
+                d.set("id", Kind::Ref(HRef::from_val(format!("r-{i}"))));
+                d.set("point", Kind::Marker);
+                g.add(d).unwrap();
+            }
+            // Remove again to reset
+            for i in 0..1000 {
+                g.remove(&format!("r-{i}")).unwrap();
+            }
+        });
+    });
+
+    // ── Snapshot at Scale ──
+
+    {
+        use haystack_core::graph::{SnapshotReader, SnapshotWriter};
+        let tmp = tempfile::tempdir().unwrap();
+        let sg = SharedGraph::new(build_realistic_graph(10_000));
+        let writer = SnapshotWriter::new(tmp.path().to_path_buf(), 10);
+
+        c.bench_function("snapshot_write_10000_realistic", |b| {
+            b.iter(|| writer.write(black_box(&sg)));
+        });
+
+        let snap_path = writer.write(&sg).unwrap();
+        c.bench_function("snapshot_read_10000_realistic", |b| {
+            b.iter(|| {
+                let g = SharedGraph::new(EntityGraph::new());
+                SnapshotReader::load(black_box(&snap_path), &g)
+            });
+        });
+    }
+}
+
+fn structural_benchmarks(c: &mut Criterion) {
+    // Build a realistic graph for structural index benchmarks
+    let mut graph = build_realistic_graph(5_000);
+
+    c.bench_function("structural_compute_5000", |b| {
+        b.iter(|| {
+            graph.recompute_structural();
+        });
+    });
+
+    // Ensure structural index is computed for query benchmarks
+    graph.recompute_structural();
+    let si = graph.structural_index().expect("just computed");
+
+    c.bench_function("structural_fingerprint_lookup", |b| {
+        b.iter(|| si.fingerprint(black_box("pt-30-0-temp-0")));
+    });
+
+    c.bench_function("structural_partitions_with_tags", |b| {
+        b.iter(|| si.partitions_with_tags(black_box(&["point", "sensor", "temp"])));
+    });
+
+    c.bench_function("structural_histogram", |b| {
+        b.iter(|| si.histogram());
+    });
+}
+
 criterion_group!(
     benches,
     codec_benchmarks,
@@ -702,6 +935,8 @@ criterion_group!(
     traversal_benchmarks,
     snapshot_benchmarks,
     validation_benchmarks,
+    graph_optimization_benchmarks,
+    structural_benchmarks,
 );
 
 #[cfg(feature = "haystack-serde")]

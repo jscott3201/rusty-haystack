@@ -231,14 +231,14 @@ impl SnapshotReader {
             .decode_grid(zinc_str)
             .map_err(|e| SnapshotError::Codec(e.to_string()))?;
 
-        // Import entities into graph — each row with an "id" tag is added.
+        // Import entities into graph — bulk load skips changelog tracking.
         graph.write(|g| {
             for row in &grid.rows {
-                if let Some(id_ref) = row.id() {
-                    g.add(row.clone()).ok(); // ignore duplicates on restore
-                    let _ = id_ref; // id_ref used only for the guard
+                if row.id().is_some() {
+                    g.add_bulk(row.clone()).ok();
                 }
             }
+            g.finalize_bulk(graph_version);
         });
 
         Ok(SnapshotMeta {
