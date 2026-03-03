@@ -178,6 +178,13 @@ The `graph/flow` and `graph/neighbors` endpoints return a nodes grid with an edg
 | roaring | 0.10 | Compressed bitmap indexes (RoaringBitmap) |
 | rustc-hash | 2 | Fast non-cryptographic hashing (FxHasher) |
 
+## What's New in v0.7.1
+
+- **HLSS v2 snapshot format** — snapshot body codec switched from Zinc (text) to HBF (binary), same Zstd + CRC32 envelope
+- **31% faster snapshot writes** — HBF binary encode eliminates text formatting overhead (22.6ms → 16.3ms at 10K entities)
+- **26% faster snapshot reads** — HBF binary decode avoids text parsing (50.6ms → 37.3ms at 10K entities)
+- **Clean break** — v1 (Zinc) snapshots are no longer readable; old snapshots must be recreated after upgrade
+
 ## What's New in v0.7.0
 
 - **Roaring bitmap indexes** — TagBitmapIndex migrated from hand-rolled `Vec<u64>` to RoaringBitmap with automatic compression and SIMD acceleration

@@ -1,16 +1,15 @@
-//! HLSS v1 binary snapshot format — write/read EntityGraph state to disk.
+//! HLSS v2 binary snapshot format — write/read EntityGraph state to disk.
 //!
-//! Format: [Header][Zstd-compressed Zinc body][CRC32 footer]
+//! Format: [Header][Zstd-compressed HBF body][CRC32 footer]
 //! Header: "HLSS" (4 bytes) + format_version (u16 LE) + entity_count (u32 LE)
 //!         + timestamp (i64 LE, Unix nanos) + graph_version (u64 LE) = 26 bytes
-//! Body: Zstd-compressed Zinc-encoded grid of all entities
+//! Body: Zstd-compressed HBF-encoded grid of all entities
 //! Footer: CRC32 (u32 LE) over header + compressed body
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::codecs::Codec;
-use crate::codecs::zinc::ZincCodec;
+use crate::codecs;
 use crate::data::{HCol, HDict, HGrid};
 use crate::graph::shared::SharedGraph;
 
@@ -84,14 +83,11 @@ impl SnapshotWriter {
             (grid, version)
         });
 
-        // Encode to Zinc
-        let zinc = ZincCodec;
-        let zinc_str = zinc
-            .encode_grid(&grid)
-            .map_err(|e| SnapshotError::Codec(e.to_string()))?;
+        // Encode to HBF binary
+        let hbf_bytes = codecs::encode_grid_binary(&grid).map_err(SnapshotError::Codec)?;
 
         // Compress
-        let compressed = zstd::encode_all(zinc_str.as_bytes(), self.compression_level)
+        let compressed = zstd::encode_all(hbf_bytes.as_slice(), self.compression_level)
             .map_err(|e| SnapshotError::Decompression(e.to_string()))?;
 
         // Build header
@@ -103,7 +99,7 @@ impl SnapshotWriter {
 
         let mut buf = Vec::new();
         buf.extend_from_slice(b"HLSS");
-        buf.extend_from_slice(&1u16.to_le_bytes()); // format version
+        buf.extend_from_slice(&2u16.to_le_bytes()); // format version
         buf.extend_from_slice(&entity_count.to_le_bytes());
         buf.extend_from_slice(&timestamp.to_le_bytes());
         buf.extend_from_slice(&version.to_le_bytes());
@@ -192,7 +188,7 @@ impl SnapshotReader {
 
         // Parse header
         let format_version = u16::from_le_bytes([data[4], data[5]]);
-        if format_version != 1 {
+        if format_version != 2 {
             return Err(SnapshotError::UnsupportedVersion(format_version));
         }
         let entity_count = u32::from_le_bytes(data[6..10].try_into().unwrap());
@@ -223,13 +219,8 @@ impl SnapshotReader {
             )));
         }
 
-        // Decode Zinc
-        let zinc_str =
-            std::str::from_utf8(&decompressed).map_err(|e| SnapshotError::Codec(e.to_string()))?;
-        let zinc = ZincCodec;
-        let grid = zinc
-            .decode_grid(zinc_str)
-            .map_err(|e| SnapshotError::Codec(e.to_string()))?;
+        // Decode HBF binary
+        let grid = codecs::decode_grid_binary(&decompressed).map_err(SnapshotError::Codec)?;
 
         // Import entities into graph — bulk load skips changelog tracking.
         graph.write(|g| {
@@ -286,7 +277,7 @@ mod tests {
         let graph2 = SharedGraph::new(EntityGraph::new());
         let meta = SnapshotReader::load(&snap_path, &graph2).unwrap();
 
-        assert_eq!(meta.format_version, 1);
+        assert_eq!(meta.format_version, 2);
         assert_eq!(meta.entity_count, 3);
         assert_eq!(meta.graph_version, 3);
         assert_eq!(graph2.len(), 3);
@@ -400,5 +391,23 @@ mod tests {
         let graph = SharedGraph::new(EntityGraph::new());
         let result = SnapshotReader::load_from_bytes(&data, Path::new("x.hlss"), &graph);
         assert!(matches!(result, Err(SnapshotError::UnsupportedVersion(99))));
+    }
+
+    #[test]
+    fn v1_snapshot_rejected() {
+        // Build a buffer with version 1 (old format)
+        let mut data = Vec::new();
+        data.extend_from_slice(b"HLSS");
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0i64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&[0u8; 4]); // fake body
+        let crc = crc32fast::hash(&data);
+        data.extend_from_slice(&crc.to_le_bytes());
+
+        let graph = SharedGraph::new(EntityGraph::new());
+        let result = SnapshotReader::load_from_bytes(&data, Path::new("old.hlss"), &graph);
+        assert!(matches!(result, Err(SnapshotError::UnsupportedVersion(1))));
     }
 }

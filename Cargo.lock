@@ -2515,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "pyo3",
@@ -2527,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "env_logger",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-client"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64",
  "dashmap",
@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arrow",
  "base64",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-haystack-server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "actix-http",
  "actix-rt",

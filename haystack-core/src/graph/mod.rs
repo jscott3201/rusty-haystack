@@ -33,6 +33,7 @@ pub mod csr;
 pub mod entity_graph;
 pub mod query_planner;
 pub mod shared;
+#[cfg(feature = "haystack-serde")]
 pub mod snapshot;
 pub mod structural;
 pub mod subscriber;
@@ -41,6 +42,7 @@ pub mod value_index;
 pub use changelog::{ChangelogGap, DEFAULT_CHANGELOG_CAPACITY, DiffOp, GraphDiff};
 pub use entity_graph::{EntityGraph, GraphError, HierarchyNode};
 pub use shared::SharedGraph;
+#[cfg(feature = "haystack-serde")]
 pub use snapshot::{SnapshotError, SnapshotMeta, SnapshotReader, SnapshotWriter};
 pub use structural::StructuralIndex;
 pub use subscriber::GraphSubscriber;

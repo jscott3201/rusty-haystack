@@ -170,17 +170,17 @@
 
 | Benchmark | Mean | Description |
 |-----------|------|-------------|
-| `snapshot_write_1000` | 1.393 ms | Write 1001-entity graph to HLSS snapshot (Zstd compressed) |
-| `snapshot_read_1000` | 2.814 ms | Read HLSS snapshot and load into graph (uses `add_bulk`) |
-| `snapshot_write_10000_realistic` | 22.60 ms | Write 10K diverse-entity graph to HLSS snapshot |
-| `snapshot_read_10000_realistic` | 50.64 ms | Read HLSS snapshot and bulk-load 10K entities |
+| `snapshot_write_1000` | 1.127 ms | Write 1001-entity graph to HLSS v2 snapshot (HBF + Zstd) |
+| `snapshot_read_1000` | 2.505 ms | Read HLSS v2 snapshot and load into graph (uses `add_bulk`) |
+| `snapshot_write_10000_realistic` | 16.33 ms | Write 10K diverse-entity graph to HLSS v2 snapshot |
+| `snapshot_read_10000_realistic` | 37.29 ms | Read HLSS v2 snapshot and bulk-load 10K entities |
 
 **Observations:**
-- 1K snapshot write at ~1.4ms = ~718K entities/sec write throughput
-- 1K snapshot read at ~2.8ms = ~355K entities/sec load throughput
-- **10K realistic write at ~22.6ms = ~443K entities/sec** — diverse tags add ~38% overhead vs homogeneous data
-- **10K realistic read at ~50.6ms = ~198K entities/sec** — dominated by Zinc decode + bulk index build
-- Pipeline: Zinc encode → Zstd compress → CRC32 → atomic write
+- 1K snapshot write at ~1.1ms = ~887K entities/sec write throughput
+- 1K snapshot read at ~2.5ms = ~399K entities/sec load throughput
+- **10K realistic write at ~16.3ms = ~613K entities/sec** — 31% faster than v0.7.0 Zinc-based snapshots
+- **10K realistic read at ~37.3ms = ~268K entities/sec** — 26% faster from HBF binary decode
+- Pipeline: HBF binary encode → Zstd compress → CRC32 → atomic write (HLSS v2 format)
 - Read path uses `add_bulk` / `finalize_bulk` — skips changelog and per-entity version bumps
 
 ### Graph Validation
@@ -306,36 +306,37 @@ Federation benchmarks using 3 in-process servers: 1 lead server with 2 federated
 
 ---
 
-## Version Comparison (0.4.x → 0.6.x → 0.7.0)
+## Version Comparison (0.4.x → 0.6.x → 0.7.x)
 
-Key improvements across versions. v0.7.0 adds roaring bitmap indexing, delta tag indexing, incremental CSR adjacency, bulk entity loading, ID freelist recycling, and WL structural fingerprinting.
+Key improvements across versions. v0.7.0 adds roaring bitmap indexing, delta tag indexing, incremental CSR adjacency, bulk entity loading, ID freelist recycling, and WL structural fingerprinting. v0.7.1 switches HLSS snapshots from Zinc to HBF binary codec.
 
-| Benchmark | v0.4.x | v0.5.4 | v0.6.x | v0.7.0 | v0.6.x→v0.7.0 |
-|-----------|--------|--------|--------|--------|----------------|
-| `zinc_encode_100_rows` | 64.2 µs | 53.6 µs | 52.1 µs | 54.1 µs | ~(noise) |
-| `zinc_encode_1000_rows` | 640.1 µs | 549.2 µs | 520.1 µs | 541.3 µs | ~(noise) |
-| `filter_eval_simple` | 15.7 ns | 10.4 ns | 11.7 ns | 11.6 ns | ~(noise) |
-| `filter_eval_complex` | 84.6 ns | 51.4 ns | 57.7 ns | 55.6 ns | ~(noise) |
-| `graph_get_entity` | 22.3 ns | 16.7 ns | 18.0 ns | 18.3 ns | ~(noise) |
-| `graph_update_entity` | 32.1 µs | 7.10 µs | 6.73 µs | 1.96 µs | **↑3.4x** |
-| `graph_filter_10000` | — | — | 7.90 ms | 6.63 ms | **↑16%** |
-| `graph_changes_since` | — | 17.2 µs | 2.0 ns | 1.8 ns | ~(noise) |
-| `snapshot_read_1000` | — | — | 3.19 ms | 2.81 ms | **↑12%** |
-| `validate_graph_1000` | — | — | 502.9 µs | 343.0 µs | **↑32%** |
-| `xeto_effective_slots` | 598.1 ns | 165.0 ns | 320.9 ns | 183.9 ns | ↑43% |
-| `graph_bulk_add_10000` | — | — | — | 9.60 ms | **new** |
-| `graph_filter_compound_10000` | — | — | — | 12.1 µs | **new** |
-| `structural_compute_5000` | — | — | — | 5.42 ms | **new** |
-| `structural_fingerprint_lookup` | — | — | — | 12.4 ns | **new** |
-| `snapshot_write_10000_realistic` | — | — | — | 22.6 ms | **new** |
-| `snapshot_read_10000_realistic` | — | — | — | 50.6 ms | **new** |
+| Benchmark | v0.4.x | v0.5.4 | v0.6.x | v0.7.0 | v0.7.1 | v0.7.0→v0.7.1 |
+|-----------|--------|--------|--------|--------|--------|----------------|
+| `zinc_encode_100_rows` | 64.2 µs | 53.6 µs | 52.1 µs | 54.1 µs | 54.1 µs | ~(noise) |
+| `zinc_encode_1000_rows` | 640.1 µs | 549.2 µs | 520.1 µs | 541.3 µs | 541.3 µs | ~(noise) |
+| `filter_eval_simple` | 15.7 ns | 10.4 ns | 11.7 ns | 11.6 ns | 11.6 ns | ~(noise) |
+| `filter_eval_complex` | 84.6 ns | 51.4 ns | 57.7 ns | 55.6 ns | 55.6 ns | ~(noise) |
+| `graph_get_entity` | 22.3 ns | 16.7 ns | 18.0 ns | 18.3 ns | 18.3 ns | ~(noise) |
+| `graph_update_entity` | 32.1 µs | 7.10 µs | 6.73 µs | 1.96 µs | 1.96 µs | ~(noise) |
+| `graph_filter_10000` | — | — | 7.90 ms | 6.63 ms | 6.63 ms | ~(noise) |
+| `graph_changes_since` | — | 17.2 µs | 2.0 ns | 1.8 ns | 1.8 ns | ~(noise) |
+| `snapshot_read_1000` | — | — | 3.19 ms | 2.81 ms | 2.50 ms | **↑11%** |
+| `snapshot_write_1000` | — | — | — | 1.39 ms | 1.13 ms | **↑19%** |
+| `snapshot_write_10000_realistic` | — | — | — | 22.6 ms | 16.3 ms | **↑31%** |
+| `snapshot_read_10000_realistic` | — | — | — | 50.6 ms | 37.3 ms | **↑26%** |
+| `validate_graph_1000` | — | — | 502.9 µs | 343.0 µs | 343.0 µs | ~(noise) |
+| `xeto_effective_slots` | 598.1 ns | 165.0 ns | 320.9 ns | 183.9 ns | 183.9 ns | ~(noise) |
+| `graph_bulk_add_10000` | — | — | — | 9.60 ms | 9.60 ms | ~(noise) |
+| `graph_filter_compound_10000` | — | — | — | 12.1 µs | 12.1 µs | ~(noise) |
+| `structural_compute_5000` | — | — | — | 5.42 ms | 5.42 ms | ~(noise) |
+| `structural_fingerprint_lookup` | — | — | — | 12.4 ns | 12.4 ns | ~(noise) |
 
-**v0.7.0 headlines:**
-- **`graph_update_entity` 3.4x faster** — delta indexing only re-indexes changed tags instead of rebuilding the full index. The dominant cost moves from O(all_tags) to O(changed_tags).
-- **`graph_filter_10000` 16% faster** — roaring bitmap intersection replaces hand-rolled Vec<u64> bitsets. SIMD-accelerated AND/OR operations on compressed bitmaps.
-- **`snapshot_read_1000` 12% faster** — bulk load path (`add_bulk`/`finalize_bulk`) skips per-entity changelog, version bumps, and CSR patching.
-- **Compound filter at 12.1µs on 10K entities** — bitmap tag index prunes candidates to a narrow set before filter evaluation; 82K queries/sec for complex multi-clause filters with ref equality.
-- **Structural fingerprinting** — WL-inspired fingerprint computation at 5.4ms for 5K entities; individual lookups at 12.4ns (~80M ops/sec).
+**v0.7.1 headlines:**
+- **HLSS v2 snapshot format** — body codec switched from Zinc (text) to HBF (binary). Same Zstd + CRC32 envelope.
+- **`snapshot_write_10000_realistic` 31% faster** — HBF binary encode is 2.2x faster than Zinc text encode, reducing the pre-compression step.
+- **`snapshot_read_10000_realistic` 26% faster** — HBF binary decode avoids text parsing; combined with smaller decompressed payload.
+- **`snapshot_write_1000` 19% faster** — even at smaller scale, HBF encode wins from eliminated text formatting.
+- **Clean break**: HLSS v2 snapshots are not backward-compatible with v1 (Zinc). Old snapshots must be recreated.
 
 ---
 
@@ -398,10 +399,10 @@ cargo bench -p rusty-haystack-server --bench federation
 | Unit conversion | 92.4ns per convert | ~10.8M ops/sec |
 | Ontology fitting | Sub-microsecond | ~10.1M ops/sec |
 | Xeto slot resolution | 183.9ns effective slots | ~5.4M ops/sec |
-| Snapshot write (1K) | 1.39ms / 1K entities | ~718K entities/sec |
-| Snapshot read (1K) | 2.81ms / 1K entities | ~355K entities/sec |
-| **Snapshot write (10K)** | **22.6ms / 10K entities** | **~443K entities/sec** |
-| **Snapshot read (10K)** | **50.6ms / 10K entities** | **~198K entities/sec** |
+| Snapshot write (1K) | 1.13ms / 1K entities | ~887K entities/sec |
+| Snapshot read (1K) | 2.50ms / 1K entities | ~399K entities/sec |
+| **Snapshot write (10K)** | **16.3ms / 10K entities** | **~613K entities/sec** |
+| **Snapshot read (10K)** | **37.3ms / 10K entities** | **~268K entities/sec** |
 | Graph validation | 343.0µs / 1K entities | ~2.92M entities/sec |
 | HTTP read by ID | 58.6µs per request | ~17.1K req/sec |
 | HTTP filter (100 results) | 459.1µs per request | ~2.2K req/sec |
