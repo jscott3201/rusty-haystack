@@ -13,8 +13,8 @@ categories.workspace = true
 name = "haystack_server"
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.8.0", path = "../haystack-core" }
-haystack-client = { package = "rusty-haystack-client", version = "0.8.0", path = "../haystack-client" }
+haystack-core = { package = "rusty-haystack-core", version = "0.8.1", path = "../haystack-core" }
+haystack-client = { package = "rusty-haystack-client", version = "0.8.1", path = "../haystack-client" }
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
