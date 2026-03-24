@@ -76,9 +76,8 @@ fn get_runtime() -> &'static tokio::runtime::Runtime {
 
 /// A test server that starts a real Haystack server on a free port.
 ///
-/// The server runs in a dedicated thread with its own actix runtime
-/// because actix-web types are not Send. Auth is disabled to avoid
-/// SCRAM handshake overhead in benchmarks.
+/// The server runs in a dedicated thread with its own tokio runtime.
+/// Auth is disabled to avoid SCRAM handshake overhead in benchmarks.
 struct TestServer {
     port: u16,
     _thread: std::thread::JoinHandle<()>,
@@ -92,7 +91,10 @@ impl TestServer {
         let ns = DefNamespace::load_standard().unwrap();
 
         let thread = std::thread::spawn(move || {
-            let rt = actix_rt::System::new();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime");
             rt.block_on(async move {
                 HaystackServer::new(graph)
                     .with_namespace(ns)

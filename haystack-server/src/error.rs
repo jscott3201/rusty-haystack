@@ -1,7 +1,7 @@
-//! Haystack error grids and Actix Web error integration.
+//! Haystack error grids and Axum error integration.
 
-use actix_web::http::StatusCode;
-use actix_web::{HttpResponse, ResponseError};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use std::fmt;
 
 use haystack_core::data::{HCol, HDict, HGrid};
@@ -58,21 +58,25 @@ impl fmt::Display for HaystackError {
     }
 }
 
-impl ResponseError for HaystackError {
-    fn status_code(&self) -> StatusCode {
-        self.status
-    }
-
-    fn error_response(&self) -> HttpResponse {
+// Note: Error responses are always encoded as Zinc (the default Haystack format)
+// regardless of the client's Accept header, because IntoResponse does not have
+// access to the original request. All Haystack clients must support Zinc decoding.
+impl IntoResponse for HaystackError {
+    fn into_response(self) -> Response {
         let grid = error_grid(&self.message);
-        // Encode as zinc by default for error responses
         match content::encode_response_grid(&grid, "text/zinc") {
-            Ok((body, content_type)) => HttpResponse::build(self.status)
-                .content_type(content_type)
-                .body(body),
-            Err(_) => HttpResponse::build(self.status)
-                .content_type("text/plain")
-                .body(format!("Error: {}", self.message)),
+            Ok((body, content_type)) => (
+                self.status,
+                [(axum::http::header::CONTENT_TYPE, content_type)],
+                body,
+            )
+                .into_response(),
+            Err(_) => (
+                self.status,
+                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                format!("Error: {}", self.message),
+            )
+                .into_response(),
         }
     }
 }
@@ -104,14 +108,7 @@ mod tests {
     fn haystack_error_display() {
         let err = HaystackError::bad_request("invalid filter");
         assert_eq!(err.to_string(), "invalid filter");
-        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn haystack_error_response_is_grid() {
-        let err = HaystackError::internal("test error");
-        let resp = err.error_response();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

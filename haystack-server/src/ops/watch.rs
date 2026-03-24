@@ -1,57 +1,9 @@
 //! Watch ops — subscribe, poll, and unsubscribe for entity changes.
-//!
-//! # Overview
-//!
-//! The watch ops allow clients to track changes to a set of entities.
-//! A watch is created via `watchSub`, polled via `watchPoll`, and
-//! torn down via `watchUnsub`.
-//!
-//! # watchSub (`POST /api/watchSub`)
-//!
-//! ## Request
-//!
-//! Grid meta may contain `watchId` (Str) to add IDs to an existing watch.
-//! Rows contain:
-//!
-//! | Column | Kind | Description            |
-//! |--------|------|------------------------|
-//! | `id`   | Ref  | Entity to subscribe to |
-//!
-//! ## Response
-//!
-//! Grid meta contains `watchId` (Str). Rows are the current state of
-//! each subscribed entity (one column per unique tag).
-//!
-//! # watchPoll (`POST /api/watchPoll`)
-//!
-//! ## Request
-//!
-//! Grid meta must contain `watchId` (Str). No rows required.
-//!
-//! ## Response
-//!
-//! Rows are entities that changed since the last poll. Empty grid if
-//! no changes occurred.
-//!
-//! # watchUnsub (`POST /api/watchUnsub`)
-//!
-//! ## Request
-//!
-//! Grid meta must contain `watchId` (Str). Rows may contain `id` (Ref)
-//! to selectively remove entities. If no rows are present, the entire
-//! watch is deleted.
-//!
-//! ## Response
-//!
-//! Empty grid on success.
-//!
-//! # Errors
-//!
-//! - **400 Bad Request** — missing `id` rows, missing `watchId` in meta, or
-//!   request decode failure.
-//! - **404 Not Found** — `watchId` does not exist or caller is not the owner.
 
-use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
+use axum::Extension;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
@@ -59,25 +11,20 @@ use haystack_core::kinds::Kind;
 use crate::auth::AuthUser;
 use crate::content;
 use crate::error::HaystackError;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// POST /api/watchSub — subscribe to entity changes.
-///
-/// Request grid has `id` column with Ref values for entities to watch.
-/// May also have a `watchId` column to add IDs to an existing watch.
-/// Returns the current state of watched entities with `watchId` in grid meta.
 pub async fn handle_sub(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    auth: Option<Extension<AuthUser>>,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -85,11 +32,9 @@ pub async fn handle_sub(
     let request_grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
 
-    let username = req
-        .extensions()
-        .get::<AuthUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "anonymous".to_string());
+    let username = auth
+        .map(|Extension(u)| u.username.clone())
+        .unwrap_or_else(|| "anonymous".into());
 
     // Collect entity IDs
     let ids: Vec<String> = request_grid
@@ -134,28 +79,12 @@ pub async fn handle_sub(
 
     for id in &ids {
         if let Some(entity) = state.graph.get(id) {
-            // Local entity — include directly.
             for name in entity.tag_names() {
                 if seen.insert(name.to_string()) {
                     col_set.push(name.to_string());
                 }
             }
             rows.push(entity);
-        } else if let Some(connector) = state.federation.owner_of(id) {
-            // Federated entity — look up in the connector's cache and register
-            // the ID for remote watch tracking.
-            if let Some(entity) = connector.get_cached_entity(id) {
-                for name in entity.tag_names() {
-                    if seen.insert(name.to_string()) {
-                        col_set.push(name.to_string());
-                    }
-                }
-                rows.push((*entity).clone());
-            }
-            connector.add_remote_watch(id);
-            // TODO: For real-time push, establish a WS watch subscription on
-            // the remote server. Currently the background sync loop keeps the
-            // cache fresh and watchPoll detects changes from cache updates.
         }
     }
 
@@ -169,25 +98,21 @@ pub async fn handle_sub(
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// POST /api/watchPoll — poll for changes since last poll.
-///
-/// Request grid has `watchId` in the grid meta.
-/// Returns changed entities since last poll.
 pub async fn handle_poll(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    auth: Option<Extension<AuthUser>>,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -195,11 +120,9 @@ pub async fn handle_poll(
     let request_grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
 
-    let username = req
-        .extensions()
-        .get::<AuthUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "anonymous".to_string());
+    let username = auth
+        .map(|Extension(u)| u.username.clone())
+        .unwrap_or_else(|| "anonymous".into());
 
     let watch_id = request_grid
         .meta
@@ -237,22 +160,17 @@ pub async fn handle_poll(
 }
 
 /// POST /api/watchUnsub — unsubscribe from a watch.
-///
-/// Request grid has `watchId` in the grid meta.
-/// Request rows may have `id` column to remove specific IDs from the watch.
-/// If no IDs are present in the request rows, the entire watch is removed.
 pub async fn handle_unsub(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    auth: Option<Extension<AuthUser>>,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -260,11 +178,9 @@ pub async fn handle_unsub(
     let request_grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
 
-    let username = req
-        .extensions()
-        .get::<AuthUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "anonymous".to_string());
+    let username = auth
+        .map(|Extension(u)| u.username.clone())
+        .unwrap_or_else(|| "anonymous".into());
 
     let watch_id = request_grid
         .meta
@@ -299,20 +215,13 @@ pub async fn handle_unsub(
                 "watch not found: {watch_id}"
             )));
         }
-
-        // Remove remote watch tracking for any federated IDs being unsubscribed.
-        for id in &ids {
-            if let Some(connector) = state.federation.owner_of(id) {
-                connector.remove_remote_watch(id);
-            }
-        }
     }
 
     respond_grid(&HGrid::new(), accept)
 }
 
-fn respond_grid(grid: &HGrid, accept: &str) -> Result<HttpResponse, HaystackError> {
+fn respond_grid(grid: &HGrid, accept: &str) -> Result<Response, HaystackError> {
     let (encoded, ct) = content::encode_response_grid(grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }

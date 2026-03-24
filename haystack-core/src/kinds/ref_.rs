@@ -31,6 +31,18 @@ impl HRef {
     }
 }
 
+impl HRef {
+    /// Check if this ref's identifier is a valid Haystack ref.
+    /// Valid refs are non-empty and contain only: ASCII letters, digits, `_`, `:`, `-`, `.`, `~`.
+    pub fn is_valid(&self) -> bool {
+        !self.val.is_empty()
+            && self
+                .val
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-' | '.' | '~'))
+    }
+}
+
 impl PartialEq for HRef {
     fn eq(&self, other: &Self) -> bool {
         self.val == other.val

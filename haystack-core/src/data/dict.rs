@@ -108,8 +108,8 @@ impl HDict {
         self.tags.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Iterate over tags sorted by key name.
-    pub fn sorted_iter(&self) -> Vec<(&str, &Kind)> {
+    /// Return tags sorted by key name.
+    pub fn sorted_tags(&self) -> Vec<(&str, &Kind)> {
         let mut pairs: Vec<_> = self.tags.iter().map(|(k, v)| (k.as_str(), v)).collect();
         pairs.sort_unstable_by_key(|(k, _)| *k);
         pairs

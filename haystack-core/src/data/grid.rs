@@ -51,6 +51,9 @@ impl HGrid {
     }
 
     /// Create a grid from its constituent parts.
+    ///
+    /// Note: No validation is performed on column/row consistency for performance.
+    /// Callers are responsible for ensuring rows contain only tags matching column names.
     pub fn from_parts(meta: HDict, cols: Vec<HCol>, rows: Vec<HDict>) -> Self {
         Self { meta, cols, rows }
     }

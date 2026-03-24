@@ -1,31 +1,8 @@
 //! The `changes` op — return graph changelog entries since a given version.
-//!
-//! Used by federation connectors for incremental delta sync instead of full
-//! `read("*")` on every interval.
-//!
-//! # Request Grid Columns
-//!
-//! | Column    | Kind   | Description                                     |
-//! |-----------|--------|-------------------------------------------------|
-//! | `version` | Number | Graph version to query changes since (0 for all) |
-//!
-//! # Response
-//!
-//! Grid meta contains `curVer` (Number) — the current graph version.
-//!
-//! | Column    | Kind   | Description                                    |
-//! |-----------|--------|------------------------------------------------|
-//! | `version` | Number | Version after this mutation                    |
-//! | `op`      | Str    | `"add"`, `"update"`, or `"remove"`             |
-//! | `ref`     | Str    | Entity ref value                               |
-//! | `entity`  | Dict   | Entity data (present for add/update only)      |
-//!
-//! # Errors
-//!
-//! - **400 Bad Request** — request grid decode failure.
-//! - **500 Internal Server Error** — encoding error.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::graph::changelog::DiffOp;
@@ -33,34 +10,22 @@ use haystack_core::kinds::Kind;
 
 use crate::content;
 use crate::error::HaystackError;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// Maximum number of change rows returned in a single response.
 const MAX_CHANGE_ROWS: usize = 10_000;
 
 /// POST /api/changes
-///
-/// Request grid should have a single row with a `version` column (Number).
-/// Returns a grid of changelog entries since that version, each with:
-/// - `version`: Number — the version after the mutation
-/// - `op`: Str — "add", "update", or "remove"
-/// - `ref`: Str — the entity ref value
-/// - `entity`: the entity dict (for add/update; absent for remove)
-///
-/// Also includes `curVer` in the response meta with the current graph version,
-/// so the caller can store it for the next delta sync.
 pub async fn handle(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -84,8 +49,6 @@ pub async fn handle(
     let diffs = match state.graph.changes_since(since_version) {
         Ok(d) => d,
         Err(gap) => {
-            // Subscriber fell behind. Return an error grid with the gap info
-            // so the caller knows to do a full resync.
             let mut err_meta = HDict::new();
             err_meta.set(
                 "curVer",
@@ -103,7 +66,7 @@ pub async fn handle(
             let grid = HGrid::from_parts(err_meta, Vec::new(), Vec::new());
             let (encoded, ct) = content::encode_response_grid(&grid, accept)
                 .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-            return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
+            return Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response());
         }
     };
 
@@ -119,7 +82,7 @@ pub async fn handle(
         let grid = HGrid::from_parts(meta, Vec::new(), Vec::new());
         let (encoded, ct) = content::encode_response_grid(&grid, accept)
             .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-        return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
+        return Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response());
     }
 
     let cols = vec![
@@ -153,7 +116,6 @@ pub async fn handle(
                     diff.timestamp as f64,
                 )),
             );
-            // Include entity data: full entity for Add, changed_tags for Update.
             if let Some(entity) = &diff.new {
                 row.set("entity", Kind::Dict(Box::new(entity.clone())));
             } else if let Some(changed) = &diff.changed_tags {
@@ -179,5 +141,5 @@ pub async fn handle(
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }

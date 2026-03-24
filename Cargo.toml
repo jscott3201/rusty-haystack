@@ -9,9 +9,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/jscott3201/rusty-haystack"
 homepage = "https://github.com/jscott3201/rusty-haystack"

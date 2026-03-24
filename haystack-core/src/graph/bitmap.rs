@@ -21,20 +21,23 @@ impl TagBitmapIndex {
 
     /// Add an entity's tags to the index.
     pub fn add(&mut self, entity_id: usize, tags: &[String]) {
-        let eid = entity_id as u32;
+        let eid = u32::try_from(entity_id).expect("entity_id exceeds u32::MAX");
         for tag in tags {
             self.bitmaps.entry(tag.clone()).or_default().insert(eid);
         }
     }
 
     /// Remove an entity from the given tag bitmaps.
+    ///
+    /// Empty bitmaps are cleaned up to avoid unbounded growth of the map.
     pub fn remove(&mut self, entity_id: usize, tags: &[String]) {
-        let eid = entity_id as u32;
+        let eid = u32::try_from(entity_id).expect("entity_id exceeds u32::MAX");
         for tag in tags {
             if let Some(bm) = self.bitmaps.get_mut(tag.as_str()) {
                 bm.remove(eid);
             }
         }
+        self.bitmaps.retain(|_, bm| !bm.is_empty());
     }
 
     /// Get the bitmap for a tag, if it exists.
@@ -63,14 +66,11 @@ impl TagBitmapIndex {
         result
     }
 
-    /// Bitwise NOT of a bitmap, limited to max_id bits.
-    pub fn negate(bitmap: &RoaringBitmap, max_id: usize) -> RoaringBitmap {
-        if max_id == 0 {
-            return RoaringBitmap::new();
-        }
-        let mut all = RoaringBitmap::from_iter(0..max_id as u32);
-        all -= bitmap;
-        all
+    /// Bitwise NOT of a bitmap relative to a universe of live entity IDs.
+    pub fn negate(bitmap: &RoaringBitmap, universe: &RoaringBitmap) -> RoaringBitmap {
+        let mut result = universe.clone();
+        result -= bitmap;
+        result
     }
 
     /// Iterate over set bit positions.
@@ -117,8 +117,9 @@ mod tests {
         assert!(idx.has_tag("ahu").is_some());
 
         idx.remove(3, &["equip".into(), "ahu".into()]);
-        let bm = idx.has_tag("equip").unwrap();
-        assert_eq!(TagBitmapIndex::count_ones(bm), 0);
+        // Empty bitmaps are cleaned up after removal.
+        assert!(idx.has_tag("equip").is_none());
+        assert!(idx.has_tag("ahu").is_none());
     }
 
     #[test]
@@ -155,7 +156,8 @@ mod tests {
         let mut bm = RoaringBitmap::new();
         bm.insert(1);
         bm.insert(3);
-        let negated = TagBitmapIndex::negate(&bm, 5);
+        let universe = RoaringBitmap::from_iter(0..5u32);
+        let negated = TagBitmapIndex::negate(&bm, &universe);
         let bits: Vec<usize> = TagBitmapIndex::iter_set_bits(&negated).collect();
         assert_eq!(bits, vec![0, 2, 4]);
     }
@@ -193,7 +195,10 @@ mod tests {
     fn empty_bitmap_operations() {
         assert_eq!(TagBitmapIndex::intersect(&[]).len(), 0);
         assert_eq!(TagBitmapIndex::union(&[]).len(), 0);
-        assert_eq!(TagBitmapIndex::negate(&RoaringBitmap::new(), 0).len(), 0);
+        assert_eq!(
+            TagBitmapIndex::negate(&RoaringBitmap::new(), &RoaringBitmap::new()).len(),
+            0
+        );
         assert_eq!(TagBitmapIndex::count_ones(&RoaringBitmap::new()), 0);
     }
 
@@ -222,7 +227,8 @@ mod tests {
     #[test]
     fn negate_exact_word_boundary() {
         let bm = RoaringBitmap::from_iter(0..64u32);
-        let negated = TagBitmapIndex::negate(&bm, 64);
+        let universe = RoaringBitmap::from_iter(0..64u32);
+        let negated = TagBitmapIndex::negate(&bm, &universe);
         assert_eq!(TagBitmapIndex::count_ones(&negated), 0);
     }
 }

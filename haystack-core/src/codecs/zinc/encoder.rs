@@ -98,7 +98,7 @@ fn encode_ref(r: &crate::kinds::HRef) -> String {
 /// Encode an HDict inline (for use inside grid cells or nested dicts).
 fn encode_dict_inline(d: &HDict) -> Result<String, CodecError> {
     let mut parts = Vec::new();
-    for (k, v) in d.sorted_iter() {
+    for (k, v) in d.sorted_tags() {
         if matches!(v, Kind::Marker) {
             parts.push(k.to_string());
         } else {
@@ -112,7 +112,7 @@ fn encode_dict_inline(d: &HDict) -> Result<String, CodecError> {
 /// Format: `"tag1 tag2:val2 tag3:val3"`
 pub fn encode_meta(d: &HDict) -> Result<String, CodecError> {
     let mut parts = Vec::new();
-    for (k, v) in d.sorted_iter() {
+    for (k, v) in d.sorted_tags() {
         if matches!(v, Kind::Marker) {
             parts.push(k.to_string());
         } else {
@@ -124,47 +124,11 @@ pub fn encode_meta(d: &HDict) -> Result<String, CodecError> {
 
 /// Encode an HGrid to the Zinc wire format.
 pub fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
-    use std::fmt::Write;
-
-    let mut buf = String::new();
-
-    // Line 1: version + grid meta
-    buf.push_str("ver:\"3.0\"");
-    if !grid.meta.is_empty() {
-        buf.push(' ');
-        buf.push_str(&encode_meta(&grid.meta)?);
-    }
-    buf.push('\n');
-
-    // Line 2: columns — write directly, comma-delimited.
-    if grid.cols.is_empty() {
-        buf.push_str("empty\n");
-    } else {
-        for (i, col) in grid.cols.iter().enumerate() {
-            if i > 0 {
-                buf.push(',');
-            }
-            buf.push_str(&col.name);
-            if !col.meta.is_empty() {
-                buf.push(' ');
-                buf.push_str(&encode_meta(&col.meta)?);
-            }
-        }
-        buf.push('\n');
-    }
+    let mut buf = encode_grid_header(grid)?;
 
     // Rows — write cells directly, comma-delimited.
     for row in &grid.rows {
-        for (i, col) in grid.cols.iter().enumerate() {
-            if i > 0 {
-                buf.push(',');
-            }
-            match row.get(&col.name) {
-                Some(val) => write!(buf, "{}", encode_scalar(val)?).unwrap(),
-                None => buf.push('N'),
-            }
-        }
-        buf.push('\n');
+        buf.push_str(&encode_grid_row(&grid.cols, row)?);
     }
 
     Ok(buf)

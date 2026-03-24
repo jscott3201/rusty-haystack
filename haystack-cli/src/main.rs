@@ -11,17 +11,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Import entities from a file (Zinc, Trio, JSON, or HBF format)
+    /// Import entities from a file (Zinc, Trio, JSON format)
     Import {
         /// Path to the input file
         file: String,
-        /// Input format: zinc, trio, json, json3, hbf (auto-detected from extension if omitted)
+        /// Input format: zinc, trio, json, json3 (auto-detected from extension if omitted)
         #[arg(short, long)]
         format: Option<String>,
     },
     /// Export entities to a specified format
     Export {
-        /// Output format: zinc, trio, json, json3, hbf
+        /// Output format: zinc, trio, json, json3
         #[arg(short, long, default_value = "zinc")]
         format: String,
         /// Path to export to (stdout if omitted)
@@ -48,15 +48,6 @@ enum Commands {
         /// Load a demo building automation dataset
         #[arg(long)]
         demo: bool,
-        /// TOML file with federation connector configuration
-        #[arg(long)]
-        federation: Option<String>,
-        /// Directory for periodic snapshots (enables auto-restore on startup)
-        #[arg(long)]
-        snapshot_dir: Option<String>,
-        /// Snapshot interval in seconds (default: 300)
-        #[arg(long, default_value = "300")]
-        snapshot_interval: u64,
     },
     /// Validate entities in a file against the standard Haystack ontology
     Validate {
@@ -96,30 +87,6 @@ enum Commands {
         #[command(subcommand)]
         action: UserAction,
     },
-    /// Create a binary snapshot of entities from an input file
-    Snapshot {
-        /// Directory to write the snapshot file to
-        #[arg(short, long)]
-        dir: String,
-        /// Path to the input file (Zinc, Trio, or JSON format)
-        #[arg(short, long)]
-        input: Option<String>,
-        /// Input format: zinc, trio, json, json3 (auto-detected from extension if omitted)
-        #[arg(short, long)]
-        format: Option<String>,
-    },
-    /// Restore entities from a binary snapshot file
-    Restore {
-        /// Path to the snapshot (.hlss) file
-        #[arg(short, long)]
-        snapshot: String,
-        /// Path to export restored data to (omit to just print metadata)
-        #[arg(short, long)]
-        output: Option<String>,
-        /// Output format: zinc, trio, json, json3
-        #[arg(short, long)]
-        format: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -132,9 +99,9 @@ enum ClientAction {
         /// Username
         #[arg(short = 'U', long)]
         username: String,
-        /// Password
+        /// Password (or set HAYSTACK_PASSWORD env var)
         #[arg(short = 'P', long)]
-        password: String,
+        password: Option<String>,
         /// Output format: zinc, json, trio, json3
         #[arg(short, long, default_value = "zinc")]
         format: String,
@@ -147,9 +114,9 @@ enum ClientAction {
         /// Username
         #[arg(short = 'U', long)]
         username: String,
-        /// Password
+        /// Password (or set HAYSTACK_PASSWORD env var)
         #[arg(short = 'P', long)]
-        password: String,
+        password: Option<String>,
         /// Filter expression
         filter: String,
         /// Maximum number of rows to return
@@ -167,9 +134,9 @@ enum ClientAction {
         /// Username
         #[arg(short = 'U', long)]
         username: String,
-        /// Password
+        /// Password (or set HAYSTACK_PASSWORD env var)
         #[arg(short = 'P', long)]
-        password: String,
+        password: Option<String>,
         /// Navigation ID (omit for root)
         #[arg(long)]
         nav_id: Option<String>,
@@ -185,9 +152,9 @@ enum ClientAction {
         /// Username
         #[arg(short = 'U', long)]
         username: String,
-        /// Password
+        /// Password (or set HAYSTACK_PASSWORD env var)
         #[arg(short = 'P', long)]
-        password: String,
+        password: Option<String>,
         /// Point entity ID
         id: String,
         /// Date range (e.g., "today", "yesterday", "2024-01-01,2024-01-31")
@@ -205,9 +172,9 @@ enum ClientAction {
         /// Username
         #[arg(short = 'U', long)]
         username: String,
-        /// Password
+        /// Password (or set HAYSTACK_PASSWORD env var)
         #[arg(short = 'P', long)]
-        password: String,
+        password: Option<String>,
         /// Output format: zinc, json, trio, json3
         #[arg(short, long, default_value = "zinc")]
         format: String,
@@ -220,9 +187,9 @@ enum ClientAction {
         /// Username
         #[arg(short = 'U', long)]
         username: String,
-        /// Password
+        /// Password (or set HAYSTACK_PASSWORD env var)
         #[arg(short = 'P', long)]
-        password: String,
+        password: Option<String>,
         /// Output format: zinc, json, trio, json3
         #[arg(short, long, default_value = "zinc")]
         format: String,
@@ -235,9 +202,9 @@ enum ClientAction {
         /// Username
         #[arg(short = 'U', long)]
         username: String,
-        /// Password
+        /// Password (or set HAYSTACK_PASSWORD env var)
         #[arg(short = 'P', long)]
-        password: String,
+        password: Option<String>,
         /// Filter by library name
         #[arg(short, long)]
         lib: Option<String>,
@@ -256,9 +223,9 @@ enum UserAction {
         file: String,
         /// Username to add
         username: String,
-        /// Password for the user
+        /// Password for the user (or set HAYSTACK_PASSWORD env var)
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
         /// Permissions (read, write, admin)
         #[arg(short = 'r', long, value_delimiter = ',', default_value = "read")]
         permissions: Vec<String>,
@@ -284,10 +251,19 @@ enum UserAction {
         file: String,
         /// Username to update
         username: String,
-        /// New password
+        /// New password (or set HAYSTACK_PASSWORD env var)
         #[arg(short, long)]
-        password: String,
+        password: Option<String>,
     },
+}
+
+fn resolve_password(password: Option<String>) -> String {
+    password
+        .or_else(|| std::env::var("HAYSTACK_PASSWORD").ok())
+        .unwrap_or_else(|| {
+            eprintln!("Error: password required (--password or HAYSTACK_PASSWORD env var)");
+            std::process::exit(1);
+        })
 }
 
 fn main() {
@@ -306,18 +282,12 @@ fn main() {
             users,
             host,
             demo,
-            federation,
-            snapshot_dir,
-            snapshot_interval,
         } => commands::serve::run(commands::serve::ServeConfig {
             port,
             file: file.as_deref(),
             users_file: users.as_deref(),
             host: host.as_deref(),
             demo,
-            federation_file: federation.as_deref(),
-            snapshot_dir: snapshot_dir.as_deref(),
-            _snapshot_interval: snapshot_interval,
         }),
         Commands::Validate {
             file,
@@ -334,7 +304,10 @@ fn main() {
                 username,
                 password,
                 format,
-            } => commands::client::run_about(&url, &username, &password, &format),
+            } => {
+                let password = resolve_password(password);
+                commands::client::run_about(&url, &username, &password, &format);
+            }
             ClientAction::Read {
                 url,
                 username,
@@ -342,14 +315,20 @@ fn main() {
                 filter,
                 limit,
                 format,
-            } => commands::client::run_read(&url, &username, &password, &filter, limit, &format),
+            } => {
+                let password = resolve_password(password);
+                commands::client::run_read(&url, &username, &password, &filter, limit, &format);
+            }
             ClientAction::Nav {
                 url,
                 username,
                 password,
                 nav_id,
                 format,
-            } => commands::client::run_nav(&url, &username, &password, nav_id.as_deref(), &format),
+            } => {
+                let password = resolve_password(password);
+                commands::client::run_nav(&url, &username, &password, nav_id.as_deref(), &format);
+            }
             ClientAction::HisRead {
                 url,
                 username,
@@ -357,26 +336,38 @@ fn main() {
                 id,
                 range,
                 format,
-            } => commands::client::run_his_read(&url, &username, &password, &id, &range, &format),
+            } => {
+                let password = resolve_password(password);
+                commands::client::run_his_read(&url, &username, &password, &id, &range, &format);
+            }
             ClientAction::Ops {
                 url,
                 username,
                 password,
                 format,
-            } => commands::client::run_ops(&url, &username, &password, &format),
+            } => {
+                let password = resolve_password(password);
+                commands::client::run_ops(&url, &username, &password, &format);
+            }
             ClientAction::Libs {
                 url,
                 username,
                 password,
                 format,
-            } => commands::client::run_libs(&url, &username, &password, &format),
+            } => {
+                let password = resolve_password(password);
+                commands::client::run_libs(&url, &username, &password, &format);
+            }
             ClientAction::Specs {
                 url,
                 username,
                 password,
                 lib,
                 format,
-            } => commands::client::run_specs(&url, &username, &password, lib.as_deref(), &format),
+            } => {
+                let password = resolve_password(password);
+                commands::client::run_specs(&url, &username, &password, lib.as_deref(), &format);
+            }
         },
         Commands::User { action } => match action {
             UserAction::Add {
@@ -384,22 +375,20 @@ fn main() {
                 username,
                 password,
                 permissions,
-            } => commands::user::run_add(&file, &username, &password, &permissions),
+            } => {
+                let password = resolve_password(password);
+                commands::user::run_add(&file, &username, &password, &permissions);
+            }
             UserAction::Delete { file, username } => commands::user::run_delete(&file, &username),
             UserAction::List { file } => commands::user::run_list(&file),
             UserAction::Passwd {
                 file,
                 username,
                 password,
-            } => commands::user::run_update_password(&file, &username, &password),
+            } => {
+                let password = resolve_password(password);
+                commands::user::run_update_password(&file, &username, &password);
+            }
         },
-        Commands::Snapshot { dir, input, format } => {
-            commands::snapshot::run_snapshot(&dir, input.as_deref(), format.as_deref())
-        }
-        Commands::Restore {
-            snapshot,
-            output,
-            format,
-        } => commands::snapshot::run_restore(&snapshot, output.as_deref(), format.as_deref()),
     }
 }

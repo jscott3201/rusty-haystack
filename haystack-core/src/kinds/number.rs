@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 /// Haystack Number — a 64-bit float with optional unit string.
 ///
 /// Equality requires both `val` and `unit` to match.
-/// NaN != NaN (IEEE 754 semantics).
+/// NaN == NaN (consistent with Hash, which uses `to_bits()`).
 /// Display uses compact format: no trailing zeros, unit appended directly.
 #[derive(Debug, Clone)]
 pub struct Number {
@@ -43,7 +43,7 @@ impl Number {
 
 impl PartialEq for Number {
     fn eq(&self, other: &Self) -> bool {
-        self.val == other.val && self.unit == other.unit
+        self.val.to_bits() == other.val.to_bits() && self.unit == other.unit
     }
 }
 
@@ -144,10 +144,10 @@ mod tests {
     }
 
     #[test]
-    fn number_nan_inequality() {
+    fn number_nan_equality() {
         let a = Number::unitless(f64::NAN);
         let b = Number::unitless(f64::NAN);
-        assert_ne!(a, b);
+        assert_eq!(a, b);
     }
 
     #[test]

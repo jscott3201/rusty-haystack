@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Rust 1.93+** (edition 2024) — install via [rustup](https://rustup.rs/)
+- **Rust 1.93+** (edition 2024) -- install via [rustup](https://rustup.rs/)
 - **cargo** (included with Rust)
 - **Docker** (optional, for containerized deployment)
 
@@ -46,7 +46,7 @@ Or with the release binary:
 ./target/release/haystack serve --demo --port 8080
 ```
 
-The server starts on `http://0.0.0.0:8080` with no authentication enabled.
+The server starts on `http://127.0.0.1:8080` by default.
 
 ## First API Call
 
@@ -180,7 +180,7 @@ Results are saved to `target/criterion/`. See [Benchmarks.md](../Benchmarks.md) 
 
 ## Next Steps
 
-- [Architecture](architecture.md) — system design and core abstractions
-- [Server API](server-api.md) — full HTTP endpoint reference
-- [Client Library](client.md) — using HaystackClient in Rust code
-- [Configuration](configuration.md) — server setup, users, permissions
+- [Architecture](architecture.md) -- system design and core abstractions
+- [Server API](server-api.md) -- full HTTP endpoint reference
+- [Client Library](client.md) -- using HaystackClient in Rust code
+- [Configuration](configuration.md) -- server setup, users, permissions

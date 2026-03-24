@@ -96,12 +96,7 @@ fn full_pipeline_load_build_query_validate_encode_decode() {
         dangling
     );
 
-    // 7. Spec-aware: entities fitting
-    let ahu_fitting = graph.entities_fitting("ahu");
-    assert_eq!(ahu_fitting.len(), 1);
-    assert_eq!(ahu_fitting[0].id().unwrap().val, "ahu-1");
-
-    // 8. Export to grid
+    // 7. Export to grid
     let export = graph.to_grid("").unwrap();
     assert_eq!(export.rows.len(), 3);
 

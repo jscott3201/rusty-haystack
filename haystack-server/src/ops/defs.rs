@@ -1,71 +1,27 @@
 //! The `defs` and `libs` ops — query the definition namespace.
-//!
-//! # defs (`POST /api/defs`)
-//!
-//! Returns definitions from the ontology namespace, optionally filtered
-//! by a substring match on the def symbol.
-//!
-//! ## Request Grid Columns
-//!
-//! | Column   | Kind | Description                                    |
-//! |----------|------|------------------------------------------------|
-//! | `filter` | Str  | *(optional)* Substring to match against def symbols |
-//!
-//! An empty body returns all definitions.
-//!
-//! ## Response Grid Columns
-//!
-//! | Column | Kind   | Description              |
-//! |--------|--------|--------------------------|
-//! | `def`  | Symbol | Definition symbol        |
-//! | `lib`  | Symbol | Owning library name      |
-//! | `doc`  | Str    | Documentation string     |
-//!
-//! Rows are sorted by `def` symbol.
-//!
-//! # libs (`POST /api/libs`)
-//!
-//! Returns all loaded ontology libraries.
-//!
-//! ## Response Grid Columns
-//!
-//! | Column    | Kind | Description       |
-//! |-----------|------|-------------------|
-//! | `name`    | Str  | Library name      |
-//! | `version` | Str  | Library version   |
-//!
-//! Rows are sorted by `name`.
-//!
-//! # Errors
-//!
-//! - **400 Bad Request** — request grid decode failure.
-//! - **500 Internal Server Error** — encoding error.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
 
 use crate::content;
 use crate::error::HaystackError;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// POST /api/defs
-///
-/// Request may have a `filter` column with a filter string.
-/// Returns matching def records as a grid.
 pub async fn handle(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -129,16 +85,15 @@ pub async fn handle(
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// POST /api/libs — returns a grid of library names.
 pub async fn handle_libs(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let accept = req
-        .headers()
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, HaystackError> {
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -174,5 +129,5 @@ pub async fn handle_libs(
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }

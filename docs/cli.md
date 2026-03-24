@@ -20,11 +20,12 @@ haystack serve [OPTIONS]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--port` | `-p` | Port to listen on | `8080` |
-| `--host` | | Host to bind to | `0.0.0.0` |
+| `--host` | | Host to bind to | `127.0.0.1` |
 | `--file` | `-f` | Load entities from file at startup | |
 | `--users` | `-u` | TOML file with user credentials for SCRAM auth | |
 | `--demo` | | Load a demo building automation dataset | |
-| `--federation` | | TOML file with federation connector configuration | |
+
+The server password can also be provided via the `HAYSTACK_PASSWORD` environment variable, which is useful for containerized deployments where CLI flags are less convenient.
 
 Examples:
 
@@ -35,11 +36,11 @@ haystack serve --demo
 # Production with auth
 haystack serve --file data/entities.zinc --users users.toml --port 9090
 
-# Custom host binding
-haystack serve --demo --host 127.0.0.1 --port 8080
+# Bind to all interfaces (e.g., for Docker)
+haystack serve --demo --host 0.0.0.0 --port 8080
 
-# With federation
-haystack serve --file entities.zinc --users users.toml --federation federation.toml
+# Password via environment variable
+HAYSTACK_PASSWORD=s3cret haystack serve --file data/entities.zinc --users users.toml
 ```
 
 ### `import`

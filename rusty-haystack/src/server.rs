@@ -1,4 +1,4 @@
-// Python bindings for HaystackServer — embedded server, auth, history, federation.
+// Python bindings for HaystackServer — embedded server, auth, and history.
 // Uses a shared tokio runtime; `run()` blocks the calling Python thread.
 // GIL is released during all blocking I/O via py.detach().
 
@@ -8,11 +8,8 @@ use pyo3::prelude::*;
 
 use haystack_server::app::HaystackServer;
 use haystack_server::auth::AuthManager;
-use haystack_server::connector::ConnectorConfig;
-use haystack_server::federation::Federation;
 use haystack_server::his_store::HisStore;
 
-use crate::data::{PyHDict, PyHGrid};
 use crate::exceptions;
 use crate::graph::PySharedGraph;
 use crate::ontology::PyDefNamespace;
@@ -79,175 +76,6 @@ impl PyAuthManager {
     }
 }
 
-// ── ConnectorConfig ──
-
-/// Configuration for a federation connector to a remote Haystack server.
-#[pyclass(name = "ConnectorConfig", from_py_object)]
-#[derive(Clone)]
-pub struct PyConnectorConfig {
-    pub(crate) inner: ConnectorConfig,
-}
-
-#[pymethods]
-impl PyConnectorConfig {
-    /// Create a federation connector configuration.
-    ///
-    /// Args:
-    ///     name: Connector display name.
-    ///     url: Remote server HTTP URL.
-    ///     username: SCRAM auth username.
-    ///     password: SCRAM auth password.
-    ///     id_prefix: Optional prefix for federated entity IDs.
-    ///     ws_url: Optional WebSocket URL (defaults to ws:// derived from url).
-    ///     sync_interval_secs: Sync interval in seconds (default: server-configured).
-    #[new]
-    #[pyo3(signature = (name, url, username, password, id_prefix = None, ws_url = None, sync_interval_secs = None))]
-    fn new(
-        name: String,
-        url: String,
-        username: String,
-        password: String,
-        id_prefix: Option<String>,
-        ws_url: Option<String>,
-        sync_interval_secs: Option<u64>,
-    ) -> Self {
-        Self {
-            inner: ConnectorConfig {
-                name,
-                url,
-                username,
-                password,
-                id_prefix,
-                ws_url,
-                sync_interval_secs,
-                client_cert: None,
-                client_key: None,
-                ca_cert: None,
-                domain: None,
-            },
-        }
-    }
-
-    /// The connector name.
-    #[getter]
-    fn name(&self) -> &str {
-        &self.inner.name
-    }
-
-    /// The remote server URL.
-    #[getter]
-    fn url(&self) -> &str {
-        &self.inner.url
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "ConnectorConfig(name='{}', url='{}')",
-            self.inner.name, self.inner.url
-        )
-    }
-}
-
-// ── Federation ──
-
-/// Federation manager — connects to remote Haystack servers for distributed queries.
-///
-/// Supports entity caching, WebSocket-first transport, and automatic sync.
-#[pyclass(name = "Federation")]
-pub struct PyFederation {
-    pub(crate) inner: Federation,
-}
-
-#[pymethods]
-impl PyFederation {
-    #[new]
-    fn new() -> Self {
-        Self {
-            inner: Federation::new(),
-        }
-    }
-
-    /// Load federation config from a TOML file.
-    #[staticmethod]
-    fn from_toml(path: &str) -> PyResult<Self> {
-        Federation::from_toml_file(path)
-            .map(|inner| Self { inner })
-            .map_err(|e| PyErr::new::<exceptions::HaystackError, _>(e))
-    }
-
-    /// Load federation config from a TOML string.
-    #[staticmethod]
-    fn from_toml_str(content: &str) -> PyResult<Self> {
-        Federation::from_toml_str(content)
-            .map(|inner| Self { inner })
-            .map_err(|e| PyErr::new::<exceptions::HaystackError, _>(e))
-    }
-
-    /// Add a connector to the federation.
-    fn add(&mut self, config: &PyConnectorConfig) {
-        let _ = self.inner.add(config.inner.clone());
-    }
-
-    /// Synchronously sync all connectors. Returns list of (name, result_string).
-    fn sync_all(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        let rt = get_runtime()?;
-        let results = py.detach(|| rt.block_on(self.inner.sync_all()));
-        Ok(results
-            .into_iter()
-            .map(|(name, res)| {
-                let msg = match res {
-                    Ok(n) => format!("ok: {} entities", n),
-                    Err(e) => format!("error: {}", e),
-                };
-                (name, msg)
-            })
-            .collect())
-    }
-
-    /// Return all cached entities across all connectors.
-    fn all_cached_entities(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        self.inner
-            .all_cached_entities()
-            .into_iter()
-            .map(|d| {
-                Ok(PyHDict::from_core(&d)
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind())
-            })
-            .collect()
-    }
-
-    /// Filter cached entities using a Haystack filter expression.
-    #[pyo3(signature = (filter_expr, limit = 0))]
-    fn filter_cached(&self, filter_expr: &str, limit: usize) -> PyResult<PyHGrid> {
-        let entities = self
-            .inner
-            .filter_cached_entities(filter_expr, limit)
-            .map_err(|e| PyErr::new::<exceptions::HaystackError, _>(e))?;
-        // Build a grid from the entities
-        let mut grid = haystack_core::data::HGrid::new();
-        for entity in entities {
-            grid.rows.push((*entity).clone());
-        }
-        Ok(PyHGrid::from_core(&grid))
-    }
-
-    /// Status of each connector: list of (name, cached_entity_count).
-    fn status(&self) -> Vec<(String, usize)> {
-        self.inner.status()
-    }
-
-    /// Number of connectors.
-    fn connector_count(&self) -> usize {
-        self.inner.connector_count()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Federation(connectors={})", self.inner.connector_count())
-    }
-}
-
 // ── HisStore ──
 
 /// In-memory history storage for time-series point data.
@@ -280,9 +108,9 @@ impl PyHisStore {
 
 /// Embedded Haystack HTTP API server.
 ///
-/// Builder-pattern configuration: set graph, namespace, auth, federation,
+/// Builder-pattern configuration: set graph, namespace, auth,
 /// then call run() (blocking) or run_background() (returns immediately).
-/// Note: with_namespace/with_auth/with_federation consume their argument
+/// Note: with_namespace/with_auth consume their argument
 /// (the original Python object becomes empty after the call).
 ///
 /// Examples:
@@ -328,15 +156,6 @@ impl PyHaystackServer {
         }
     }
 
-    /// Set the federation manager.
-    /// Warning: consumes the federation — the original object becomes empty.
-    fn with_federation(&mut self, fed: &mut PyFederation) {
-        let taken = std::mem::replace(&mut fed.inner, Federation::new());
-        if let Some(server) = self.inner.take() {
-            self.inner = Some(server.with_federation(taken));
-        }
-    }
-
     /// Set the listen port (default 8080).
     fn port(&mut self, port: u16) {
         if let Some(server) = self.inner.take() {
@@ -370,7 +189,7 @@ impl PyHaystackServer {
             .take()
             .ok_or_else(|| PyErr::new::<exceptions::HaystackError, _>("Server already consumed"))?;
         let error_slot = Arc::clone(&self.bg_error);
-        // actix-web uses Rc (not Send), so we need a dedicated thread with its own runtime
+        // Spawn a dedicated thread with its own runtime for the background server
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

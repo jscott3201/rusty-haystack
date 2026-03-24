@@ -20,10 +20,8 @@ thiserror = "2"
 slotmap = "1.1"
 smallvec = { version = "1.15", features = ["serde"] }
 parking_lot = "0.12"
-rayon = "1.11"
 indexmap = "2"
-dashmap = "6"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["sync"] }
 sha2 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
@@ -31,18 +29,12 @@ base64 = "0.22"
 rand = "0.10"
 subtle = "2"
 regex = "1"
-roaring = "0.10"
+roaring = "0.11"
 rustc-hash = "2"
-zstd = "0.13"
-crc32fast = "1"
 zeroize = "1"
-arrow = { version = "55", optional = true }
-
-[features]
-haystack-serde = []
-arrow = ["dep:arrow"]
 
 [dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
 proptest = "1.10"
 criterion = { version = "0.8", features = ["html_reports"] }
 test-case = "3"

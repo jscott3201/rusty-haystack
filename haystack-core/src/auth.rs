@@ -22,6 +22,9 @@ type HmacSha256 = Hmac<Sha256>;
 /// Default PBKDF2 iteration count for SCRAM SHA-256.
 pub const DEFAULT_ITERATIONS: u32 = 100_000;
 
+/// Maximum PBKDF2 iteration count accepted from a server during client auth.
+pub const MAX_CLIENT_ITERATIONS: u32 = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -35,6 +38,8 @@ pub enum AuthError {
     InvalidHeader(String),
     #[error("handshake failed: {0}")]
     HandshakeFailed(String),
+    #[error("invalid message: {0}")]
+    InvalidMessage(String),
     #[error("base64 decode error: {0}")]
     Base64Error(String),
 }
@@ -44,7 +49,7 @@ pub enum AuthError {
 // ---------------------------------------------------------------------------
 
 /// Pre-computed SCRAM credentials for a user (stored server-side).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ScramCredentials {
     pub salt: Vec<u8>,
     pub iterations: u32,
@@ -61,7 +66,6 @@ impl Drop for ScramCredentials {
 
 /// In-flight SCRAM handshake state held by the server between the
 /// server-first-message and client-final-message exchanges.
-#[derive(Debug, Clone)]
 pub struct ScramHandshake {
     pub username: String,
     pub client_nonce: String,
@@ -72,6 +76,16 @@ pub struct ScramHandshake {
     pub server_signature: Vec<u8>,
     /// Stored key from credentials, needed to verify the client proof.
     stored_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for ScramHandshake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScramHandshake")
+            .field("username", &self.username)
+            .field("stored_key", &"[REDACTED]")
+            .field("server_signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Parsed Haystack `Authorization` header.
@@ -97,6 +111,7 @@ pub enum AuthHeader {
 
 /// Compute HMAC-SHA-256(key, msg).
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
+    // HMAC-SHA256 accepts keys of any size per RFC 2104; this cannot fail.
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any size");
     mac.update(msg);
     mac.finalize().into_bytes().to_vec()
@@ -111,7 +126,9 @@ fn sha256(data: &[u8]) -> Vec<u8> {
 
 /// XOR two equal-length byte slices.
 fn xor_bytes(a: &[u8], b: &[u8]) -> Vec<u8> {
-    assert_eq!(a.len(), b.len(), "XOR operands must be the same length");
+    // Both operands are always 32-byte SHA-256 outputs in SCRAM.
+    // A length mismatch here indicates a programming bug, not a runtime condition.
+    debug_assert_eq!(a.len(), b.len(), "XOR operands must be same length");
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }
 
@@ -287,6 +304,13 @@ pub fn client_final_message(
     let iterations: u32 = iterations_str
         .parse()
         .map_err(|e: std::num::ParseIntError| AuthError::HandshakeFailed(e.to_string()))?;
+
+    if iterations > MAX_CLIENT_ITERATIONS {
+        return Err(AuthError::InvalidMessage(format!(
+            "server requested {} PBKDF2 iterations, maximum allowed is {}",
+            iterations, MAX_CLIENT_ITERATIONS
+        )));
+    }
 
     // Key derivation
     let mut salted_password = pbkdf2_sha256(password.as_bytes(), &salt, iterations);

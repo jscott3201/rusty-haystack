@@ -10,22 +10,18 @@ A high-performance Rust implementation of the [Project Haystack](https://project
 ## Features
 
 - **Full Haystack 4 type system** — all 15 scalar kinds (Marker, Number, Ref, DateTime, Coord, etc.) plus Dict, Grid, and List
-- **6 codecs + RDF** — Zinc, Trio, JSON (v4), JSON (v3), CSV, HBF (Haystack Binary Format) with content negotiation, plus RDF output (Turtle & JSON-LD)
-- **HBF binary codec** — serde-based binary format with zstd compression, LEB128 varints, streaming encode support, and 23% faster federation queries vs Zinc text
-- **High-performance entity graph** — in-memory graph with bitmap tag indexes, B-tree value indexes, CSR adjacency lists, LRU query cache, filter queries, ref traversal, reactive changelog, and concurrent read/write via `SharedGraph`
-- **Expression evaluator** — parse and evaluate arithmetic expressions with variables, built-in functions (min, max, abs, sqrt, clamp), and unit-aware operations for computed points
-- **Unit conversion** — Haystack unit database with quantity lookup, compatibility checking, and affine temperature conversions (~10.7M ops/sec)
+- **5 codecs** — Zinc 3.0, JSON v4, JSON v3, Trio, CSV with content negotiation
+- **High-performance entity graph** — in-memory EntityGraph with RoaringBitmap tag indexes, B-tree value indexes, bidirectional ref adjacency, reactive changelog for watches, and concurrent read/write via `SharedGraph`
+- **Haystack filter engine** — parse and evaluate Haystack filter expressions with path traversal
+- **Unit conversion** — Haystack unit database with quantity lookup, compatibility checking, and affine temperature conversions
 - **Graph traversal helpers** — hierarchy tree building, entity classification, ref chain walking, parent/child queries, site resolution, and equipment point enumeration
-- **Haystack ontology** — bundled `ph`, `phScience`, `phIoT`, `phIct` definitions with subtype checking and entity validation
-- **Xeto type system** — spec parsing, structural fitting, slot resolution with inheritance, and library management (scan, load, validate)
-- **HLSS snapshots** — graph serialization to Haystack Local Snapshot Store format with zstd compression and CRC32 integrity checks
-- **HTTP server** — Actix Web 4 with 43 API endpoints, SCRAM SHA-256 authentication, WebSocket watches with deflate compression, streaming responses for large grids, and role-based access control
-- **Graph visualization API** — 6 dedicated endpoints (`graph/flow`, `graph/edges`, `graph/tree`, `graph/neighbors`, `graph/path`, `graph/stats`) returning nodes + edges data optimized for [React Flow](https://reactflow.dev) and similar graph UI libraries
-- **Federation** — hub-and-spoke entity aggregation from multiple remote Haystack servers with delta sync, adaptive sync intervals, write forwarding, history fan-out, watch federation, WebSocket-first transport, Arc-based zero-copy entity caching, and mTLS support
-- **HTTP/WS client** — async client with SCRAM handshake, pluggable transport (HTTP + WebSocket), backpressure-aware WebSocket, HBF binary support, and mTLS
-- **CLI** — import, export, serve, validate, info, libs, specs, client queries, user management, and federation config
-- **Python bindings** — PyO3 0.28 module with full API parity: core types, codecs, graph, filter, ontology, client, server, federation, and auth (`import rusty_haystack`)
-- **Docker** — multi-stage Alpine image (~15 MB) with a [5-container federation demo](demo/FederatedDemo.md)
+- **Haystack ontology** — bundled `ph`, `phScience`, `phIoT`, `phIct` definitions with taxonomy, subtype checking, and entity validation
+- **Xeto type system** — schema language parser, structural type fitting, slot resolution with inheritance, spec resolution, and library management (scan, load, validate)
+- **HTTP server** — Axum 0.8 with 25 API endpoints, Tower auth middleware, SCRAM SHA-256 authentication, WebSocket watches, role-based access control, and 2 MB body limit
+- **HTTP/WS client** — async client with SCRAM handshake, mTLS, token zeroization, and pluggable transport (HTTP + WebSocket)
+- **CLI** — import, export, serve, validate, info, libs, specs, client queries, and user management. Password via `HAYSTACK_PASSWORD` env var.
+- **Python bindings** — PyO3 0.28 module with types, codecs, graph, filter, ontology, Xeto, client, server, and auth (`import rusty_haystack`)
+- **Docker** — multi-stage Alpine image (~15 MB)
 
 ## Performance
 
@@ -33,17 +29,12 @@ A high-performance Rust implementation of the [Project Haystack](https://project
 |-----------|-----------|
 | Zinc encode | ~1,920 rows/ms |
 | Zinc decode | ~921 rows/ms |
-| HBF binary encode | ~3,650 rows/ms |
-| HBF binary decode | ~1,310 rows/ms |
 | Graph lookup | 18 ns per entity (O(1)) |
-| Filter (1,000 entities) | ~610 µs |
-| Expression eval | ~186 ns (complex, 5 vars) |
+| Filter (1,000 entities) | ~610 us |
 | Unit conversion | ~95 ns per convert |
-| Ontology fitting | < 1 µs |
-| HTTP read (single entity) | ~59 µs end-to-end |
-| HTTP concurrent (50 clients) | ~14 µs effective per request |
-| Federation filter (20k, HBF) | ~59 ms end-to-end |
-| Federation concurrent (50) | ~15 µs effective per request |
+| Ontology fitting | < 1 us |
+| HTTP read (single entity) | ~59 us end-to-end |
+| HTTP concurrent (50 clients) | ~14 us effective per request |
 
 See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 
@@ -64,7 +55,7 @@ cargo build --workspace --exclude rusty-haystack
 
 ```sh
 cargo test --workspace --exclude rusty-haystack
-# ~1,320 tests across all crates
+# ~970 tests across all crates
 ```
 
 ### Start a Demo Server
@@ -72,6 +63,8 @@ cargo test --workspace --exclude rusty-haystack
 ```sh
 cargo run -p rusty-haystack-cli -- serve --demo --port 8080
 ```
+
+The server binds to `127.0.0.1` by default. To listen on all interfaces, pass `--host 0.0.0.0`.
 
 Then query it:
 
@@ -91,39 +84,13 @@ docker build -t rusty-haystack .
 docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 ```
 
-### Federation Demo
-
-Run a 5-container federation cluster (1 lead + 4 building nodes):
-
-```sh
-cd demo
-docker compose up --build
-```
-
-See [demo/FederatedDemo.md](demo/FederatedDemo.md) for details.
-
-## Graph Visualization API
-
-Six endpoints under `/api/graph/*` return entity relationship data structured for graph visualization UIs like [React Flow](https://reactflow.dev):
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/graph/flow` | POST | Full graph as nodes + edges with auto-layout positions |
-| `/api/graph/edges` | POST | All ref relationships as explicit edge rows |
-| `/api/graph/tree` | POST | Recursive subtree from a root entity with depth |
-| `/api/graph/neighbors` | POST | N-hop neighborhood around an entity |
-| `/api/graph/path` | POST | Shortest path between two entities |
-| `/api/graph/stats` | GET | Entity/edge counts, type distribution, connected components |
-
-The `graph/flow` and `graph/neighbors` endpoints return a nodes grid with an edges grid encoded in the metadata — one call gives a UI everything it needs to render. See [Server API docs](docs/server-api.md#graph-visualization-read-permission) for full request/response specs.
-
 ## Workspace Structure
 
 | Crate | Description |
 |-------|-------------|
-| [`haystack-core`](haystack-core/) | Core library: kinds, data (HGrid/HDict/HCol), codecs (Zinc/Trio/JSON/CSV/HBF/RDF), filter engine, expression evaluator, unit conversion, graph with bitmap/B-tree/CSR indexes and traversal helpers, snapshots, ontology, xeto, SCRAM auth |
-| [`haystack-server`](haystack-server/) | Actix Web HTTP API server with 43 endpoints, SCRAM auth, WebSocket watches with compression, federation with Arc entity caching, graph visualization, streaming responses |
-| [`haystack-client`](haystack-client/) | Async HTTP + WebSocket client with SCRAM handshake, HBF binary support, backpressure, mTLS |
+| [`haystack-core`](haystack-core/) | Core library: kinds, data (HGrid/HDict/HCol), codecs (Zinc/Trio/JSON/CSV), filter engine, unit conversion, graph with RoaringBitmap/B-tree indexes and ref adjacency, ontology, Xeto, SCRAM auth |
+| [`haystack-server`](haystack-server/) | Axum HTTP API server with 25 endpoints, Tower auth middleware, SCRAM auth, WebSocket watches |
+| [`haystack-client`](haystack-client/) | Async HTTP + WebSocket client with SCRAM handshake, mTLS, token zeroization |
 | [`haystack-cli`](haystack-cli/) | CLI binary (`haystack`): import, export, serve, validate, info, libs, specs, client, user management |
 | [`rusty-haystack`](rusty-haystack/) | PyO3 0.28 Python bindings with full API parity (requires maturin) |
 
@@ -136,80 +103,64 @@ The `graph/flow` and `graph/neighbors` endpoints return a nodes grid with an edg
 | [Server API](docs/server-api.md) | All HTTP endpoints, auth flow, WebSocket protocol |
 | [Client Library](docs/client.md) | HaystackClient API, transports, authentication |
 | [CLI Reference](docs/cli.md) | All commands, flags, and examples |
-| [Python Bindings](docs/python.md) | Core types, codecs, graph, filter, client, server, federation |
-| [Federation](docs/federation.md) | Federation setup, TOML config, transport, sync, write proxying |
+| [Python Bindings](docs/python.md) | Core types, codecs, graph, filter, client, server, auth |
 | [Configuration](docs/configuration.md) | Server config, users TOML, permissions, Docker |
 
 ## Security
 
 - **No `unsafe` code** — entire codebase is safe Rust
 - **SCRAM SHA-256** authentication with PBKDF2 (100k iterations) credential storage
-- **Credential zeroization** — `zeroize` crate clears salted passwords, client keys, and SCRAM state from memory on drop
+- **Credential zeroization** — `zeroize` crate clears salted passwords, client keys, and SCRAM state from memory on drop (both server and client)
 - **Username enumeration prevention** — fake SCRAM challenges for unknown users
-- **Constant-time nonce comparison** — prevents timing side-channels during auth
+- **Constant-time comparison** — prevents timing side-channels during auth
 - **Request limits** — 2 MB body size, 100 concurrent watches, 10k IDs per watch, 1M history items
-- **WebSocket zip bomb protection** — 10 MB decompressed message limit
 - **Filter recursion depth limit** — max depth 100 to prevent stack overflow
-- **Expression evaluation limits** — max depth 64, max nodes 1000 to prevent resource exhaustion
-- **Federation entity validation** — max 1000 tags per entity, max 256-byte IDs, malformed entities rejected at sync
-- **HBF bounds checking** — payload size limits and validated magic headers prevent binary format exploits
+- **Parser DoS protection** — depth limits and size limits on all parsers
 - **Xeto loader safety** — symlink traversal protection, file size limits, and directory depth guards
-- **Snapshot bomb guard** — decompressed snapshot size limit prevents memory exhaustion
+- **Token TTL** — configurable TTL with periodic cleanup of expired tokens
 - **Arithmetic overflow protection** — checked operations throughout
 - **Sanitized error messages** — internal details not leaked to clients
-- **Token rotation** — configurable TTL with automatic expiration
 
 ## Key Dependencies
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| actix-web | 4.13 | HTTP server framework |
+| axum | 0.8 | HTTP server framework |
+| tower / tower-http | 0.5 / 0.6 | Middleware (auth, CORS, body limits) |
 | reqwest | 0.13 | HTTP client (rustls TLS) |
 | tokio | 1.x | Async runtime |
 | tokio-tungstenite | 0.28 | WebSocket client |
-| serde | 1.0 | Serialization framework (HBF codec, config) |
-| zstd | 0.13 | Zstandard compression for HBF and snapshots |
-| rayon | 1.11 | Data parallelism for large graph operations |
+| serde / serde_json | 1.0 | Serialization framework |
+| roaring | 0.10 | Compressed bitmap indexes (RoaringBitmap) |
+| parking_lot | 0.12 | Fast synchronization primitives |
 | zeroize | 1.x | Secure memory zeroing for credentials |
 | pyo3 | 0.28 | Python bindings |
-| flate2 | 1.x | Deflate compression for WebSocket |
 | criterion | 0.8 | Benchmarking |
-| parking_lot | 0.12 | Fast synchronization primitives |
-| roaring | 0.10 | Compressed bitmap indexes (RoaringBitmap) |
 | rustc-hash | 2 | Fast non-cryptographic hashing (FxHasher) |
 
-## What's New in v0.7.1
+## What's New in v0.8.0
 
-- **HLSS v2 snapshot format** — snapshot body codec switched from Zinc (text) to HBF (binary), same Zstd + CRC32 envelope
-- **31% faster snapshot writes** — HBF binary encode eliminates text formatting overhead (22.6ms → 16.3ms at 10K entities)
-- **26% faster snapshot reads** — HBF binary decode avoids text parsing (50.6ms → 37.3ms at 10K entities)
-- **Clean break** — v1 (Zinc) snapshots are no longer readable; old snapshots must be recreated after upgrade
+v0.8.0 is a major simplification of the codebase, removing federation, the HBF binary codec, RDF output, the expression evaluator, HLSS snapshots, graph visualization endpoints, and CSR adjacency. The server framework was migrated from Actix Web to Axum.
 
-## What's New in v0.7.0
+**Removed:**
+- Federation (hub-and-spoke, connectors, delta sync, write forwarding, watch federation)
+- HBF codec (Haystack Binary Format, zstd compression, binary encode/decode)
+- RDF output (Turtle, JSON-LD)
+- Arrow IPC codec
+- Expression evaluator (arithmetic expressions, variables, functions)
+- HLSS snapshots (graph serialization, snapshot commands)
+- Graph visualization API (6 endpoints under `/api/graph/*`)
+- System management endpoints (backup/restore/status)
+- CSR adjacency, columnar storage, query planner, WL structural fingerprinting
+- Streaming responses
+- Dependencies: rayon, dashmap, flate2, zstd, crc32fast
 
-- **Roaring bitmap indexes** — TagBitmapIndex migrated from hand-rolled `Vec<u64>` to RoaringBitmap with automatic compression and SIMD acceleration
-- **Delta indexing** — `update()` re-indexes only changed tags, **3.4x faster** entity updates (6.73µs → 1.96µs)
-- **Incremental CSR adjacency** — patch buffer overlays base CSR, auto-compacts at 1,000 ops; avoids full rebuild on every mutation
-- **WL structural fingerprinting** — Weisfeiler-Leman colour refinement produces per-entity structural fingerprints for topology-aware partitioning and anomaly detection
-- **ID freelist recycling** — deleted entity IDs are reused in O(1), preventing unbounded ID growth
-- **Bulk load path** — `add_bulk()` / `finalize_bulk()` skips per-entity changelog and indexing for **2.3x faster** batch ingestion
-- **Configurable query cache** — cache capacity auto-scales with entity count, clamped to [256, 1024]
-- **Changelog binary search** — `changes_since()` uses `partition_point()` for O(log n) version lookup
-- **Entity ID safety** — `MAX_ENTITY_ID` gate prevents overflow into roaring bitmap's u32 address space
-- **Structural DoS bounds** — adaptive WL depth with hard entity caps (50K full WL, 200K tag-hash-only)
-
-## What's New in v0.6.0
-
-- **HBF (Haystack Binary Format)** — serde-based binary codec with zstd compression, streaming encode, and 23% faster federation queries over HTTP
-- **Expression evaluator** — parse and evaluate arithmetic expressions with variables and built-in functions for computed points
-- **Unit conversion engine** — Haystack unit database with quantity-aware conversion and affine temperature transforms
-- **Graph traversal helpers** — hierarchy trees, ref chain walking, entity classification, and site/equip/point navigation
-- **HLSS snapshots** — graph persistence with zstd compression and CRC32 integrity
-- **Reactive changelog** — 8,600x faster `changes_since` via version-indexed VecDeque
-- **Xeto library management** — scan, load, and validate Xeto spec libraries with safety guards
-- **Security hardening** — credential zeroization, entity validation, expression depth limits, symlink protection, snapshot bomb guards
-- **Streaming responses** — batched row streaming for large grid responses (>25k rows)
-- **Arc entity caching** — zero-copy federation entity sharing eliminates deep clones
+**Changed:**
+- Server framework migrated from Actix Web 4 to Axum 0.8 with Tower middleware
+- CLI defaults to `127.0.0.1` (was `0.0.0.0`)
+- Password can be set via `HAYSTACK_PASSWORD` environment variable
+- 5 codecs remain: Zinc 3.0, JSON v4, JSON v3, Trio, CSV
+- 25 API endpoints (standard Haystack ops plus extensions)
 
 ## License
 

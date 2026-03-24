@@ -1,38 +1,18 @@
 //! The `formats` op — list supported MIME types.
-//!
-//! # Overview
-//!
-//! `GET /api/formats` returns the data formats this server can send and
-//! receive. No request grid is needed.
-//!
-//! # Response Grid Columns
-//!
-//! | Column    | Kind   | Description                          |
-//! |-----------|--------|--------------------------------------|
-//! | `mime`    | Str    | MIME type string                     |
-//! | `receive` | Marker | Server can decode this format        |
-//! | `send`   | Marker | Server can encode this format        |
-//!
-//! # Errors
-//!
-//! - **500 Internal Server Error** — encoding failure.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
 
 use crate::content;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// GET /api/formats — returns a grid listing supported MIME formats.
-///
-/// Each row represents a MIME type with `mime` (Str), `receive` (Marker),
-/// and `send` (Marker) columns. Supported formats: Zinc, JSON v4, Trio,
-/// JSON v3.
-pub async fn handle(req: HttpRequest, _state: web::Data<AppState>) -> HttpResponse {
-    let accept = req
-        .headers()
+pub async fn handle(State(_state): State<SharedState>, headers: HeaderMap) -> Response {
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -58,10 +38,10 @@ pub async fn handle(req: HttpRequest, _state: web::Data<AppState>) -> HttpRespon
 
     let grid = HGrid::from_parts(HDict::new(), cols, rows);
     match content::encode_response_grid(&grid, accept) {
-        Ok((body, ct)) => HttpResponse::Ok().content_type(ct).body(body),
+        Ok((body, ct)) => ([(axum::http::header::CONTENT_TYPE, ct)], body).into_response(),
         Err(e) => {
             log::error!("Failed to encode formats grid: {e}");
-            HttpResponse::InternalServerError().body("encoding error")
+            (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response()
         }
     }
 }

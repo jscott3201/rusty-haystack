@@ -125,6 +125,12 @@ fn parse_records(input: &str) -> Result<Vec<HDict>, CodecError> {
 
 /// Try to parse a value string as a Zinc scalar.
 /// If parsing fails or the parser doesn't consume all input, treat as a plain string.
+///
+/// The fallback-to-string behavior is by-design for the Trio format: values that
+/// cannot be parsed as Zinc scalars (e.g., unrecognized keywords, partial input,
+/// or free-form text) are intentionally treated as plain strings. This allows Trio
+/// files to contain arbitrary text values without requiring quoting, and provides
+/// forward-compatibility when new scalar types are added to the Zinc grammar.
 fn parse_scalar_value(val_str: &str) -> Kind {
     let mut parser = ZincParser::new(val_str);
     match parser.parse_scalar() {

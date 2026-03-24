@@ -51,35 +51,6 @@ pub fn run(format: &str, output: Option<&str>, filter: Option<&str>) {
         grid
     };
 
-    // HBF binary output
-    if mime == "application/x-haystack-binary" {
-        let bytes = haystack_core::codecs::encode_grid_binary(&output_grid).unwrap_or_else(|e| {
-            eprintln!("Error encoding to HBF: {}", e);
-            std::process::exit(1);
-        });
-        match output {
-            Some(path) => {
-                if let Err(e) = fs::write(path, &bytes) {
-                    eprintln!("Error writing '{}': {}", path, e);
-                    std::process::exit(1);
-                }
-                eprintln!(
-                    "Exported {} rows to '{}' (HBF binary)",
-                    output_grid.rows.len(),
-                    path
-                );
-            }
-            None => {
-                use std::io::Write;
-                if let Err(e) = io::stdout().write_all(&bytes) {
-                    eprintln!("Error writing to stdout: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        return;
-    }
-
     let codec = match codec_for(&mime) {
         Some(c) => c,
         None => {
@@ -117,7 +88,6 @@ fn format_to_mime(format: &str) -> String {
         "trio" => "text/trio".to_string(),
         "json" | "json4" => "application/json".to_string(),
         "json3" => "application/json;v=3".to_string(),
-        "hbf" | "binary" => "application/x-haystack-binary".to_string(),
         other => other.to_string(),
     }
 }

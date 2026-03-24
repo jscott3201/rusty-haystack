@@ -9,42 +9,6 @@ pub fn run(file: &str, format: Option<&str>) {
         .map(format_to_mime)
         .unwrap_or_else(|| detect_format(file));
 
-    // HBF binary import
-    if mime == "application/x-haystack-binary" {
-        let data = match fs::read(file) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Error reading '{}': {}", file, e);
-                std::process::exit(1);
-            }
-        };
-        let grid = match haystack_core::codecs::decode_grid_binary(&data) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("Error decoding HBF '{}': {}", file, e);
-                std::process::exit(1);
-            }
-        };
-        let ns = DefNamespace::load_standard().unwrap_or_else(|e| {
-            eprintln!("Error: failed to load ontology: {e}");
-            std::process::exit(1);
-        });
-        let graph = match EntityGraph::from_grid(&grid, Some(ns)) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("Error building graph: {}", e);
-                std::process::exit(1);
-            }
-        };
-        println!(
-            "Imported {} entities from '{}' (HBF binary)",
-            graph.len(),
-            file
-        );
-        print_tag_summary(&graph);
-        return;
-    }
-
     let codec = match codec_for(&mime) {
         Some(c) => c,
         None => {
@@ -113,7 +77,6 @@ fn format_to_mime(format: &str) -> String {
         "trio" => "text/trio".to_string(),
         "json" | "json4" => "application/json".to_string(),
         "json3" => "application/json;v=3".to_string(),
-        "hbf" | "binary" => "application/x-haystack-binary".to_string(),
         other => other.to_string(),
     }
 }
@@ -125,8 +88,6 @@ fn detect_format(file: &str) -> String {
         "text/trio".to_string()
     } else if file.ends_with(".json") {
         "application/json".to_string()
-    } else if file.ends_with(".hbf") {
-        "application/x-haystack-binary".to_string()
     } else {
         "text/zinc".to_string() // default
     }

@@ -4,7 +4,7 @@ use reqwest::Client;
 
 use crate::error::ClientError;
 use crate::transport::Transport;
-use haystack_core::codecs::{self, codec_for};
+use haystack_core::codecs::codec_for;
 use haystack_core::data::HGrid;
 use haystack_core::kinds::Kind;
 
@@ -18,7 +18,7 @@ const GET_OPS: &[&str] = &["about", "ops", "formats"];
 pub struct HttpTransport {
     client: Client,
     base_url: String,
-    auth_token: String,
+    auth_token: zeroize::Zeroizing<String>,
     format: String,
 }
 
@@ -34,7 +34,7 @@ impl HttpTransport {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.trim_end_matches('/').to_string(),
-            auth_token,
+            auth_token: zeroize::Zeroizing::new(auth_token),
             format: "text/zinc".to_string(),
         }
     }
@@ -47,7 +47,7 @@ impl HttpTransport {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.trim_end_matches('/').to_string(),
-            auth_token,
+            auth_token: zeroize::Zeroizing::new(auth_token),
             format: format.to_string(),
         }
     }
@@ -56,7 +56,6 @@ impl HttpTransport {
 impl Transport for HttpTransport {
     async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
         let url = format!("{}/{}", self.base_url, op);
-        let is_binary = self.format == codecs::HBF_MIME;
 
         let response = if GET_OPS.contains(&op) {
             // GET request for side-effect-free ops
@@ -64,36 +63,27 @@ impl Transport for HttpTransport {
                 .get(&url)
                 .header(
                     "Authorization",
-                    format!("BEARER authToken={}", self.auth_token),
+                    format!("BEARER authToken={}", &*self.auth_token),
                 )
                 .header("Accept", &self.format)
                 .send()
                 .await
                 .map_err(|e| ClientError::Transport(e.to_string()))?
         } else {
-            // Encode request body — always use Zinc for requests (small payload).
-            // Binary format is used for the Accept header (large response payload).
-            let zinc = codec_for("text/zinc").expect("zinc codec must exist");
-            let (body_bytes, content_type) = if is_binary {
-                let text = zinc
-                    .encode_grid(req)
-                    .map_err(|e| ClientError::Codec(e.to_string()))?;
-                (text.into_bytes(), zinc.mime_type())
-            } else {
-                let codec = codec_for(&self.format).ok_or_else(|| {
-                    ClientError::Codec(format!("unsupported format: {}", self.format))
-                })?;
-                let text = codec
-                    .encode_grid(req)
-                    .map_err(|e| ClientError::Codec(e.to_string()))?;
-                (text.into_bytes(), codec.mime_type())
-            };
+            let codec = codec_for(&self.format).ok_or_else(|| {
+                ClientError::Codec(format!("unsupported format: {}", self.format))
+            })?;
+            let text = codec
+                .encode_grid(req)
+                .map_err(|e| ClientError::Codec(e.to_string()))?;
+            let body_bytes = text.into_bytes();
+            let content_type = codec.mime_type();
 
             self.client
                 .post(&url)
                 .header(
                     "Authorization",
-                    format!("BEARER authToken={}", self.auth_token),
+                    format!("BEARER authToken={}", &*self.auth_token),
                 )
                 .header("Content-Type", content_type)
                 .header("Accept", &self.format)
@@ -105,38 +95,21 @@ impl Transport for HttpTransport {
 
         let status = response.status();
 
-        // Decode response — binary or text based on format
-        let grid = if is_binary {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| ClientError::Transport(e.to_string()))?;
-            if !status.is_success() {
-                return Err(ClientError::ServerError(format!(
-                    "HTTP {} — ({} bytes)",
-                    status,
-                    bytes.len()
-                )));
-            }
-            codecs::decode_grid_binary(&bytes).map_err(ClientError::Codec)?
-        } else {
-            let resp_body = response
-                .text()
-                .await
-                .map_err(|e| ClientError::Transport(e.to_string()))?;
-            if !status.is_success() {
-                return Err(ClientError::ServerError(format!(
-                    "HTTP {} — {}",
-                    status, resp_body
-                )));
-            }
-            let codec = codec_for(&self.format).ok_or_else(|| {
-                ClientError::Codec(format!("unsupported format: {}", self.format))
-            })?;
-            codec
-                .decode_grid(&resp_body)
-                .map_err(|e| ClientError::Codec(e.to_string()))?
-        };
+        let resp_body = response
+            .text()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            return Err(ClientError::ServerError(format!(
+                "HTTP {} — {}",
+                status, resp_body
+            )));
+        }
+        let codec = codec_for(&self.format)
+            .ok_or_else(|| ClientError::Codec(format!("unsupported format: {}", self.format)))?;
+        let grid = codec
+            .decode_grid(&resp_body)
+            .map_err(|e| ClientError::Codec(e.to_string()))?;
 
         // Check for error grid (meta has "err" marker)
         if grid.is_err() {

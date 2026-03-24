@@ -113,7 +113,7 @@ fn encode_time_str(t: &NaiveTime) -> String {
 /// Encode an HDict as a plain JSON object.
 fn encode_dict(d: &HDict) -> Result<Value, CodecError> {
     let mut m = Map::new();
-    for (k, v) in d.sorted_iter() {
+    for (k, v) in d.sorted_tags() {
         m.insert(k.to_string(), encode_kind(v)?);
     }
     Ok(Value::Object(m))
@@ -126,7 +126,7 @@ fn encode_grid_value(grid: &HGrid) -> Result<Map<String, Value>, CodecError> {
     // meta — always includes ver
     let mut meta_map = Map::new();
     meta_map.insert("ver".into(), Value::String("3.0".into()));
-    for (k, v) in grid.meta.sorted_iter() {
+    for (k, v) in grid.meta.sorted_tags() {
         meta_map.insert(k.to_string(), encode_kind(v)?);
     }
     m.insert("meta".into(), Value::Object(meta_map));
@@ -160,8 +160,22 @@ fn encode_grid_value(grid: &HGrid) -> Result<Map<String, Value>, CodecError> {
 
 // ── Decoding ──
 
+/// Maximum nesting depth for recursive JSON decoding to prevent stack overflow.
+const MAX_NESTING_DEPTH: usize = 64;
+
 /// Decode a serde_json Value to a Kind using v3 format.
 pub fn decode_kind(val: &Value) -> Result<Kind, CodecError> {
+    decode_kind_depth(val, 0)
+}
+
+/// Decode a serde_json Value to a Kind using v3 format, tracking recursion depth.
+fn decode_kind_depth(val: &Value, depth: usize) -> Result<Kind, CodecError> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(CodecError::Parse {
+            pos: 0,
+            message: "maximum nesting depth exceeded".into(),
+        });
+    }
     match val {
         Value::Null => Ok(Kind::Null),
         Value::Bool(b) => Ok(Kind::Bool(*b)),
@@ -175,10 +189,13 @@ pub fn decode_kind(val: &Value) -> Result<Kind, CodecError> {
         }
         Value::String(s) => decode_prefixed_string(s),
         Value::Array(arr) => {
-            let items: Result<Vec<Kind>, CodecError> = arr.iter().map(decode_kind).collect();
+            let items: Result<Vec<Kind>, CodecError> = arr
+                .iter()
+                .map(|v| decode_kind_depth(v, depth + 1))
+                .collect();
             Ok(Kind::List(items?))
         }
-        Value::Object(m) => decode_object(m),
+        Value::Object(m) => decode_object_depth(m, depth + 1),
     }
 }
 
@@ -217,9 +234,10 @@ fn decode_prefixed_string(s: &str) -> Result<Kind, CodecError> {
             _ => {}
         }
     }
-    // No prefix match — treat as plain string
-    // (In v3, bare strings without s: prefix shouldn't normally occur in
-    // well-formed data, but we handle it gracefully.)
+    // No prefix match — treat as plain string.
+    // This graceful degradation is by-design for the JSON v3 format: unrecognized
+    // or missing type prefixes fall back to plain strings rather than producing
+    // errors, allowing forward-compatibility when new type prefixes are introduced.
     Ok(Kind::Str(s.to_string()))
 }
 
@@ -404,17 +422,23 @@ fn decode_xstr_str(s: &str) -> Result<Kind, CodecError> {
     }
 }
 
-/// Decode a JSON object — could be a v3 grid (has "meta" and "cols") or a dict.
-fn decode_object(m: &Map<String, Value>) -> Result<Kind, CodecError> {
+/// Decode a JSON object, tracking recursion depth.
+fn decode_object_depth(m: &Map<String, Value>, depth: usize) -> Result<Kind, CodecError> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(CodecError::Parse {
+            pos: 0,
+            message: "maximum nesting depth exceeded".into(),
+        });
+    }
     // Check if this is a v3 grid: has both "meta" and "cols" keys
     if m.contains_key("meta") && m.contains_key("cols") {
-        let grid = decode_grid_from_map(m)?;
+        let grid = decode_grid_from_map_depth(m, depth)?;
         return Ok(Kind::Grid(Box::new(grid)));
     }
     // Otherwise it's a plain dict
     let mut dict = HDict::new();
     for (key, val) in m {
-        dict.set(key.clone(), decode_kind(val)?);
+        dict.set(key.clone(), decode_kind_depth(val, depth + 1)?);
     }
     Ok(Kind::Dict(Box::new(dict)))
 }
@@ -430,11 +454,18 @@ pub fn decode_grid_value(val: &Value) -> Result<HGrid, CodecError> {
             });
         }
     };
-    decode_grid_from_map(m)
+    decode_grid_from_map_depth(m, 0)
 }
 
-/// Decode a v3 grid from a JSON object map.
-fn decode_grid_from_map(m: &Map<String, Value>) -> Result<HGrid, CodecError> {
+/// Decode a v3 grid from a JSON object map, tracking recursion depth.
+fn decode_grid_from_map_depth(m: &Map<String, Value>, depth: usize) -> Result<HGrid, CodecError> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(CodecError::Parse {
+            pos: 0,
+            message: "maximum nesting depth exceeded".into(),
+        });
+    }
+
     // meta (skip "ver" key)
     let meta = match m.get("meta") {
         Some(Value::Object(meta_map)) => {
@@ -443,7 +474,7 @@ fn decode_grid_from_map(m: &Map<String, Value>) -> Result<HGrid, CodecError> {
                 if key == "ver" {
                     continue;
                 }
-                dict.set(key.clone(), decode_kind(val)?);
+                dict.set(key.clone(), decode_kind_depth(val, depth + 1)?);
             }
             dict
         }
@@ -471,7 +502,7 @@ fn decode_grid_from_map(m: &Map<String, Value>) -> Result<HGrid, CodecError> {
                 let mut col_meta = HDict::new();
                 for (key, val) in col_obj {
                     if key != "name" {
-                        col_meta.set(key.clone(), decode_kind(val)?);
+                        col_meta.set(key.clone(), decode_kind_depth(val, depth + 1)?);
                     }
                 }
                 cols.push(HCol::with_meta(name, col_meta));
@@ -492,7 +523,7 @@ fn decode_grid_from_map(m: &Map<String, Value>) -> Result<HGrid, CodecError> {
                 })?;
                 let mut dict = HDict::new();
                 for (key, val) in row_obj {
-                    dict.set(key.clone(), decode_kind(val)?);
+                    dict.set(key.clone(), decode_kind_depth(val, depth + 1)?);
                 }
                 rows.push(dict);
             }

@@ -4,10 +4,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use haystack_core::graph::{
-    DiffOp, EntityGraph, GraphDiff, HierarchyNode, SharedGraph, SnapshotMeta, SnapshotReader,
-    SnapshotWriter,
-};
+use haystack_core::graph::{DiffOp, EntityGraph, GraphDiff, HierarchyNode, SharedGraph};
 
 use crate::data::{PyHDict, PyHGrid};
 use crate::exceptions;
@@ -286,15 +283,6 @@ impl PyEntityGraph {
             .collect()
     }
 
-    /// Return entities that structurally fit a given spec name.
-    fn entities_fitting(&self, py: Python<'_>, spec_name: &str) -> PyResult<Vec<Py<PyAny>>> {
-        self.inner
-            .entities_fitting(spec_name)
-            .into_iter()
-            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
-            .collect()
-    }
-
     /// Return changelog entries since a given graph version.
     ///
     /// Raises RuntimeError if the subscriber has fallen behind (changelog gap).
@@ -325,60 +313,6 @@ impl PyEntityGraph {
     #[pyo3(signature = (ref_val, ref_type = None))]
     fn refs_to(&self, ref_val: &str, ref_type: Option<&str>) -> Vec<String> {
         self.inner.refs_to(ref_val, ref_type)
-    }
-
-    /// Return all edges as list of (source, ref_tag, target) tuples.
-    fn all_edges(&self) -> Vec<(String, String, String)> {
-        self.inner.all_edges()
-    }
-
-    /// BFS neighborhood: entities and edges within `hops` of `ref_val`.
-    ///
-    /// Returns (entities, edges) where edges are (source, ref_tag, target) tuples.
-    #[pyo3(signature = (ref_val, hops = 1, ref_types = None))]
-    fn neighbors(
-        &self,
-        py: Python<'_>,
-        ref_val: &str,
-        hops: usize,
-        ref_types: Option<Vec<String>>,
-    ) -> PyResult<(Vec<Py<PyAny>>, Vec<(String, String, String)>)> {
-        let refs: Option<Vec<&str>> = ref_types
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        let (entities, edges) = self.inner.neighbors(ref_val, hops, refs.as_deref());
-        let py_entities: Vec<Py<PyAny>> = entities
-            .into_iter()
-            .map(|e| Ok(PyHDict::from_core(e).into_pyobject(py)?.into_any().unbind()))
-            .collect::<PyResult<_>>()?;
-        Ok((py_entities, edges))
-    }
-
-    /// BFS shortest path from `from_ref` to `to_ref`. Returns list of ref strings.
-    fn shortest_path(&self, from_ref: &str, to_ref: &str) -> Vec<String> {
-        self.inner.shortest_path(from_ref, to_ref)
-    }
-
-    /// Return the subtree rooted at `root` up to `max_depth` levels.
-    ///
-    /// Returns list of (entity_dict, depth) tuples.
-    #[pyo3(signature = (root, max_depth = 10))]
-    fn subtree(
-        &self,
-        py: Python<'_>,
-        root: &str,
-        max_depth: usize,
-    ) -> PyResult<Vec<(Py<PyAny>, usize)>> {
-        self.inner
-            .subtree(root, max_depth)
-            .into_iter()
-            .map(|(e, d)| {
-                Ok((
-                    PyHDict::from_core(e).into_pyobject(py)?.into_any().unbind(),
-                    d,
-                ))
-            })
-            .collect()
     }
 
     /// Export matching entities to a grid. Empty filter exports all entities.
@@ -460,6 +394,7 @@ impl PyEntityGraph {
     ) -> PyResult<Vec<Py<PyAny>>> {
         self.inner
             .equip_points(equip_ref, filter)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_iter()
             .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
             .collect()
@@ -629,68 +564,6 @@ impl PySharedGraph {
         self.inner.refs_to(ref_val, ref_type)
     }
 
-    /// Return all edges as list of (source, ref_tag, target) tuples.
-    fn all_edges(&self) -> Vec<(String, String, String)> {
-        self.inner.all_edges()
-    }
-
-    /// BFS neighborhood: entities and edges within `hops` of `ref_val`.
-    ///
-    /// Returns (entities, edges) where edges are (source, ref_tag, target) tuples.
-    #[pyo3(signature = (ref_val, hops = 1, ref_types = None))]
-    fn neighbors(
-        &self,
-        py: Python<'_>,
-        ref_val: &str,
-        hops: usize,
-        ref_types: Option<Vec<String>>,
-    ) -> PyResult<(Vec<Py<PyAny>>, Vec<(String, String, String)>)> {
-        let refs: Option<Vec<&str>> = ref_types
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        let (entities, edges) = self.inner.neighbors(ref_val, hops, refs.as_deref());
-        let py_entities: Vec<Py<PyAny>> = entities
-            .into_iter()
-            .map(|d| {
-                Ok(PyHDict::from_core(&d)
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind())
-            })
-            .collect::<PyResult<_>>()?;
-        Ok((py_entities, edges))
-    }
-
-    /// BFS shortest path from `from_ref` to `to_ref`. Returns list of ref strings.
-    fn shortest_path(&self, from_ref: &str, to_ref: &str) -> Vec<String> {
-        self.inner.shortest_path(from_ref, to_ref)
-    }
-
-    /// Return the subtree rooted at `root` up to `max_depth` levels.
-    ///
-    /// Returns list of (entity_dict, depth) tuples.
-    #[pyo3(signature = (root, max_depth = 10))]
-    fn subtree(
-        &self,
-        py: Python<'_>,
-        root: &str,
-        max_depth: usize,
-    ) -> PyResult<Vec<(Py<PyAny>, usize)>> {
-        self.inner
-            .subtree(root, max_depth)
-            .into_iter()
-            .map(|(e, d)| {
-                Ok((
-                    PyHDict::from_core(&e)
-                        .into_pyobject(py)?
-                        .into_any()
-                        .unbind(),
-                    d,
-                ))
-            })
-            .collect()
-    }
-
     /// Return changelog entries since a given graph version.
     ///
     /// Raises RuntimeError if the subscriber has fallen behind (changelog gap).
@@ -704,20 +577,6 @@ impl PySharedGraph {
                     gap.subscriber_version, gap.floor_version
                 ))
             })
-    }
-
-    /// Return entities that structurally fit a given ontology spec.
-    fn entities_fitting(&self, py: Python<'_>, spec_name: &str) -> PyResult<Vec<Py<PyAny>>> {
-        self.inner
-            .entities_fitting(spec_name)
-            .into_iter()
-            .map(|d| {
-                Ok(PyHDict::from_core(&d)
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind())
-            })
-            .collect()
     }
 
     /// Validate all entities against the attached namespace. Returns issue strings.
@@ -802,13 +661,9 @@ impl PySharedGraph {
     ) -> PyResult<Vec<Py<PyAny>>> {
         self.inner
             .equip_points(equip_ref, filter)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_iter()
-            .map(|d| {
-                Ok(PyHDict::from_core(&d)
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind())
-            })
+            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
             .collect()
     }
 
@@ -832,100 +687,4 @@ impl PySharedGraph {
     fn classify(&self, ref_val: &str) -> Option<String> {
         self.inner.classify(ref_val)
     }
-}
-
-// ── Snapshot bindings ──
-
-/// Writes periodic snapshots of a SharedGraph to disk in HLSS format.
-///
-/// Manages a directory of snapshot files with automatic rotation to keep
-/// only the most recent N snapshots.
-///
-/// Examples:
-///     writer = SnapshotWriter("/tmp/snapshots", max_snapshots=5)
-///     path = writer.write(shared_graph)
-#[pyclass(name = "SnapshotWriter")]
-pub struct PySnapshotWriter {
-    inner: SnapshotWriter,
-}
-
-#[pymethods]
-impl PySnapshotWriter {
-    #[new]
-    #[pyo3(signature = (dir, max_snapshots = 10))]
-    fn new(dir: &str, max_snapshots: usize) -> Self {
-        Self {
-            inner: SnapshotWriter::new(std::path::PathBuf::from(dir), max_snapshots),
-        }
-    }
-
-    /// Write a snapshot of the graph. Returns the file path.
-    fn write(&self, graph: &PySharedGraph) -> PyResult<String> {
-        let path = self
-            .inner
-            .write(&graph.inner)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(path.to_string_lossy().to_string())
-    }
-
-    /// Rotate old snapshots beyond max_snapshots. Returns count removed.
-    fn rotate(&self) -> PyResult<usize> {
-        self.inner
-            .rotate()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-    }
-
-    fn __repr__(&self) -> &str {
-        "SnapshotWriter"
-    }
-}
-
-/// Metadata returned when loading a snapshot file.
-#[pyclass(name = "SnapshotMeta", frozen)]
-pub struct PySnapshotMeta {
-    #[pyo3(get)]
-    pub entity_count: u32,
-    #[pyo3(get)]
-    pub graph_version: u64,
-    #[pyo3(get)]
-    pub timestamp: i64,
-    #[pyo3(get)]
-    pub path: String,
-}
-
-#[pymethods]
-impl PySnapshotMeta {
-    fn __repr__(&self) -> String {
-        format!(
-            "SnapshotMeta(entities={}, version={}, path='{}')",
-            self.entity_count, self.graph_version, self.path
-        )
-    }
-}
-
-impl PySnapshotMeta {
-    fn from_core(meta: &SnapshotMeta) -> Self {
-        Self {
-            entity_count: meta.entity_count,
-            graph_version: meta.graph_version,
-            timestamp: meta.timestamp,
-            path: meta.path.to_string_lossy().to_string(),
-        }
-    }
-}
-
-/// Load a snapshot file into a SharedGraph. Returns snapshot metadata.
-#[pyfunction]
-pub fn load_snapshot(path: &str, graph: &PySharedGraph) -> PyResult<PySnapshotMeta> {
-    let meta = SnapshotReader::load(std::path::Path::new(path), &graph.inner)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    Ok(PySnapshotMeta::from_core(&meta))
-}
-
-/// Find the latest snapshot file in a directory. Returns the path or None.
-#[pyfunction]
-pub fn find_latest_snapshot(dir: &str) -> PyResult<Option<String>> {
-    SnapshotReader::find_latest(std::path::Path::new(dir))
-        .map(|opt| opt.map(|p| p.to_string_lossy().to_string()))
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }

@@ -330,11 +330,6 @@ depends:[^lib:ph]
     site.set("dis", Kind::Str("Main Site".into()));
     g.add(site).unwrap();
 
-    // entities_fitting: only ahu-1 should fit "ahu" spec.
-    let fitting = g.entities_fitting("ahu");
-    assert_eq!(fitting.len(), 1);
-    assert_eq!(fitting[0].id().unwrap().val, "ahu-1");
-
     // validate: should find issue with ahu-2.
     let issues = g.validate();
     assert!(!issues.is_empty());

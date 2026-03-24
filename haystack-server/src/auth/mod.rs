@@ -6,6 +6,7 @@
 pub mod users;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -50,6 +51,8 @@ pub struct AuthManager {
     /// Secret used to derive fake SCRAM challenges for unknown users,
     /// preventing username enumeration attacks.
     server_secret: [u8; 32],
+    /// Counter used to periodically trigger bulk cleanup of expired tokens.
+    cleanup_counter: AtomicU64,
 }
 
 impl Drop for AuthManager {
@@ -69,6 +72,7 @@ impl AuthManager {
             tokens: RwLock::new(HashMap::new()),
             token_ttl,
             server_secret,
+            cleanup_counter: AtomicU64::new(0),
         }
     }
 
@@ -131,9 +135,13 @@ impl AuthManager {
         username: &str,
         client_first_b64: Option<&str>,
     ) -> Result<String, String> {
-        let credentials = match self.users.get(username) {
-            Some(user_record) => user_record.credentials.clone(),
-            None => self.fake_credentials(username),
+        let owned_fake;
+        let credentials: &ScramCredentials = match self.users.get(username) {
+            Some(user_record) => &user_record.credentials,
+            None => {
+                owned_fake = self.fake_credentials(username);
+                &owned_fake
+            }
         };
 
         // Extract client nonce from client-first-message, or generate one
@@ -146,7 +154,7 @@ impl AuthManager {
 
         // Create server-first-message
         let (handshake, server_first_b64) =
-            server_first_message(username, &client_nonce, &credentials);
+            server_first_message(username, &client_nonce, credentials);
 
         // Lazy cleanup: remove expired handshakes before inserting.
         {
@@ -227,6 +235,14 @@ impl AuthManager {
     /// tokens are automatically removed under a single write lock to
     /// avoid TOCTOU races.
     pub fn validate_token(&self, token: &str) -> Option<AuthUser> {
+        // Periodically sweep all expired tokens to prevent unbounded growth.
+        let count = self.cleanup_counter.fetch_add(1, Ordering::Relaxed);
+        if count.is_multiple_of(100) {
+            let mut tokens = self.tokens.write();
+            let ttl = self.token_ttl;
+            tokens.retain(|_, (_, created)| created.elapsed() < ttl);
+        }
+
         let mut tokens = self.tokens.write();
         match tokens.get(token) {
             Some((user, created_at)) => {
