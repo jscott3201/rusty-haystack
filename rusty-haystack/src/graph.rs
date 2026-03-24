@@ -663,7 +663,12 @@ impl PySharedGraph {
             .equip_points(equip_ref, filter)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_iter()
-            .map(|d| Ok(PyHDict::from_core(&d).into_pyobject(py)?.into_any().unbind()))
+            .map(|d| {
+                Ok(PyHDict::from_core(&d)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
             .collect()
     }
 
