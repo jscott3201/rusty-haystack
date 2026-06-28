@@ -1,0 +1,17 @@
+[package]
+name = "niagara-read"
+version = "0.1.0"
+edition = "2021"
+description = "Read Niagara nHaystack points via rusty-haystack-client"
+publish = false
+
+[[bin]]
+name = "niagara-read"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+haystack-client = { package = "rusty-haystack-client", path = "../../../haystack-client" }
+haystack-core = { package = "rusty-haystack-core", path = "../../../haystack-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+base64 = "0.22"
