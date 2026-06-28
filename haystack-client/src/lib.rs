@@ -5,7 +5,8 @@
 //!
 //! ## Features
 //!
-//! - **SCRAM SHA-256 authentication** — Automatic handshake on connect
+//! - **SCRAM SHA-256 authentication** — Automatic handshake on connect (SkySpark, rusty-haystack server)
+//! - **HTTP Basic authentication** — Per-request Basic auth via [`ClientConfig`] (Niagara nHaystack)
 //! - **HTTP + WebSocket** — HTTP for standard ops, WebSocket for watch subscriptions
 //! - **mTLS** — Mutual TLS via [`tls::TlsConfig`] for certificate-based auth
 //! - **Zinc wire format** — Default encoding for fastest serialization
@@ -33,11 +34,13 @@
 
 pub mod auth;
 pub mod client;
+pub mod config;
 pub mod error;
 pub mod tls;
 pub mod transport;
 
 pub use client::HaystackClient;
+pub use config::{AuthMode, ClientConfig};
 pub use error::ClientError;
 
 /// Install the ring crypto provider for rustls.

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::error::ClientError;
+use crate::config::ClientConfig;
 use crate::transport::Transport;
 use crate::transport::http::HttpTransport;
 use crate::transport::ws::WsTransport;
@@ -25,10 +26,35 @@ impl HaystackClient<HttpTransport> {
     /// * `username` - The username to authenticate as
     /// * `password` - The user's plaintext password
     pub async fn connect(url: &str, username: &str, password: &str) -> Result<Self, ClientError> {
+        Self::connect_with_config(url, username, password, &ClientConfig::default()).await
+    }
+
+    /// Connect with explicit TLS verification and auth mode.
+    ///
+    /// Use [`ClientConfig::niagara_lab`] for Niagara nHaystack (HTTP Basic + insecure TLS).
+    /// Use [`ClientConfig::scram_insecure_tls`] to test SCRAM on self-signed HTTPS.
+    pub async fn connect_with_config(
+        url: &str,
+        username: &str,
+        password: &str,
+        config: &ClientConfig,
+    ) -> Result<Self, ClientError> {
         crate::ensure_crypto_provider();
-        let client = reqwest::Client::new();
-        let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
-        let transport = HttpTransport::new(url, auth_token);
+        let client = config.build_reqwest_client()?;
+        let transport = match config.auth_mode {
+            crate::config::AuthMode::Scram => {
+                let auth_token =
+                    crate::auth::authenticate(&client, url, username, password).await?;
+                HttpTransport::with_bearer(url, auth_token, client, &config.wire_format)
+            }
+            crate::config::AuthMode::Basic => HttpTransport::with_basic(
+                url,
+                username,
+                password,
+                client,
+                &config.wire_format,
+            ),
+        };
         Ok(Self { transport })
     }
 

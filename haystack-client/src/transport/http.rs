@@ -11,6 +11,14 @@ use haystack_core::kinds::Kind;
 /// Operations that use GET (noSideEffects).
 const GET_OPS: &[&str] = &["about", "ops", "formats"];
 
+enum AuthCredential {
+    Bearer(zeroize::Zeroizing<String>),
+    Basic {
+        username: String,
+        password: zeroize::Zeroizing<String>,
+    },
+}
+
 /// HTTP transport for communicating with a Haystack server.
 ///
 /// Sends requests as encoded grids over HTTP using the configured wire format
@@ -18,37 +26,74 @@ const GET_OPS: &[&str] = &["about", "ops", "formats"];
 pub struct HttpTransport {
     client: Client,
     base_url: String,
-    auth_token: zeroize::Zeroizing<String>,
+    auth: AuthCredential,
     format: String,
 }
 
 impl HttpTransport {
-    /// Create a new HTTP transport.
-    ///
-    /// `base_url` should be the server API root (e.g. `http://localhost:8080/api`).
-    /// `auth_token` is the bearer token obtained from SCRAM authentication.
-    pub fn new(base_url: &str, auth_token: String) -> Self {
+    /// SCRAM session transport using a bearer token.
+    pub fn with_bearer(base_url: &str, auth_token: String, client: Client, format: &str) -> Self {
         Self {
-            client: Client::builder()
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            auth: AuthCredential::Bearer(zeroize::Zeroizing::new(auth_token)),
+            format: format.to_string(),
+        }
+    }
+
+    /// HTTP Basic auth on every request (Niagara nHaystack).
+    pub fn with_basic(
+        base_url: &str,
+        username: &str,
+        password: &str,
+        client: Client,
+        format: &str,
+    ) -> Self {
+        Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            auth: AuthCredential::Basic {
+                username: username.to_string(),
+                password: zeroize::Zeroizing::new(password.to_string()),
+            },
+            format: format.to_string(),
+        }
+    }
+
+    /// Create a new HTTP transport with SCRAM bearer token (strict TLS, default client).
+    pub fn new(base_url: &str, auth_token: String) -> Self {
+        Self::with_bearer(
+            base_url,
+            auth_token,
+            Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            base_url: base_url.trim_end_matches('/').to_string(),
-            auth_token: zeroize::Zeroizing::new(auth_token),
-            format: "text/zinc".to_string(),
-        }
+            "text/zinc",
+        )
     }
 
     /// Create a new HTTP transport with a specific wire format.
     pub fn with_format(base_url: &str, auth_token: String, format: &str) -> Self {
-        Self {
-            client: Client::builder()
+        Self::with_bearer(
+            base_url,
+            auth_token,
+            Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            base_url: base_url.trim_end_matches('/').to_string(),
-            auth_token: zeroize::Zeroizing::new(auth_token),
-            format: format.to_string(),
+            format,
+        )
+    }
+
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            AuthCredential::Bearer(token) => {
+                builder.header("Authorization", format!("BEARER authToken={}", &**token))
+            }
+            AuthCredential::Basic { username, password } => {
+                builder.basic_auth(username, Some(password.as_str()))
+            }
         }
     }
 }
@@ -58,13 +103,7 @@ impl Transport for HttpTransport {
         let url = format!("{}/{}", self.base_url, op);
 
         let response = if GET_OPS.contains(&op) {
-            // GET request for side-effect-free ops
-            self.client
-                .get(&url)
-                .header(
-                    "Authorization",
-                    format!("BEARER authToken={}", &*self.auth_token),
-                )
+            self.apply_auth(self.client.get(&url))
                 .header("Accept", &self.format)
                 .send()
                 .await
@@ -79,12 +118,7 @@ impl Transport for HttpTransport {
             let body_bytes = text.into_bytes();
             let content_type = codec.mime_type();
 
-            self.client
-                .post(&url)
-                .header(
-                    "Authorization",
-                    format!("BEARER authToken={}", &*self.auth_token),
-                )
+            self.apply_auth(self.client.post(&url))
                 .header("Content-Type", content_type)
                 .header("Accept", &self.format)
                 .body(body_bytes)
@@ -111,7 +145,6 @@ impl Transport for HttpTransport {
             .decode_grid(&resp_body)
             .map_err(|e| ClientError::Codec(e.to_string()))?;
 
-        // Check for error grid (meta has "err" marker)
         if grid.is_err() {
             let dis = grid
                 .meta
@@ -131,7 +164,6 @@ impl Transport for HttpTransport {
     }
 
     async fn close(&self) -> Result<(), ClientError> {
-        // HTTP is stateless; nothing to close.
         Ok(())
     }
 }

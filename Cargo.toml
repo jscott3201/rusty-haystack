@@ -6,6 +6,7 @@ members = [
     "haystack-cli",
     "haystack-server",
     "haystack-client",
+    "demo/niagara_sample/niagara-rusty-scrape",
 ]
 
 [workspace.package]
