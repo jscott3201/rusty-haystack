@@ -6,6 +6,9 @@
 //! SCRAM (`--auth scram`) works against rusty-haystack server and SkySpark; on Niagara
 //! it fails because nHaystack returns HTML 401 without `WWW-Authenticate: SCRAM`.
 
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::Duration;
+
 use clap::Parser;
 use haystack_client::{AuthMode, ClientConfig, HaystackClient};
 
@@ -30,7 +33,7 @@ struct Args {
     auth: AuthChoice,
 
     /// Verify TLS certificates (secure default). Use --insecure-tls for self-signed lab certs.
-    #[arg(long, env = "HAYSTACK_TLS_VERIFY", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, env = "HAYSTACK_TLS_VERIFY", default_value_t = true)]
     tls_verify: bool,
 
     /// Disable TLS certificate and hostname verification (lab self-signed certs only)
@@ -89,6 +92,13 @@ async fn main() {
     println!("tls_verify: {tls_verify}");
     println!();
 
+    if let Err(hint) = preflight_tcp(&args.url) {
+        eprintln!("PREFLIGHT FAIL: {hint}");
+        std::process::exit(1);
+    }
+    println!("preflight: TCP endpoint reachable");
+    println!();
+
     if args.probe_scram || auth_mode == AuthMode::Scram {
         probe_scram_hello(&args, tls_verify).await;
     }
@@ -122,6 +132,7 @@ async fn main() {
         },
         Err(err) => {
             eprintln!("connect failed: {err}");
+            print_connect_hint(&args.url, &err.to_string());
             if auth_mode == AuthMode::Scram {
                 eprintln!();
                 eprintln!("Niagara nHaystack does not implement Haystack SCRAM on /about.");
@@ -166,6 +177,71 @@ async fn probe_scram_hello(args: &Args, tls_verify: bool) {
         Err(err) => println!("transport error: {err}"),
     }
     println!();
+}
+
+fn tcp_endpoint(base: &str) -> Option<(String, u16)> {
+    let rest = base.trim_end_matches('/');
+    let (scheme_host, default_port) = if let Some(s) = rest.strip_prefix("https://") {
+        (s, 443u16)
+    } else if let Some(s) = rest.strip_prefix("http://") {
+        (s, 80u16)
+    } else {
+        return None;
+    };
+    let host_port = scheme_host.split('/').next()?;
+    if let Some((host, port)) = host_port.split_once(':') {
+        port.parse().ok().map(|p| (host.to_string(), p))
+    } else {
+        Some((host_port.to_string(), default_port))
+    }
+}
+
+fn preflight_tcp(base: &str) -> Result<(), String> {
+    let (host, port) =
+        tcp_endpoint(base).ok_or_else(|| format!("could not parse host/port from url: {base}"))?;
+    if host.contains('<') || host.contains('>') {
+        return Err(format!(
+            "url host looks like a placeholder ({host}) — edit .env (see env.example)"
+        ));
+    }
+
+    let timeout = Duration::from_secs(5);
+    let addrs: Vec<SocketAddr> = format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS/parse error for {host}:{port}: {e}"))?
+        .collect();
+
+    for addr in addrs {
+        if TcpStream::connect_timeout(&addr, timeout).is_ok() {
+            return Ok(());
+        }
+    }
+
+    let mut hint = format!("cannot open TCP {host}:{port} from this host within {timeout:?}");
+    if host == "192.168.204.11" && port == 443 {
+        hint.push_str(
+            "\n\nNiagara bench fix (Windows PC at 192.168.204.11):\n\
+             1. Station running + nHaystack servlet enabled\n\
+             2. Windows Firewall → allow inbound TCP 443 from 192.168.204.55\n\
+             3. Re-test:  curl -k -m 5 -u open_fdd:PASS https://192.168.204.11/haystack/about\n\
+             (ICMP ping may fail even when HTTPS works — that is normal on Windows)",
+        );
+    }
+    Err(hint)
+}
+
+fn print_connect_hint(base: &str, err: &str) {
+    if err.contains("timed out") || err.contains("connect") {
+        if let Some((host, port)) = tcp_endpoint(base) {
+            eprintln!();
+            eprintln!("Hint: TCP {host}:{port} may be blocked (firewall) or the station is down.");
+            if host == "192.168.204.11" {
+                eprintln!(
+                    "Open-FDD bench: allow TCP 443 on the Niagara Windows host for 192.168.204.55."
+                );
+            }
+        }
+    }
 }
 
 fn kind_display(kind: Option<&haystack_core::kinds::Kind>) -> String {
