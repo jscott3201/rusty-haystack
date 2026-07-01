@@ -53,10 +53,13 @@ Ethernet adapter on the Windows station host: **192.168.204.11** (same subnet as
 ```bash
 cd demo/niagara_sample/niagara-rusty-scrape
 cp env.example .env
-# edit HAYSTACK_PASS
+# edit JACE_HOST, HAYSTACK_USER, HAYSTACK_PASS (see env.example comments)
 source .env
-cargo run -- --probe-scram
+./scripts/check-niagara.sh          # TCP 443 + /about (run after Windows firewall rule)
+cargo run -- --insecure-tls --probe-scram
 ```
+
+**Validated 2026-07-01** on bench `192.168.204.55` → Niagara `192.168.204.11`: 9 live points (BACnet + `SomeRandomPoint`). See [BENCH_VALIDATION.md](./BENCH_VALIDATION.md) for firewall, RustyHaystack vs servlet, and Open-FDD test parallels.
 
 ## Auth modes
 
