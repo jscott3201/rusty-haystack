@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use chrono::{DateTime, FixedOffset};
 use parking_lot::RwLock;
 
-use async_trait::async_trait;
 use haystack_core::kinds::Kind;
 
 use crate::his_provider::HistoryProvider;
@@ -116,19 +115,24 @@ impl HisStore {
     }
 }
 
-#[async_trait]
 impl HistoryProvider for HisStore {
-    async fn his_read(
+    fn his_read(
         &self,
         id: &str,
         start: Option<DateTime<FixedOffset>>,
         end: Option<DateTime<FixedOffset>>,
-    ) -> Vec<HisItem> {
-        self.read(id, start, end)
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<HisItem>> + Send + '_>> {
+        let result = self.read(id, start, end);
+        Box::pin(async move { result })
     }
 
-    async fn his_write(&self, id: &str, items: Vec<HisItem>) {
+    fn his_write(
+        &self,
+        id: &str,
+        items: Vec<HisItem>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         self.write(id, items);
+        Box::pin(async {})
     }
 }
 

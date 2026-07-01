@@ -1,65 +1,33 @@
 //! Library and spec management endpoints.
-//!
-//! # Overview
-//!
-//! These endpoints manage Xeto-based ontology libraries at runtime:
-//! listing specs, inspecting individual specs, loading/unloading libraries,
-//! exporting library source, and validating entities against the ontology.
-//!
-//! # Endpoints
-//!
-//! - `POST /api/specs` — list specs, optionally filtered by `lib` (Str).
-//!   Response: `qname`, `name`, `lib`, `base`, `doc`, `abstract`.
-//! - `POST /api/spec` — get single spec by `qname` (Str).
-//!   Response: `qname`, `name`, `lib`, `base`, `doc`, `abstract`, `slots`.
-//! - `POST /api/loadLib` — load library from `name` (Str) and `source` (Str).
-//!   Response: `loaded`, `specs`.
-//! - `POST /api/unloadLib` — unload library by `name` (Str).
-//!   Response: `unloaded`.
-//! - `POST /api/exportLib` — export library by `name` (Str) to Xeto source.
-//!   Response: `name`, `source`.
-//! - `POST /api/validate` — validate entity rows against the ontology.
-//!   Response: `entity`, `issueType`, `detail`.
-//!
-//! # Errors
-//!
-//! - **400 Bad Request** — missing required columns, spec not found, load/unload
-//!   error, or request decode failure.
-//! - **500 Internal Server Error** — encoding error.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
 
 use crate::content;
 use crate::error::HaystackError;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// POST /api/specs — list specs, optionally filtered by library.
-///
-/// Request grid may have a `lib` (Str) column to filter by library name.
-/// Returns a grid of specs sorted by `qname`, with columns:
-/// `qname`, `name`, `lib`, `base`, `doc`, and `abstract` (Marker).
 pub async fn handle_specs(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
     let ns = state.namespace.read();
 
-    // Parse optional lib filter from request
     let lib_filter: Option<String> = if body.trim().is_empty() {
         None
     } else {
@@ -114,26 +82,20 @@ pub async fn handle_specs(
     let grid = HGrid::from_parts(HDict::new(), cols, rows);
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// POST /api/spec — get a single spec by qualified name.
-///
-/// Request grid must have a `qname` (Str) column with the fully-qualified
-/// spec name. Returns a single-row grid with `qname`, `name`, `lib`,
-/// `base`, `doc`, `abstract`, and `slots` (comma-separated slot names).
 pub async fn handle_spec(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -174,33 +136,26 @@ pub async fn handle_spec(
     if spec.is_abstract {
         result.set("abstract", Kind::Marker);
     }
-    // Encode slots as a comma-separated string for simplicity
     let slot_names: Vec<String> = spec.slots.iter().map(|s| s.name.clone()).collect();
     result.set("slots", Kind::Str(slot_names.join(",")));
 
     let grid = HGrid::from_parts(HDict::new(), cols, vec![result]);
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// POST /api/loadLib — load a library from Xeto source text.
-///
-/// Request grid must have `name` (Str) and `source` (Str) columns.
-/// Returns a single-row grid with `loaded` (library name) and `specs`
-/// (comma-separated list of loaded spec qualified names).
 pub async fn handle_load_lib(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -231,25 +186,20 @@ pub async fn handle_load_lib(
     let grid = HGrid::from_parts(HDict::new(), cols, vec![result]);
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// POST /api/unloadLib — unload a library by name.
-///
-/// Request grid must have a `name` (Str) column.
-/// Returns a single-row grid with `unloaded` (the library name).
 pub async fn handle_unload_lib(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -273,25 +223,20 @@ pub async fn handle_unload_lib(
     let grid = HGrid::from_parts(HDict::new(), cols, vec![result]);
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// POST /api/exportLib — export a library to Xeto source text.
-///
-/// Request grid must have a `name` (Str) column.
-/// Returns a single-row grid with `name` and `source` (Xeto text).
 pub async fn handle_export_lib(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -318,27 +263,20 @@ pub async fn handle_export_lib(
     let grid = HGrid::from_parts(HDict::new(), cols, vec![result]);
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// POST /api/validate — validate entities against the ontology.
-///
-/// Each row in the request grid is an entity dict to validate.
-/// Returns a grid of validation issues with columns: `entity` (Str),
-/// `issueType` (Str), and `detail` (Str). An empty grid means all
-/// entities passed validation.
 pub async fn handle_validate(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -371,5 +309,5 @@ pub async fn handle_validate(
     let grid = HGrid::from_parts(HDict::new(), cols, rows);
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }

@@ -1,56 +1,9 @@
 //! The `hisRead` and `hisWrite` ops — historical time-series data.
-//!
-//! Backed by a pluggable [`HistoryProvider`](crate::his_provider::HistoryProvider)
-//! stored in `AppState`. The default provider is the in-memory
-//! [`HisStore`](crate::his_store::HisStore).
-//!
-//! # hisRead
-//!
-//! `POST /api/hisRead` queries time-series history for a single point.
-//!
-//! ## Request Grid Columns
-//!
-//! | Column  | Kind | Description                                   |
-//! |---------|------|-----------------------------------------------|
-//! | `id`    | Ref  | Point entity reference                        |
-//! | `range` | Str  | Date range: `"today"`, `"yesterday"`, `"YYYY-MM-DD"`, or `"YYYY-MM-DD,YYYY-MM-DD"` |
-//!
-//! ## Response Grid Columns
-//!
-//! Grid meta contains `id` (Ref) echoing the requested point.
-//!
-//! | Column | Kind     | Description          |
-//! |--------|----------|----------------------|
-//! | `ts`   | DateTime | Sample timestamp     |
-//! | `val`  | *any*    | Sample value         |
-//!
-//! # hisWrite
-//!
-//! `POST /api/hisWrite` stores time-series samples for a single point.
-//!
-//! ## Request
-//!
-//! Grid meta must contain `id` (Ref). Rows carry:
-//!
-//! | Column | Kind     | Description        |
-//! |--------|----------|--------------------|
-//! | `ts`   | DateTime | Sample timestamp   |
-//! | `val`  | *any*    | Sample value       |
-//!
-//! ## Response
-//!
-//! Empty grid on success.
-//!
-//! # Errors
-//!
-//! - **400 Bad Request** — missing `id` / `range` / `ts`, invalid range format,
-//!   or request decode failure.
-//! - **404 Not Found** — entity not in local graph and not owned by any
-//!   federation connector (hisWrite only).
-//! - **500 Internal Server Error** — federation proxy or encoding error.
 
-use actix_web::{HttpRequest, HttpResponse, web};
-use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::{HDateTime, HRef, Kind};
@@ -58,32 +11,23 @@ use haystack_core::kinds::{HDateTime, HRef, Kind};
 use crate::content;
 use crate::error::HaystackError;
 use crate::his_store::HisItem;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
 // hisRead
 // ---------------------------------------------------------------------------
 
 /// POST /api/hisRead
-///
-/// Request grid has one row with `id` (Ref) and `range` (Str) columns.
-///
-/// Supported `range` formats:
-///   - `"today"` / `"yesterday"` — date ranges based on local time
-///   - `"YYYY-MM-DD"` — a single date (midnight to midnight)
-///   - `"YYYY-MM-DD,YYYY-MM-DD"` — explicit start,end dates (start inclusive, end exclusive midnight)
 pub async fn handle_read(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -91,12 +35,10 @@ pub async fn handle_read(
     let request_grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
 
-    // Extract the first row.
     let row = request_grid
         .row(0)
         .ok_or_else(|| HaystackError::bad_request("hisRead request has no rows"))?;
 
-    // Extract id.
     let id = match row.get("id") {
         Some(Kind::Ref(r)) => r.val.clone(),
         _ => {
@@ -106,7 +48,6 @@ pub async fn handle_read(
         }
     };
 
-    // Extract range string.
     let range_str = match row.get("range") {
         Some(Kind::Str(s)) => s.as_str(),
         _ => {
@@ -116,21 +57,7 @@ pub async fn handle_read(
         }
     };
 
-    // Check if entity is local; if not, try federation proxy.
-    if !state.graph.contains(&id)
-        && let Some(connector) = state.federation.owner_of(&id)
-    {
-        let grid = connector
-            .proxy_his_read(&id, range_str)
-            .await
-            .map_err(|e| HaystackError::internal(format!("federation proxy error: {e}")))?;
-
-        let (encoded, ct) = content::encode_response_grid(&grid, accept)
-            .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-        return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
-    }
-
-    // Parse range into (start, end) pair of DateTime<FixedOffset>.
+    // Parse range into (start, end) pair.
     let (start, end) = parse_range(range_str)
         .map_err(|e| HaystackError::bad_request(format!("hisRead: bad range: {e}")))?;
 
@@ -157,26 +84,20 @@ pub async fn handle_read(
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// Parse a range string into a (start, end) pair of `DateTime<FixedOffset>`.
-///
-/// Supported formats:
-///   - `"today"` — midnight-to-midnight of the current local date
-///   - `"yesterday"` — midnight-to-midnight of yesterday's local date
-///   - `"YYYY-MM-DD"` — a single date
-///   - `"YYYY-MM-DD,YYYY-MM-DD"` — explicit start,end
 fn parse_range(range: &str) -> Result<(DateTime<FixedOffset>, DateTime<FixedOffset>), String> {
     let range = range.trim();
 
     match range {
         "today" => {
-            let today = Local::now().date_naive();
+            let today = Utc::now().date_naive();
             Ok(date_range(today, today))
         }
         "yesterday" => {
-            let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+            let yesterday = Utc::now().date_naive() - chrono::Duration::days(1);
             Ok(date_range(yesterday, yesterday))
         }
         _ => {
@@ -193,14 +114,10 @@ fn parse_range(range: &str) -> Result<(DateTime<FixedOffset>, DateTime<FixedOffs
     }
 }
 
-/// Parse a "YYYY-MM-DD" string into a NaiveDate.
 fn parse_date(s: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| format!("invalid date '{s}': {e}"))
 }
 
-/// Build a (start, end) DateTime pair from date(s).
-///
-/// Start is midnight on `start_date`, end is 23:59:59 on `end_date`, both at UTC.
 fn date_range(
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -219,22 +136,19 @@ fn date_range(
 // hisWrite
 // ---------------------------------------------------------------------------
 
+const MAX_HIS_WRITE_ROWS: usize = 100_000;
+
 /// POST /api/hisWrite
-///
-/// Request grid meta must contain `id` (Ref). Rows contain `ts` and `val`
-/// columns. Data is stored in the in-memory `HisStore`.
 pub async fn handle_write(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -242,7 +156,10 @@ pub async fn handle_write(
     let request_grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
 
-    // Extract point id from grid meta.
+    if request_grid.rows.len() > MAX_HIS_WRITE_ROWS {
+        return Err(HaystackError::bad_request("too many history rows"));
+    }
+
     let id = match request_grid.meta.get("id") {
         Some(Kind::Ref(r)) => r.val.clone(),
         _ => {
@@ -251,23 +168,6 @@ pub async fn handle_write(
             ));
         }
     };
-
-    // Check federation: if entity is not in local graph, proxy to remote.
-    if !state.graph.contains(&id) {
-        if let Some(connector) = state.federation.owner_of(&id) {
-            // Forward the raw rows (with ts/val) to the remote server.
-            let items: Vec<HDict> = request_grid.rows.to_vec();
-            let grid = connector
-                .proxy_his_write(&id, items)
-                .await
-                .map_err(|e| HaystackError::internal(format!("federation proxy error: {e}")))?;
-
-            let (encoded, ct) = content::encode_response_grid(&grid, accept)
-                .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-            return Ok(HttpResponse::Ok().content_type(ct).body(encoded));
-        }
-        return Err(HaystackError::not_found(format!("entity not found: {id}")));
-    }
 
     // Parse rows into HisItems.
     let mut items = Vec::with_capacity(request_grid.len());
@@ -293,5 +193,5 @@ pub async fn handle_write(
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }

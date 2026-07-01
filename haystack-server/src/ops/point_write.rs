@@ -1,56 +1,27 @@
 //! The `pointWrite` op — write a value to a writable point.
-//!
-//! # Overview
-//!
-//! `POST /api/pointWrite` writes a value to one or more writable point
-//! entities. Each row represents a write command. The entity must carry
-//! the `writable` marker tag.
-//!
-//! # Request Grid Columns
-//!
-//! | Column  | Kind   | Description                                     |
-//! |---------|--------|-------------------------------------------------|
-//! | `id`    | Ref    | Writable point entity reference                 |
-//! | `level` | Number | Priority level 1–17 (default 17 if omitted)     |
-//! | `val`   | *any*  | Value to write                                  |
-//!
-//! # Response
-//!
-//! Empty grid on success.
-//!
-//! # Errors
-//!
-//! - **400 Bad Request** — `level` outside 1–17, entity not `writable`, write
-//!   failed, or request decode failure.
-//! - **404 Not Found** — entity not in local graph and not owned by any
-//!   federation connector.
-//! - **500 Internal Server Error** — federation proxy or encoding error.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HDict, HGrid};
 use haystack_core::kinds::Kind;
 
 use crate::content;
 use crate::error::HaystackError;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// POST /api/pointWrite
-///
-/// Request grid has `id`, `level`, and `val` columns.
-/// Writes the value to the entity in the graph as a simple curVal update.
 pub async fn handle(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -75,16 +46,7 @@ pub async fn handle(
             )));
         }
 
-        // Check federation: if entity is not in local graph, proxy to remote.
         if !state.graph.contains(&ref_val) {
-            if let Some(connector) = state.federation.owner_of(&ref_val) {
-                let val = row.get("val").cloned().unwrap_or(Kind::Null);
-                connector
-                    .proxy_point_write(&ref_val, level as u8, &val)
-                    .await
-                    .map_err(|e| HaystackError::internal(format!("federation proxy error: {e}")))?;
-                continue;
-            }
             return Err(HaystackError::not_found(format!(
                 "entity not found: {ref_val}"
             )));
@@ -103,7 +65,6 @@ pub async fn handle(
 
         // Get the value to write
         if let Some(val) = row.get("val") {
-            // Simple implementation: update the entity's curVal tag at the given level
             let mut changes = HDict::new();
             changes.set("curVal", val.clone());
             changes.set(
@@ -122,5 +83,5 @@ pub async fn handle(
     let (encoded, ct) = content::encode_response_grid(&grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }

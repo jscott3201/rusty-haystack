@@ -120,7 +120,7 @@ impl PyHDict {
     /// Return tag names in sorted order.
     fn sorted_keys(&self) -> Vec<String> {
         self.inner
-            .sorted_iter()
+            .sorted_tags()
             .into_iter()
             .map(|(k, _)| k.to_string())
             .collect()

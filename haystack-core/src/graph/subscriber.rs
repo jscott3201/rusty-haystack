@@ -28,8 +28,7 @@ pub struct GraphSubscriber {
 impl GraphSubscriber {
     /// Create a new subscriber starting from the graph's current version.
     pub fn new(graph: SharedGraph) -> Self {
-        let rx = graph.subscribe();
-        let last_version = graph.version();
+        let (rx, last_version) = graph.subscribe_with_version();
         Self {
             graph,
             rx,

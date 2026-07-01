@@ -22,7 +22,7 @@ let client = HaystackClient::connect(
 ).await?;
 ```
 
-Performs SCRAM SHA-256 authentication and returns a client with an embedded bearer token.
+Performs SCRAM SHA-256 authentication and returns a client with an embedded bearer token. The token is zeroized on drop.
 
 ### WebSocket
 
@@ -157,8 +157,8 @@ async fn close_session(&self) -> Result<HGrid, ClientError>
 async fn close(&self) -> Result<(), ClientError>
 ```
 
-- `close_session()` — calls the `close` op to revoke the bearer token
-- `close()` — shuts down the transport (no-op for HTTP, sends Close frame for WebSocket)
+- `close_session()` -- calls the `close` op to revoke the bearer token
+- `close()` -- shuts down the transport (no-op for HTTP, sends Close frame for WebSocket)
 
 ### Generic Call
 

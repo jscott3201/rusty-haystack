@@ -1,33 +1,18 @@
 //! The `ops` op — list all available operations.
-//!
-//! # Overview
-//!
-//! `GET /api/ops` returns a grid of all Haystack operations supported by
-//! this server. No request grid is needed.
-//!
-//! # Response Grid Columns
-//!
-//! | Column    | Kind | Description                    |
-//! |-----------|------|--------------------------------|
-//! | `name`    | Str  | Operation name (e.g. `"read"`) |
-//! | `summary` | Str  | Short description              |
-//!
-//! # Errors
-//!
-//! - **500 Internal Server Error** — encoding failure.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
 
 use crate::content;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// GET /api/ops — returns a grid listing all available operations.
-pub async fn handle(req: HttpRequest, _state: web::Data<AppState>) -> HttpResponse {
-    let accept = req
-        .headers()
+pub async fn handle(State(_state): State<SharedState>, headers: HeaderMap) -> Response {
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -48,15 +33,6 @@ pub async fn handle(req: HttpRequest, _state: web::Data<AppState>) -> HttpRespon
         ("hisWrite", "Write historical time-series data"),
         ("invokeAction", "Invoke an action on an entity"),
         ("close", "Close the current session"),
-        (
-            "graph/flow",
-            "Full graph as nodes + edges for visualization",
-        ),
-        ("graph/edges", "All ref relationships as explicit edges"),
-        ("graph/tree", "Recursive subtree from a root entity"),
-        ("graph/neighbors", "N-hop neighborhood around an entity"),
-        ("graph/path", "Shortest path between two entities"),
-        ("graph/stats", "Graph metrics and statistics"),
     ];
 
     let cols = vec![HCol::new("name"), HCol::new("summary")];
@@ -72,10 +48,10 @@ pub async fn handle(req: HttpRequest, _state: web::Data<AppState>) -> HttpRespon
 
     let grid = HGrid::from_parts(HDict::new(), cols, rows);
     match content::encode_response_grid(&grid, accept) {
-        Ok((body, ct)) => HttpResponse::Ok().content_type(ct).body(body),
+        Ok((body, ct)) => ([(axum::http::header::CONTENT_TYPE, ct)], body).into_response(),
         Err(e) => {
             log::error!("Failed to encode ops grid: {e}");
-            HttpResponse::InternalServerError().body("encoding error")
+            (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response()
         }
     }
 }

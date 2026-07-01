@@ -3,18 +3,18 @@
 ## Crate Dependency Graph
 
 ```
-haystack-core          (foundation — no workspace deps)
+haystack-core          (foundation -- no workspace deps)
     |
     +-- haystack-client    (HTTP/WS client, SCRAM handshake)
     |       |
-    +-------+-- haystack-server  (HTTP API, 30+ ops, WebSocket, auth)
+    +-------+-- haystack-server  (HTTP API, 20+ ops, WebSocket, auth)
     |               |
     +-------+-------+-- haystack-cli   (CLI binary, depends on all three)
     |
     +-- rusty-haystack     (PyO3 Python bindings, core only)
 ```
 
-`haystack-core` is the foundation. Every other crate depends on it directly. `haystack-server` also depends on `haystack-client` (for [federation](federation.md) sync). `haystack-cli` ties everything together into a single binary.
+`haystack-core` is the foundation. Every other crate depends on it directly. `haystack-cli` ties everything together into a single binary.
 
 ## Core Abstractions
 
@@ -24,37 +24,37 @@ The `Kind` enum represents all 15 Haystack scalar types plus composite types:
 
 ```
 Kind
-  ├── Null, Marker, NA, Remove           (singletons)
-  ├── Bool(bool)                          (boolean)
-  ├── Number { val: f64, unit: Option }   (numeric with optional unit)
-  ├── Str(String)                         (string)
-  ├── Ref { val, dis }                    (entity reference)
-  ├── Uri, Symbol, XStr                   (typed strings)
-  ├── Date, Time, DateTime                (temporal, via chrono)
-  ├── Coord { lat, lng }                  (geographic)
-  ├── List(Vec<Kind>)                     (heterogeneous list)
-  ├── Dict(Box<HDict>)                    (tag dictionary)
-  └── Grid(Box<HGrid>)                    (tabular data)
+  +-- Null, Marker, NA, Remove           (singletons)
+  +-- Bool(bool)                          (boolean)
+  +-- Number { val: f64, unit: Option }   (numeric with optional unit)
+  +-- Str(String)                         (string)
+  +-- Ref { val, dis }                    (entity reference)
+  +-- Uri, Symbol, XStr                   (typed strings)
+  +-- Date, Time, DateTime                (temporal, via chrono)
+  +-- Coord { lat, lng }                  (geographic)
+  +-- List(Vec<Kind>)                     (heterogeneous list)
+  +-- Dict(Box<HDict>)                    (tag dictionary)
+  +-- Grid(Box<HGrid>)                    (tabular data)
 ```
 
 ### HDict
 
 A mutable dictionary mapping tag names (strings) to `Kind` values. Every entity in the system is an `HDict`. Key operations:
 
-- `has(name)` / `missing(name)` — tag presence
-- `get(name)` — tag lookup
-- `id()` — shortcut for the "id" Ref tag
-- `set(name, val)` / `remove_tag(name)` — mutation
-- `merge(other)` — merge with `Kind::Remove` support
-- `sorted_iter()` — deterministic iteration order
+- `has(name)` / `missing(name)` -- tag presence
+- `get(name)` -- tag lookup
+- `id()` -- shortcut for the "id" Ref tag
+- `set(name, val)` / `remove_tag(name)` -- mutation
+- `merge(other)` -- merge with `Kind::Remove` support
+- `sorted_iter()` -- deterministic iteration order
 
 ### HGrid
 
 A tabular data structure consisting of metadata (`HDict`), columns (`Vec<HCol>`), and rows (`Vec<HDict>`). Grids are the primary wire format for requests and responses.
 
-- `HGrid::new()` — empty grid
-- `HGrid::from_parts(meta, cols, rows)` — construct from components
-- `is_err()` — check if grid represents an error (has "err" marker in meta)
+- `HGrid::new()` -- empty grid
+- `HGrid::from_parts(meta, cols, rows)` -- construct from components
+- `is_err()` -- check if grid represents an error (has "err" marker in meta)
 
 ### EntityGraph
 
@@ -62,12 +62,12 @@ An in-memory entity store with bitmap indexing for fast tag-based queries and re
 
 ```
 EntityGraph
-  ├── entities: HashMap<String, HDict>    (ref_val → entity)
-  ├── tag_index: TagBitmapIndex           (fast has/missing queries)
-  ├── adjacency: RefAdjacency             (bidirectional ref links)
-  ├── namespace: Option<DefNamespace>     (ontology for spec-aware ops)
-  ├── version: u64                        (monotonic counter)
-  └── changelog: Vec<GraphDiff>           (capped at 10,000 entries)
+  +-- entities: HashMap<String, HDict>    (ref_val -> entity)
+  +-- tag_index: TagBitmapIndex           (fast has/missing queries)
+  +-- adjacency: RefAdjacency             (bidirectional ref links)
+  +-- namespace: Option<DefNamespace>     (ontology for spec-aware ops)
+  +-- version: u64                        (monotonic counter)
+  +-- changelog: Vec<GraphDiff>           (capped at 10,000 entries)
 ```
 
 CRUD operations: `add`, `get`, `update`, `remove`. Query operations: `read(filter, limit)`.
@@ -139,27 +139,38 @@ Security measures:
 - Constant-time credential comparison (`subtle` crate)
 - Fake challenge for unknown users (prevents enumeration)
 - 60s handshake TTL, configurable token TTL (default 3600s)
+- Periodic auth token cleanup
 
 ## Server Request Lifecycle
 
-1. **TCP accept** — Actix Web receives the connection
-2. **Payload parsing** — body read up to 2 MB limit
-3. **Auth middleware** — checks Authorization header:
+1. **TCP accept** -- Axum receives the connection
+2. **Payload parsing** -- body read up to 2 MB limit
+3. **Auth middleware** -- checks Authorization header:
    - `/api/about`, `/api/ops`, `/api/formats` pass through
    - All others require BEARER token (if auth is enabled)
    - Permission check: read / write / admin based on endpoint
-4. **Content negotiation** — `Content-Type` header selects request codec, `Accept` header selects response codec (default: `text/zinc`)
-5. **Op handler** — decodes request grid, executes operation, encodes response grid
-6. **Response** — grid serialized with negotiated codec and returned
+4. **Content negotiation** -- `Content-Type` header selects request codec, `Accept` header selects response codec (default: `text/zinc`)
+5. **Op handler** -- decodes request grid, executes operation, encodes response grid
+6. **Response** -- grid serialized with negotiated codec and returned
+
+## Parser DoS Protection
+
+The Zinc/JSON parsers enforce limits to prevent denial-of-service via malicious input:
+
+| Limit | Value |
+|-------|-------|
+| Nesting depth | 64 levels |
+| String size | 10 MB |
+| Collection size | 1,000,000 elements |
 
 ## Ontology
 
 The `DefNamespace` loads bundled Haystack 4 definitions (`ph`, `phScience`, `phIoT`, `phIct`) and optional Xeto specs. It provides:
 
-- **Taxonomy** — `is_a(name, supertype)` for nominal subtype checking
-- **Fitting** — `fits(entity, type_name)` for structural type matching
-- **Validation** — `validate_entity(entity)` for ontology conformance
-- **Xeto management** — `load_xeto(source, lib)`, `unload_lib(name)`, `get_spec(qname)`
+- **Taxonomy** -- `is_a(name, supertype)` for nominal subtype checking
+- **Fitting** -- `fits(entity, type_name)` for structural type matching
+- **Validation** -- `validate_entity(entity)` for ontology conformance
+- **Xeto management** -- `load_xeto(source, lib)`, `unload_lib(name)`, `get_spec(qname)`
 
 ## Filter Engine
 
@@ -167,12 +178,12 @@ Filter expressions are parsed into an AST (`FilterNode`) by a hand-written recur
 
 ```
 FilterNode
-  ├── Has(path)                    tag exists
-  ├── Missing(path)                tag missing
-  ├── Cmp { path, op, val }       comparison (==, !=, <, <=, >, >=)
-  ├── And(left, right)             logical and
-  ├── Or(left, right)              logical or
-  └── SpecMatch(type_name)         ontology type match (e.g., "ph::Ahu")
+  +-- Has(path)                    tag exists
+  +-- Missing(path)                tag missing
+  +-- Cmp { path, op, val }       comparison (==, !=, <, <=, >, >=)
+  +-- And(left, right)             logical and
+  +-- Or(left, right)              logical or
+  +-- SpecMatch(type_name)         ontology type match (e.g., "ph::Ahu")
 ```
 
 Paths support ref traversal (e.g., `equipRef->siteRef->area`) via a resolver callback. Evaluation short-circuits on And/Or.

@@ -344,9 +344,9 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 /// connection is re-established.
 pub struct ReconnectingWsTransport {
     url: String,
-    auth_token: String,
+    auth_token: zeroize::Zeroizing<String>,
     request_timeout: Duration,
-    inner: Mutex<Option<WsTransport>>,
+    inner: Mutex<Option<Arc<WsTransport>>>,
 }
 
 impl ReconnectingWsTransport {
@@ -356,9 +356,9 @@ impl ReconnectingWsTransport {
         let transport = WsTransport::connect(url, auth_token).await?;
         Ok(Self {
             url: url.to_string(),
-            auth_token: auth_token.to_string(),
+            auth_token: zeroize::Zeroizing::new(auth_token.to_string()),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            inner: Mutex::new(Some(transport)),
+            inner: Mutex::new(Some(Arc::new(transport))),
         })
     }
 
@@ -371,9 +371,9 @@ impl ReconnectingWsTransport {
         let transport = WsTransport::connect_with_timeout(url, auth_token, timeout).await?;
         Ok(Self {
             url: url.to_string(),
-            auth_token: auth_token.to_string(),
+            auth_token: zeroize::Zeroizing::new(auth_token.to_string()),
             request_timeout: timeout,
-            inner: Mutex::new(Some(transport)),
+            inner: Mutex::new(Some(Arc::new(transport))),
         })
     }
 
@@ -407,7 +407,7 @@ impl ReconnectingWsTransport {
             .await
             {
                 Ok(transport) => {
-                    *self.inner.lock().await = Some(transport);
+                    *self.inner.lock().await = Some(Arc::new(transport));
                     return Ok(());
                 }
                 Err(_) if attempt < MAX_RECONNECT_ATTEMPTS => {
@@ -430,20 +430,21 @@ impl ReconnectingWsTransport {
 
 impl Transport for ReconnectingWsTransport {
     async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
-        // Fast path: use existing connection.
-        {
+        // Fast path: clone the Arc out of the lock, then drop the lock before calling.
+        let transport = {
             let guard = self.inner.lock().await;
-            if let Some(ref transport) = *guard {
-                match transport.call(op, req).await {
-                    Ok(grid) => return Ok(grid),
-                    Err(ClientError::Timeout(d)) => return Err(ClientError::Timeout(d)),
-                    Err(ClientError::ServerError(e)) => return Err(ClientError::ServerError(e)),
-                    Err(ClientError::TooManyRequests) => {
-                        return Err(ClientError::TooManyRequests);
-                    }
-                    Err(_) => {
-                        // Connection-level error; fall through to reconnect.
-                    }
+            guard.as_ref().cloned()
+        };
+        if let Some(transport) = transport {
+            match transport.call(op, req).await {
+                Ok(grid) => return Ok(grid),
+                Err(ClientError::Timeout(d)) => return Err(ClientError::Timeout(d)),
+                Err(ClientError::ServerError(e)) => return Err(ClientError::ServerError(e)),
+                Err(ClientError::TooManyRequests) => {
+                    return Err(ClientError::TooManyRequests);
+                }
+                Err(_) => {
+                    // Connection-level error; fall through to reconnect.
                 }
             }
         }
@@ -453,15 +454,19 @@ impl Transport for ReconnectingWsTransport {
         self.reconnect().await?;
 
         // Retry the request on the new connection.
-        let guard = self.inner.lock().await;
-        match guard.as_ref() {
+        let transport = {
+            let guard = self.inner.lock().await;
+            guard.as_ref().cloned()
+        };
+        match transport {
             Some(transport) => transport.call(op, req).await,
             None => Err(ClientError::ConnectionClosed),
         }
     }
 
     async fn close(&self) -> Result<(), ClientError> {
-        if let Some(transport) = self.inner.lock().await.take() {
+        let transport = self.inner.lock().await.take();
+        if let Some(transport) = transport {
             transport.close().await
         } else {
             Ok(())

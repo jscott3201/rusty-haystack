@@ -5,21 +5,38 @@ use crate::data::{HCol, HDict, HGrid};
 use crate::kinds::*;
 use chrono::{NaiveDate, NaiveTime};
 
+/// Maximum nesting depth for lists and dicts to prevent stack overflow from
+/// deeply nested inputs.
+const MAX_NESTING_DEPTH: usize = 64;
+
+/// Maximum length for string and URI literals (10 MiB) to prevent unbounded
+/// memory growth from malicious input.
+const MAX_STRING_LENGTH: usize = 10 * 1024 * 1024;
+
+/// Maximum number of elements in a list or entries in a dict to prevent
+/// unbounded memory growth from malicious input.
+const MAX_COLLECTION_SIZE: usize = 1_000_000;
+
 /// Hand-written recursive descent parser for Zinc wire format.
 pub struct ZincParser<'a> {
     src: &'a str,
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> ZincParser<'a> {
     /// Create a new parser for the given input.
     pub fn new(src: &'a str) -> Self {
-        Self { src, pos: 0 }
+        Self {
+            src,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     /// Create a new parser starting at the given position within the source.
     pub fn new_at(src: &'a str, pos: usize) -> Self {
-        Self { src, pos }
+        Self { src, pos, depth: 0 }
     }
 
     /// Return the current byte position of the parser.
@@ -466,6 +483,9 @@ impl<'a> ZincParser<'a> {
                 result.push(ch);
                 self.pos += ch.len_utf8();
             }
+            if result.len() > MAX_STRING_LENGTH {
+                return Err(self.err("string exceeds maximum allowed length"));
+            }
         }
         Err(self.err("unterminated string"))
     }
@@ -544,6 +564,9 @@ impl<'a> ZincParser<'a> {
                 result.push(ch);
                 self.pos += ch.len_utf8();
             }
+            if result.len() > MAX_STRING_LENGTH {
+                return Err(self.err("URI exceeds maximum allowed length"));
+            }
         }
         Err(self.err("unterminated URI"))
     }
@@ -603,28 +626,51 @@ impl<'a> ZincParser<'a> {
     // ── List ──
 
     fn read_list(&mut self) -> Result<Kind, CodecError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            self.depth -= 1;
+            return Err(self.err("maximum nesting depth exceeded"));
+        }
+
         self.pos += 1; // skip [
         let mut vals = Vec::new();
         self.skip_spaces();
         while !self.at_end() && self.peek() != Some(']') {
+            if vals.len() >= MAX_COLLECTION_SIZE {
+                self.depth -= 1;
+                return Err(self.err("list exceeds maximum collection size"));
+            }
             vals.push(self.read_val()?);
             self.skip_spaces();
             self.consume_if(',');
             self.skip_spaces();
         }
-        if !self.at_end() {
-            self.pos += 1; // skip ]
+        if self.at_end() || self.peek() != Some(']') {
+            self.depth -= 1;
+            return Err(self.err("unterminated list"));
         }
+        self.pos += 1; // skip ]
+        self.depth -= 1;
         Ok(Kind::List(vals))
     }
 
     // ── Dict ──
 
     fn read_dict(&mut self) -> Result<Kind, CodecError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            self.depth -= 1;
+            return Err(self.err("maximum nesting depth exceeded"));
+        }
+
         self.pos += 1; // skip {
         let mut dict = HDict::new();
         self.skip_spaces();
         while !self.at_end() && self.peek() != Some('}') {
+            if dict.len() >= MAX_COLLECTION_SIZE {
+                self.depth -= 1;
+                return Err(self.err("dict exceeds maximum collection size"));
+            }
             let name = self.read_tag_name()?;
             self.skip_spaces();
             if self.peek() == Some(':') {
@@ -639,9 +685,12 @@ impl<'a> ZincParser<'a> {
             self.consume_if(',');
             self.skip_spaces();
         }
-        if !self.at_end() {
-            self.pos += 1; // skip }
+        if self.at_end() || self.peek() != Some('}') {
+            self.depth -= 1;
+            return Err(self.err("unterminated dict"));
         }
+        self.pos += 1; // skip }
+        self.depth -= 1;
         Ok(Kind::Dict(Box::new(dict)))
     }
 
@@ -687,9 +736,10 @@ impl<'a> ZincParser<'a> {
             self.skip_spaces();
             let val = self.read_str()?;
             self.skip_spaces();
-            if self.peek() == Some(')') {
-                self.pos += 1;
+            if self.peek() != Some(')') {
+                return Err(self.err("unterminated XStr, expected closing ')'"));
             }
+            self.pos += 1; // skip )
             return Ok(Kind::XStr(XStr::new(name, val)));
         }
 

@@ -11,5 +11,6 @@ haystack-core/src/ontology/generated.rs
 # Claude
 .claude/
 CLAUDE.md
+claude-id.json
 .DS_Store
 _plan/

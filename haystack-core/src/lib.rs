@@ -9,9 +9,9 @@
 //! |--------|-------------|
 //! | [`kinds`] | Central value type ([`Kind`](kinds::Kind)) with 15 scalar types (Marker, Number, Str, Ref, etc.) |
 //! | [`data`] | Collection types: [`HDict`](data::HDict) (tag map), [`HGrid`](data::HGrid) (table), [`HCol`](data::HCol), [`HList`](data::HList) |
-//! | [`codecs`] | Wire format codecs: Zinc, Trio, JSON, Haystack JSON v3, CSV, and RDF (Turtle/JSON-LD) |
+//! | [`codecs`] | Wire format codecs: Zinc, Trio, JSON, Haystack JSON v3, CSV |
 //! | [`filter`] | Haystack filter expression parser and evaluator (`site and area > 1000`) |
-//! | [`graph`] | In-memory entity graph with bitmap tag indexes, B-tree value indexes, ref adjacency, CSR, and change tracking |
+//! | [`graph`] | In-memory entity graph with bitmap tag indexes, B-tree value indexes, ref adjacency, and change tracking |
 //! | [`ontology`] | Haystack 4 def/lib/namespace system with taxonomy, validation, and Xeto support |
 //! | [`auth`] | SCRAM SHA-256 authentication per the Haystack auth specification |
 //! | [`xeto`] | Xeto schema language parser and structural type fitting |
@@ -43,13 +43,9 @@
 //! let encoded = zinc.encode_grid(&grid).unwrap();
 //! ```
 
-#[cfg(feature = "haystack-serde")]
-mod serde_impls;
-
 pub mod auth;
 pub mod codecs;
 pub mod data;
-pub mod expr;
 pub mod filter;
 pub mod graph;
 pub mod kinds;

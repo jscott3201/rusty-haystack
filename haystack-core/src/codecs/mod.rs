@@ -10,12 +10,6 @@
 //! | `application/json;v=3` | [`json`] (v3) | Haystack JSON v3 — legacy JSON encoding |
 //! | `text/csv` | [`csv`] | CSV — comma-separated values for spreadsheet interop |
 //!
-//! Additional output-only codecs:
-//!
-//! | Module | Description |
-//! |--------|-------------|
-//! | [`rdf`] | RDF serialization in Turtle and JSON-LD formats |
-//!
 //! Use [`codec_for()`] to look up a codec by MIME type:
 //!
 //! ```rust
@@ -29,22 +23,14 @@
 //! The [`shared`] submodule provides common encoding/decoding helper functions
 //! used by multiple codec implementations.
 
-#[cfg(feature = "arrow")]
-pub mod arrow_ipc;
 pub mod csv;
-#[cfg(feature = "haystack-serde")]
-pub mod hbf;
 pub mod json;
-pub mod rdf;
 pub mod shared;
 pub mod trio;
 pub mod zinc;
 
 use crate::data::{HCol, HDict, HGrid};
 use crate::kinds::Kind;
-
-/// MIME type for Haystack Binary Format.
-pub const HBF_MIME: &str = "application/x-haystack-binary";
 
 /// Errors that can occur during encoding or decoding.
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +62,6 @@ pub trait Codec: Send + Sync {
 
     /// Encode the grid header (version line + meta + column definitions).
     ///
-    /// For Zinc: `ver:"3.0" meta\ncol1,col2,col3\n`
     /// Default implementation returns the full encoded grid (no streaming benefit).
     fn encode_grid_header(&self, grid: &HGrid) -> Result<Vec<u8>, CodecError> {
         self.encode_grid(grid).map(|s| s.into_bytes())
@@ -84,7 +69,6 @@ pub trait Codec: Send + Sync {
 
     /// Encode a single grid row given the column definitions.
     ///
-    /// For Zinc: `val1,val2,val3\n`
     /// Default implementation returns an empty vec (header contained everything).
     fn encode_grid_row(&self, _cols: &[HCol], _row: &HDict) -> Result<Vec<u8>, CodecError> {
         Ok(Vec::new())
@@ -110,22 +94,4 @@ pub fn codec_for(mime_type: &str) -> Option<&'static dyn Codec> {
         "text/csv" => Some(&CSV),
         _ => None,
     }
-}
-
-/// Encode an HGrid to binary using HBF (Haystack Binary Format).
-///
-/// Returns `Some(bytes)` when the `haystack-serde` feature is enabled,
-/// or `None` otherwise. The MIME type for HBF is `application/x-haystack-binary`.
-#[cfg(feature = "haystack-serde")]
-pub fn encode_grid_binary(grid: &HGrid) -> Result<Vec<u8>, String> {
-    hbf::encode_grid(grid).map_err(|e| e.to_string())
-}
-
-/// Decode an HGrid from binary HBF (Haystack Binary Format) bytes.
-///
-/// Returns `Ok(grid)` when the `haystack-serde` feature is enabled.
-/// The MIME type for HBF is `application/x-haystack-binary`.
-#[cfg(feature = "haystack-serde")]
-pub fn decode_grid_binary(bytes: &[u8]) -> Result<HGrid, String> {
-    hbf::decode_grid(bytes).map_err(|e| e.to_string())
 }

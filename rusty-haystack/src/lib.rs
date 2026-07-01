@@ -4,7 +4,6 @@ mod codecs;
 mod convert;
 mod data;
 pub mod exceptions;
-mod expr;
 mod filter;
 mod graph;
 mod kinds;
@@ -53,21 +52,14 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<data::PyHCol>()?;
     m.add_class::<graph::PyEntityGraph>()?;
     m.add_class::<graph::PySharedGraph>()?;
-    m.add_class::<graph::PySnapshotWriter>()?;
-    m.add_class::<graph::PySnapshotMeta>()?;
     m.add_class::<filter::PyFilter>()?;
     m.add_class::<ontology::PyDefNamespace>()?;
-    m.add_class::<expr::PyExpr>()?;
 
     // Top-level codec/filter functions
     m.add_function(wrap_pyfunction!(codecs::encode_grid, m)?)?;
     m.add_function(wrap_pyfunction!(codecs::decode_grid, m)?)?;
     m.add_function(wrap_pyfunction!(codecs::encode_scalar, m)?)?;
     m.add_function(wrap_pyfunction!(codecs::decode_scalar, m)?)?;
-    m.add_function(wrap_pyfunction!(codecs::encode_grid_binary, m)?)?;
-    m.add_function(wrap_pyfunction!(codecs::decode_grid_binary, m)?)?;
-    m.add_function(wrap_pyfunction!(codecs::encode_dict_binary, m)?)?;
-    m.add_function(wrap_pyfunction!(codecs::decode_dict_binary, m)?)?;
     m.add_function(wrap_pyfunction!(filter::parse_filter, m)?)?;
     m.add_function(wrap_pyfunction!(filter::matches_filter, m)?)?;
 
@@ -107,10 +99,6 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sub.add_function(wrap_pyfunction!(codecs::decode_grid, sub)?)?;
         sub.add_function(wrap_pyfunction!(codecs::encode_scalar, sub)?)?;
         sub.add_function(wrap_pyfunction!(codecs::decode_scalar, sub)?)?;
-        sub.add_function(wrap_pyfunction!(codecs::encode_grid_binary, sub)?)?;
-        sub.add_function(wrap_pyfunction!(codecs::decode_grid_binary, sub)?)?;
-        sub.add_function(wrap_pyfunction!(codecs::encode_dict_binary, sub)?)?;
-        sub.add_function(wrap_pyfunction!(codecs::decode_dict_binary, sub)?)?;
         Ok(())
     })?;
 
@@ -121,12 +109,6 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sub.add_class::<filter::PyPath>()?;
         sub.add_function(wrap_pyfunction!(filter::parse_filter, sub)?)?;
         sub.add_function(wrap_pyfunction!(filter::matches_filter, sub)?)?;
-        Ok(())
-    })?;
-
-    // ── Submodule: expr ──
-    add_submodule(m, "expr", |sub| {
-        sub.add_class::<expr::PyExpr>()?;
         Ok(())
     })?;
 
@@ -145,10 +127,6 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sub.add_class::<graph::PySharedGraph>()?;
         sub.add_class::<graph::PyDiffOp>()?;
         sub.add_class::<graph::PyGraphDiff>()?;
-        sub.add_class::<graph::PySnapshotWriter>()?;
-        sub.add_class::<graph::PySnapshotMeta>()?;
-        sub.add_function(wrap_pyfunction!(graph::load_snapshot, sub)?)?;
-        sub.add_function(wrap_pyfunction!(graph::find_latest_snapshot, sub)?)?;
         Ok(())
     })?;
 
@@ -189,8 +167,6 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sub.add_class::<server::PyHaystackServer>()?;
         sub.add_class::<server::PyAuthManager>()?;
         sub.add_class::<server::PyHisStore>()?;
-        sub.add_class::<server::PyFederation>()?;
-        sub.add_class::<server::PyConnectorConfig>()?;
         Ok(())
     })?;
 

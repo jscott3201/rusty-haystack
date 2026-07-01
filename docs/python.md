@@ -501,7 +501,7 @@ client = rh.HaystackClient.connect_tls(
 
 ## Embedded Server
 
-Run a Haystack server directly from Python. Useful for testing, prototyping, or embedding in larger applications.
+Run a Haystack server directly from Python. The embedded server is built on Axum. Useful for testing, prototyping, or embedding in larger applications.
 
 ```python
 import rusty_haystack as rh
@@ -517,7 +517,7 @@ graph.add(rh.HDict({
 # Configure and start (blocks the thread)
 server = rh.HaystackServer(graph)
 server.port(8080)
-server.host("0.0.0.0")
+server.host("127.0.0.1")
 server.run()  # blocks until shutdown
 ```
 
@@ -530,7 +530,7 @@ server = rh.HaystackServer(graph)
 server.port(8080)
 server.run_background()
 
-# Server is running — use client to interact
+# Server is running -- use client to interact
 client = rh.HaystackClient.connect("http://localhost:8080/api", "admin", "pw")
 print(client.about())
 
@@ -559,63 +559,6 @@ server = rh.HaystackServer(graph)
 server.with_namespace(ns)
 server.port(8080)
 server.run()
-```
-
-## Federation
-
-Aggregate entities from multiple remote Haystack servers.
-
-```python
-# Load from TOML config
-fed = rh.Federation.from_toml("federation.toml")
-
-# Or build programmatically
-fed = rh.Federation()
-fed.add(rh.ConnectorConfig(
-    name="Building A",
-    url="http://building-a:8080/api",
-    username="federation",
-    password="s3cret",
-    id_prefix="bldg-a-",
-    sync_interval_secs=30,
-))
-
-# Attach to server
-server = rh.HaystackServer(graph)
-server.with_federation(fed)
-server.port(8080)
-server.run()
-```
-
-### ConnectorConfig Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | `str` | Yes | Display name |
-| `url` | `str` | Yes | Remote API base URL |
-| `username` | `str` | Yes | SCRAM auth username |
-| `password` | `str` | Yes | SCRAM auth password |
-| `id_prefix` | `str` | No | Ref value prefix for namespacing |
-| `ws_url` | `str` | No | WebSocket URL override |
-| `sync_interval_secs` | `int` | No | Background sync interval (default: 60) |
-| `client_cert` | `str` | No | Path to mTLS client certificate |
-| `client_key` | `str` | No | Path to mTLS client private key |
-| `ca_cert` | `str` | No | Path to CA certificate |
-
-### Federation Status
-
-```python
-# Sync all connectors and get results
-results = fed.sync_all()  # -> list[tuple[str, str]] (name, status)
-
-# Query federated cache
-cached = fed.filter_cached("site")        # -> HGrid
-cached = fed.filter_cached("equip", limit=100)
-
-# Metadata
-fed.status()             # -> list[HDict] (per-connector status)
-fed.connector_count()    # -> int
-fed.is_enabled()         # -> bool
 ```
 
 ## SCRAM Authentication

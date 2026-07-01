@@ -20,6 +20,10 @@ pub enum DiffOp {
 }
 
 /// A single mutation record.
+///
+/// Note: Each GraphDiff stores full entity clones (old and/or new). With the default
+/// changelog capacity (50,000 entries), this can use significant memory for entities
+/// with many tags or large string values.
 #[derive(Debug, Clone)]
 pub struct GraphDiff {
     /// The graph version *after* this mutation.

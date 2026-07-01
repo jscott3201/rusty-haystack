@@ -1,7 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
-use haystack_core::expr::{Expr, ExprContext};
 use haystack_core::filter;
 use haystack_core::graph::{EntityGraph, SharedGraph};
 use haystack_core::kinds::{self, HDateTime, HRef, Kind, Number, Uri};
@@ -511,38 +510,6 @@ fn build_hierarchy_graph() -> EntityGraph {
     graph
 }
 
-fn expr_benchmarks(c: &mut Criterion) {
-    // Parse benchmarks
-    c.bench_function("expr_parse_simple", |b| {
-        b.iter(|| Expr::parse(black_box("$x + 1")))
-    });
-
-    c.bench_function("expr_parse_complex", |b| {
-        b.iter(|| Expr::parse(black_box("min($x, max($y, $z * 2.0)) + abs($a - $b)")))
-    });
-
-    // Evaluate benchmarks
-    let simple = Expr::parse("$x + 1").unwrap();
-    let mut ctx = ExprContext::new();
-    ctx.set("x", Kind::Number(Number::unitless(41.0)));
-
-    c.bench_function("expr_eval_simple", |b| {
-        b.iter(|| simple.eval(black_box(&ctx)))
-    });
-
-    let complex = Expr::parse("min($x, max($y, $z * 2.0)) + abs($a - $b)").unwrap();
-    let mut ctx2 = ExprContext::new();
-    ctx2.set("x", Kind::Number(Number::unitless(10.0)));
-    ctx2.set("y", Kind::Number(Number::unitless(5.0)));
-    ctx2.set("z", Kind::Number(Number::unitless(3.0)));
-    ctx2.set("a", Kind::Number(Number::unitless(20.0)));
-    ctx2.set("b", Kind::Number(Number::unitless(15.0)));
-
-    c.bench_function("expr_eval_complex", |b| {
-        b.iter(|| complex.eval(black_box(&ctx2)))
-    });
-}
-
 fn unit_benchmarks(c: &mut Criterion) {
     c.bench_function("unit_convert_temperature", |b| {
         b.iter(|| {
@@ -592,39 +559,7 @@ fn traversal_benchmarks(c: &mut Criterion) {
     });
 
     c.bench_function("graph_equip_points", |b| {
-        b.iter(|| graph.equip_points(black_box("equip-0-0"), None))
-    });
-}
-
-fn snapshot_benchmarks(c: &mut Criterion) {
-    use haystack_core::graph::{SnapshotReader, SnapshotWriter};
-
-    let tmp = tempfile::tempdir().unwrap();
-
-    // Build a graph with 1000 entities
-    let sg = SharedGraph::new(EntityGraph::new());
-    let mut site = HDict::new();
-    site.set("id", Kind::Ref(HRef::from_val("site-1")));
-    site.set("site", Kind::Marker);
-    sg.add(site).unwrap();
-    for i in 0..1000 {
-        sg.add(make_sample_entity(i)).unwrap();
-    }
-
-    let writer = SnapshotWriter::new(tmp.path().to_path_buf(), 10);
-
-    c.bench_function("snapshot_write_1000", |b| {
-        b.iter(|| writer.write(black_box(&sg)))
-    });
-
-    // Write once to get a snapshot to read
-    let snap_path = writer.write(&sg).unwrap();
-
-    c.bench_function("snapshot_read_1000", |b| {
-        b.iter(|| {
-            let g = SharedGraph::new(EntityGraph::new());
-            SnapshotReader::load(black_box(&snap_path), &g)
-        })
+        b.iter(|| graph.equip_points(black_box("equip-0-0"), None).unwrap())
     });
 }
 
@@ -646,48 +581,6 @@ fn validation_benchmarks(c: &mut Criterion) {
     c.bench_function("validate_graph_1000", |b| {
         b.iter(|| validate_graph(black_box(&graph), black_box(&ns)))
     });
-}
-
-#[cfg(feature = "haystack-serde")]
-fn hbf_benchmarks(c: &mut Criterion) {
-    use haystack_core::codecs::hbf;
-
-    let grid_100 = make_sample_grid(100);
-    let grid_1000 = make_sample_grid(1000);
-
-    // HBF encode
-    c.bench_function("hbf_encode_100_rows", |b| {
-        b.iter(|| hbf::encode_grid(black_box(&grid_100)))
-    });
-
-    let hbf_100 = hbf::encode_grid(&grid_100).unwrap();
-    c.bench_function("hbf_decode_100_rows", |b| {
-        b.iter(|| hbf::decode_grid(black_box(&hbf_100)))
-    });
-
-    c.bench_function("hbf_encode_1000_rows", |b| {
-        b.iter(|| hbf::encode_grid(black_box(&grid_1000)))
-    });
-
-    let hbf_1000 = hbf::encode_grid(&grid_1000).unwrap();
-    c.bench_function("hbf_decode_1000_rows", |b| {
-        b.iter(|| hbf::decode_grid(black_box(&hbf_1000)))
-    });
-
-    // Size comparison
-    let zinc = codec_for("text/zinc").unwrap();
-    let json = codec_for("application/json").unwrap();
-    let zinc_bytes = zinc.encode_grid(&grid_100).unwrap().len();
-    let json_bytes = json.encode_grid(&grid_100).unwrap().len();
-    let hbf_bytes = hbf_100.len();
-    eprintln!(
-        "100-row grid sizes: Zinc={} bytes, JSON={} bytes, HBF={} bytes ({:.0}% of Zinc, {:.0}% of JSON)",
-        zinc_bytes,
-        json_bytes,
-        hbf_bytes,
-        hbf_bytes as f64 / zinc_bytes as f64 * 100.0,
-        hbf_bytes as f64 / json_bytes as f64 * 100.0,
-    );
 }
 
 /// Build a realistic Haystack graph with diverse entity types.
@@ -784,42 +677,17 @@ fn build_realistic_graph(target: usize) -> EntityGraph {
     graph
 }
 
-fn graph_optimization_benchmarks(c: &mut Criterion) {
-    // ── Bulk Add vs Incremental Add ──
-
-    // Incremental add (existing bench uses add(), this uses add_bulk())
-    c.bench_function("graph_bulk_add_10000", |b| {
-        b.iter(|| {
-            let mut g = EntityGraph::new();
-            for i in 0..10_000 {
-                let mut d = HDict::new();
-                d.set("id", Kind::Ref(HRef::from_val(format!("b-{i}"))));
-                d.set("point", Kind::Marker);
-                d.set("siteRef", Kind::Ref(HRef::from_val("site-0")));
-                g.add_bulk(d).unwrap();
-            }
-            g.finalize_bulk(1);
-            g
-        });
-    });
-
-    // ── Delta Update (few tags changed on large graph) ──
-
+fn graph_scale_benchmarks(c: &mut Criterion) {
     let mut g10k = build_realistic_graph(10_000);
-    // Ensure CSR is built so updates exercise the patch path
-    g10k.rebuild_csr();
 
     c.bench_function("graph_update_delta_10000", |b| {
         b.iter(|| {
             let mut changes = HDict::new();
             changes.set("dis", Kind::Str("Updated".into()));
             changes.set("curVal", Kind::Number(Number::new(99.0, Some("°F".into()))));
-            // Update a point in the middle of the graph
             let _ = g10k.update(black_box("pt-60-2-temp-0"), changes);
         });
     });
-
-    // ── Filter Queries on Realistic Data ──
 
     c.bench_function("graph_filter_realistic_10000", |b| {
         b.iter(|| g10k.read(black_box("point and sensor and temp"), 0));
@@ -838,15 +706,6 @@ fn graph_optimization_benchmarks(c: &mut Criterion) {
         b.iter(|| g10k.read(black_box("point and curVal > 73°F"), 0));
     });
 
-    // ── CSR Rebuild ──
-
-    c.bench_function("graph_csr_rebuild_10000", |b| {
-        let mut g = build_realistic_graph(10_000);
-        b.iter(|| g.rebuild_csr());
-    });
-
-    // ── ID Freelist Recycle ──
-
     c.bench_function("graph_freelist_recycle_1000", |b| {
         let mut g = EntityGraph::new();
         for i in 0..2000 {
@@ -855,95 +714,161 @@ fn graph_optimization_benchmarks(c: &mut Criterion) {
             d.set("point", Kind::Marker);
             g.add(d).unwrap();
         }
-        // Remove 1000 to populate freelist
         for i in 0..1000 {
             g.remove(&format!("r-{i}")).unwrap();
         }
         b.iter(|| {
-            // Re-add using recycled IDs
             for i in 0..1000 {
                 let mut d = HDict::new();
                 d.set("id", Kind::Ref(HRef::from_val(format!("r-{i}"))));
                 d.set("point", Kind::Marker);
                 g.add(d).unwrap();
             }
-            // Remove again to reset
             for i in 0..1000 {
                 g.remove(&format!("r-{i}")).unwrap();
             }
         });
     });
-
-    // ── Snapshot at Scale ──
-
-    {
-        use haystack_core::graph::{SnapshotReader, SnapshotWriter};
-        let tmp = tempfile::tempdir().unwrap();
-        let sg = SharedGraph::new(build_realistic_graph(10_000));
-        let writer = SnapshotWriter::new(tmp.path().to_path_buf(), 10);
-
-        c.bench_function("snapshot_write_10000_realistic", |b| {
-            b.iter(|| writer.write(black_box(&sg)));
-        });
-
-        let snap_path = writer.write(&sg).unwrap();
-        c.bench_function("snapshot_read_10000_realistic", |b| {
-            b.iter(|| {
-                let g = SharedGraph::new(EntityGraph::new());
-                SnapshotReader::load(black_box(&snap_path), &g)
-            });
-        });
-    }
 }
 
-fn structural_benchmarks(c: &mut Criterion) {
-    // Build a realistic graph for structural index benchmarks
-    let mut graph = build_realistic_graph(5_000);
+fn trio_json3_benchmarks(c: &mut Criterion) {
+    let grid = make_sample_grid(100);
+    let grid_1000 = make_sample_grid(1000);
 
-    c.bench_function("structural_compute_5000", |b| {
+    // Trio encode/decode
+    let trio = codec_for("text/trio").unwrap();
+    c.bench_function("trio_encode_100_rows", |b| {
+        b.iter(|| trio.encode_grid(black_box(&grid)))
+    });
+    let trio_data = trio.encode_grid(&grid).unwrap();
+    c.bench_function("trio_decode_100_rows", |b| {
+        b.iter(|| trio.decode_grid(black_box(&trio_data)))
+    });
+
+    // JSON v3 encode/decode
+    let json3 = codec_for("application/json;v=3").unwrap();
+    c.bench_function("json3_encode_100_rows", |b| {
+        b.iter(|| json3.encode_grid(black_box(&grid)))
+    });
+    let json3_data = json3.encode_grid(&grid).unwrap();
+    c.bench_function("json3_decode_100_rows", |b| {
+        b.iter(|| json3.decode_grid(black_box(&json3_data)))
+    });
+
+    c.bench_function("json3_encode_1000_rows", |b| {
+        b.iter(|| json3.encode_grid(black_box(&grid_1000)))
+    });
+    let json3_data_1000 = json3.encode_grid(&grid_1000).unwrap();
+    c.bench_function("json3_decode_1000_rows", |b| {
+        b.iter(|| json3.decode_grid(black_box(&json3_data_1000)))
+    });
+}
+
+fn dict_grid_benchmarks(c: &mut Criterion) {
+    // Dict creation and operations
+    c.bench_function("dict_create_7_tags", |b| {
+        b.iter(|| make_sample_entity(black_box(42)))
+    });
+
+    let dict = make_sample_entity(0);
+    c.bench_function("dict_get_tag", |b| b.iter(|| dict.get(black_box("temp"))));
+
+    c.bench_function("dict_has_tag", |b| b.iter(|| dict.has(black_box("point"))));
+
+    c.bench_function("dict_sorted_tags", |b| b.iter(|| dict.sorted_tags()));
+
+    let mut d1 = HDict::new();
+    d1.set("a", Kind::Str("hello".into()));
+    d1.set("b", Kind::Number(Number::unitless(42.0)));
+    let mut d2 = HDict::new();
+    d2.set("b", Kind::Str("world".into()));
+    d2.set("c", Kind::Marker);
+    c.bench_function("dict_merge", |b| {
         b.iter(|| {
-            graph.recompute_structural();
-        });
+            let mut target = d1.clone();
+            target.merge(black_box(&d2));
+            target
+        })
     });
 
-    // Ensure structural index is computed for query benchmarks
-    graph.recompute_structural();
-    let si = graph.structural_index().expect("just computed");
+    // Grid construction from entities
+    let graph = build_hierarchy_graph();
+    c.bench_function("graph_to_grid", |b| b.iter(|| graph.to_grid(black_box(""))));
 
-    c.bench_function("structural_fingerprint_lookup", |b| {
-        b.iter(|| si.fingerprint(black_box("pt-30-0-temp-0")));
+    c.bench_function("graph_to_grid_filtered", |b| {
+        b.iter(|| graph.to_grid(black_box("point and sensor")))
     });
 
-    c.bench_function("structural_partitions_with_tags", |b| {
-        b.iter(|| si.partitions_with_tags(black_box(&["point", "sensor", "temp"])));
+    // from_grid: loading entities from a grid
+    let grid = graph.to_grid("").unwrap();
+    c.bench_function("graph_from_grid_112", |b| {
+        b.iter(|| EntityGraph::from_grid(black_box(&grid), None))
+    });
+}
+
+fn auth_benchmarks(c: &mut Criterion) {
+    use haystack_core::auth;
+
+    c.bench_function("auth_derive_credentials", |b| {
+        let salt = b"test_salt_value_";
+        b.iter(|| {
+            auth::derive_credentials(
+                black_box("password123"),
+                black_box(salt),
+                black_box(1000), // reduced iterations for benchmarking
+            )
+        })
     });
 
-    c.bench_function("structural_histogram", |b| {
-        b.iter(|| si.histogram());
+    c.bench_function("auth_generate_nonce", |b| b.iter(auth::generate_nonce));
+
+    c.bench_function("auth_client_first_message", |b| {
+        b.iter(|| auth::client_first_message(black_box("admin")))
+    });
+
+    // Parse auth headers
+    c.bench_function("auth_parse_bearer", |b| {
+        b.iter(|| auth::parse_auth_header(black_box("BEARER authToken=abc123def456")))
+    });
+
+    c.bench_function("auth_parse_hello", |b| {
+        b.iter(|| auth::parse_auth_header(black_box("HELLO username=YWRtaW4")))
+    });
+}
+
+fn shared_graph_benchmarks(c: &mut Criterion) {
+    let sg = SharedGraph::new(build_hierarchy_graph());
+
+    c.bench_function("shared_graph_get", |b| {
+        b.iter(|| sg.get(black_box("point-0-0-0")))
+    });
+
+    c.bench_function("shared_graph_read_filter", |b| {
+        b.iter(|| sg.read_filter(black_box("point and sensor and temp"), 0))
+    });
+
+    c.bench_function("shared_graph_len", |b| b.iter(|| sg.len()));
+
+    c.bench_function("shared_graph_changes_since", |b| {
+        b.iter(|| sg.changes_since(black_box(0)))
     });
 }
 
 criterion_group!(
     benches,
     codec_benchmarks,
+    trio_json3_benchmarks,
     filter_benchmarks,
     graph_benchmarks,
+    dict_grid_benchmarks,
+    shared_graph_benchmarks,
     ontology_benchmarks,
     xeto_benchmarks,
-    expr_benchmarks,
+    auth_benchmarks,
     unit_benchmarks,
     traversal_benchmarks,
-    snapshot_benchmarks,
     validation_benchmarks,
-    graph_optimization_benchmarks,
-    structural_benchmarks,
+    graph_scale_benchmarks,
 );
 
-#[cfg(feature = "haystack-serde")]
-criterion_group!(hbf_benches, hbf_benchmarks);
-
-#[cfg(feature = "haystack-serde")]
-criterion_main!(benches, hbf_benches);
-
-#[cfg(not(feature = "haystack-serde"))]
 criterion_main!(benches);

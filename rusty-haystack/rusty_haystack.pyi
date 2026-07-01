@@ -1,9 +1,7 @@
 """Type stubs for rusty_haystack — Rust-powered Project Haystack bindings."""
 
-from __future__ import annotations
-
 from datetime import datetime
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator
 
 # ── Exceptions ──
 
@@ -49,8 +47,8 @@ class Remove:
 class Number:
     """Haystack Number with optional unit (e.g., Number(72, '°F'))."""
     val: float
-    unit: Optional[str]
-    def __init__(self, val: float, unit: Optional[str] = None) -> None: ...
+    unit: str | None
+    def __init__(self, val: float, unit: str | None = None) -> None: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
     def __hash__(self) -> int: ...
@@ -66,8 +64,8 @@ class Number:
 class Ref:
     """Haystack Ref identifier with string ID and optional display name."""
     val: str
-    dis: Optional[str]
-    def __init__(self, val: str, dis: Optional[str] = None) -> None: ...
+    dis: str | None
+    def __init__(self, val: str, dis: str | None = None) -> None: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
     def __hash__(self) -> int: ...
@@ -158,7 +156,7 @@ class HDict:
         d.get("dis")  # "Main Site"
         d.has("area")  # True
     """
-    def __init__(self, tags: Optional[dict[str, Any]] = None) -> None: ...
+    def __init__(self, tags: dict[str, Any] | None = None) -> None: ...
     def has(self, name: str) -> bool:
         """Return True if the tag is present."""
         ...
@@ -168,10 +166,10 @@ class HDict:
     def missing(self, name: str) -> bool:
         """Return True if the tag is absent."""
         ...
-    def id(self) -> Optional[Ref]:
+    def id(self) -> Ref | None:
         """Return the 'id' Ref tag value, or None."""
         ...
-    def dis(self) -> Optional[str]:
+    def dis(self) -> str | None:
         """Return the display string ('dis' tag), or None."""
         ...
     def is_empty(self) -> bool:
@@ -197,7 +195,7 @@ class HDict:
         """Return a shallow copy of this dict."""
         ...
     @property
-    def ref_val(self) -> Optional[str]:
+    def ref_val(self) -> str | None:
         """The ref value string of the 'id' tag, or None."""
         ...
     def tag_names(self) -> list[str]:
@@ -226,7 +224,7 @@ class HDict:
 class HCol:
     """Haystack Column definition with name and optional metadata."""
     name: str
-    def __init__(self, name: str, meta: Optional[HDict] = None) -> None: ...
+    def __init__(self, name: str, meta: HDict | None = None) -> None: ...
     @property
     def meta(self) -> HDict:
         """Column metadata as an HDict."""
@@ -255,7 +253,7 @@ class HGrid:
     def set_meta(self, meta: HDict) -> None:
         """Set the grid metadata."""
         ...
-    def add_col(self, name: str, meta: Optional[HDict] = None) -> None:
+    def add_col(self, name: str, meta: HDict | None = None) -> None:
         """Add a column to the grid."""
         ...
     def rows(self) -> list[HDict]:
@@ -264,7 +262,7 @@ class HGrid:
     def cols(self) -> list[HCol]:
         """Return all columns as a list of HCol."""
         ...
-    def col(self, name: str) -> Optional[HCol]:
+    def col(self, name: str) -> HCol | None:
         """Look up a column by name."""
         ...
     def col_names(self) -> list[str]:
@@ -292,7 +290,7 @@ class HGrid:
 
 class HList:
     """Haystack List — an ordered collection of Haystack values."""
-    def __init__(self, items: Optional[list[Any]] = None) -> None: ...
+    def __init__(self, items: list[Any] | None = None) -> None: ...
     def push(self, val: Any) -> None:
         """Append a single value to the list."""
         ...
@@ -419,17 +417,17 @@ class Filter:
         """Node type: 'has', 'missing', 'cmp', 'and', 'or', 'specMatch'."""
         ...
     @property
-    def path(self) -> Optional[Path]:
+    def path(self) -> Path | None:
         """For Has/Missing/Cmp nodes, the tag path. None for And/Or."""
         ...
     @property
-    def op(self) -> Optional[CmpOp]:
+    def op(self) -> CmpOp | None:
         """For Cmp nodes, the comparison operator. None for others."""
         ...
-    def val(self) -> Optional[Any]:
+    def val(self) -> Any | None:
         """For Cmp nodes, the comparison value. None for others."""
         ...
-    def children(self) -> Optional[tuple[Filter, Filter]]:
+    def children(self) -> tuple[Filter, Filter] | None:
         """For And/Or nodes, return (left, right). None for others."""
         ...
     def __and__(self, other: Filter) -> Filter: ...
@@ -459,15 +457,24 @@ class DiffOp:
 class GraphDiff:
     """Record of a single change to the entity graph."""
     version: int
+    timestamp: int
     op: DiffOp
     ref_val: str
     @property
-    def old(self) -> Optional[HDict]:
+    def old(self) -> HDict | None:
         """Entity state before the mutation (None for Add)."""
         ...
     @property
-    def new(self) -> Optional[HDict]:
+    def new(self) -> HDict | None:
         """Entity state after the mutation (None for Remove)."""
+        ...
+    @property
+    def changed_tags(self) -> HDict | None:
+        """For Update: tags that changed with their new values."""
+        ...
+    @property
+    def previous_tags(self) -> HDict | None:
+        """For Update: tags that changed with their previous values."""
         ...
     def __repr__(self) -> str: ...
 
@@ -488,7 +495,7 @@ class EntityGraph:
         """
         ...
     @staticmethod
-    def from_grid(grid: HGrid, ns: Optional[DefNamespace] = None) -> EntityGraph:
+    def from_grid(grid: HGrid, ns: DefNamespace | None = None) -> EntityGraph:
         """Bulk-load entities from an HGrid. Each row must have an 'id' Ref tag.
 
         Warning: if ns is provided, it is consumed.
@@ -500,7 +507,7 @@ class EntityGraph:
     def add_grid(self, grid: HGrid) -> int:
         """Add multiple entities from an HGrid. Returns number added."""
         ...
-    def get(self, ref_val: str) -> Optional[HDict]:
+    def get(self, ref_val: str) -> HDict | None:
         """Get an entity by ref value. Returns HDict or None."""
         ...
     def update(self, ref_val: str, changes: HDict) -> None:
@@ -526,42 +533,55 @@ class EntityGraph:
     def validate(self) -> list[str]:
         """Validate all entities against the attached namespace."""
         ...
-    def entities_fitting(self, spec_name: str) -> list[HDict]:
-        """Return entities that structurally fit a given spec name."""
-        ...
     def changes_since(self, version: int) -> list[GraphDiff]:
-        """Return changelog entries since a given graph version."""
+        """Return changelog entries since a given graph version.
+
+        Raises RuntimeError if the subscriber has fallen behind (changelog gap).
+        """
         ...
     def index_field(self, field: str) -> None:
         """Enable a B-tree value index on a tag for faster range queries."""
         ...
-    def refs_from(self, ref_val: str, ref_type: Optional[str] = None) -> list[str]:
+    def refs_from(self, ref_val: str, ref_type: str | None = None) -> list[str]:
         """Get ref values that the given entity points to."""
         ...
-    def refs_to(self, ref_val: str, ref_type: Optional[str] = None) -> list[str]:
+    def refs_to(self, ref_val: str, ref_type: str | None = None) -> list[str]:
         """Get ref values of entities pointing to the given entity."""
-        ...
-    def all_edges(self) -> list[tuple[str, str, str]]:
-        """Return all edges as (source, ref_tag, target) tuples."""
-        ...
-    def neighbors(
-        self,
-        ref_val: str,
-        hops: int = 1,
-        ref_types: Optional[list[str]] = None,
-    ) -> tuple[list[HDict], list[tuple[str, str, str]]]:
-        """BFS neighborhood: entities and edges within `hops` of ref_val."""
-        ...
-    def shortest_path(self, from_ref: str, to_ref: str) -> list[str]:
-        """BFS shortest path between two entities. Returns ref strings."""
-        ...
-    def subtree(
-        self, root: str, max_depth: int = 10
-    ) -> list[tuple[HDict, int]]:
-        """Subtree from root up to max_depth. Returns (entity, depth) pairs."""
         ...
     def to_grid(self, filter_expr: str = "") -> HGrid:
         """Export matching entities to a grid. Empty filter exports all."""
+        ...
+    def ref_chain(self, ref_val: str, ref_tags: list[str]) -> list[HDict]:
+        """Walk the ref chain from an entity following the given ref tags in order.
+
+        Returns a list of HDict entities along the chain.
+        """
+        ...
+    def site_for(self, ref_val: str) -> HDict | None:
+        """Find the site entity for any entity by walking up the ref chain."""
+        ...
+    def children_of(self, ref_val: str) -> list[HDict]:
+        """Get all direct children of an entity (entities whose xxxRef points to it)."""
+        ...
+    def equip_points(
+        self, equip_ref: str, filter: str | None = None
+    ) -> list[HDict]:
+        """Get all points for an equip, optionally filtered.
+
+        Raises GraphError on invalid filter expression.
+        """
+        ...
+    def hierarchy_tree(
+        self, root: str, max_depth: int = 10
+    ) -> dict[str, Any] | None:
+        """Build a hierarchy tree from a root entity.
+
+        Returns a nested dict: {"entity": HDict, "depth": int, "children": [...]},
+        or None if the root is not found.
+        """
+        ...
+    def classify(self, ref_val: str) -> str | None:
+        """Classify an entity by its most specific type tag."""
         ...
     @property
     def version(self) -> int:
@@ -576,15 +596,15 @@ class SharedGraph:
 
     Safe for concurrent reads and serialized writes.
     """
-    def __init__(self, graph: Optional[EntityGraph] = None) -> None: ...
+    def __init__(self, graph: EntityGraph | None = None) -> None: ...
     @staticmethod
-    def from_grid(grid: HGrid, ns: Optional[DefNamespace] = None) -> SharedGraph:
+    def from_grid(grid: HGrid, ns: DefNamespace | None = None) -> SharedGraph:
         """Create a SharedGraph from an HGrid."""
         ...
     def add(self, entity: HDict) -> str:
         """Add an entity. Returns the ref value string."""
         ...
-    def get(self, ref_val: str) -> Optional[HDict]:
+    def get(self, ref_val: str) -> HDict | None:
         """Get an entity by ref value. Returns HDict or None."""
         ...
     def update(self, ref_val: str, changes: HDict) -> None:
@@ -605,39 +625,52 @@ class SharedGraph:
     def contains(self, ref_val: str) -> bool:
         """Return True if an entity with the given ref exists."""
         ...
-    def refs_from(self, ref_val: str, ref_type: Optional[str] = None) -> list[str]:
+    def refs_from(self, ref_val: str, ref_type: str | None = None) -> list[str]:
         """Get ref values that the given entity points to."""
         ...
-    def refs_to(self, ref_val: str, ref_type: Optional[str] = None) -> list[str]:
+    def refs_to(self, ref_val: str, ref_type: str | None = None) -> list[str]:
         """Get ref values of entities pointing to the given entity."""
         ...
-    def all_edges(self) -> list[tuple[str, str, str]]:
-        """Return all edges as (source, ref_tag, target) tuples."""
-        ...
-    def neighbors(
-        self,
-        ref_val: str,
-        hops: int = 1,
-        ref_types: Optional[list[str]] = None,
-    ) -> tuple[list[HDict], list[tuple[str, str, str]]]:
-        """BFS neighborhood: entities and edges within `hops` of ref_val."""
-        ...
-    def shortest_path(self, from_ref: str, to_ref: str) -> list[str]:
-        """BFS shortest path between two entities. Returns ref strings."""
-        ...
-    def subtree(
-        self, root: str, max_depth: int = 10
-    ) -> list[tuple[HDict, int]]:
-        """Subtree from root up to max_depth. Returns (entity, depth) pairs."""
-        ...
     def changes_since(self, version: int) -> list[GraphDiff]:
-        """Return changelog entries since a given graph version."""
-        ...
-    def entities_fitting(self, spec_name: str) -> list[HDict]:
-        """Return entities fitting a given ontology spec."""
+        """Return changelog entries since a given graph version.
+
+        Raises RuntimeError if the subscriber has fallen behind (changelog gap).
+        """
         ...
     def validate(self) -> list[str]:
         """Validate all entities against the attached namespace."""
+        ...
+    @property
+    def subscriber_count(self) -> int:
+        """Number of active broadcast subscribers."""
+        ...
+    def ref_chain(self, ref_val: str, ref_tags: list[str]) -> list[HDict]:
+        """Walk the ref chain from an entity following the given ref tags in order."""
+        ...
+    def site_for(self, ref_val: str) -> HDict | None:
+        """Find the site entity for any entity by walking up the ref chain."""
+        ...
+    def children_of(self, ref_val: str) -> list[HDict]:
+        """Get all direct children of an entity."""
+        ...
+    def equip_points(
+        self, equip_ref: str, filter: str | None = None
+    ) -> list[HDict]:
+        """Get all points for an equip, optionally filtered.
+
+        Raises GraphError on invalid filter expression.
+        """
+        ...
+    def hierarchy_tree(
+        self, root: str, max_depth: int = 10
+    ) -> dict[str, Any] | None:
+        """Build a hierarchy tree from a root entity.
+
+        Returns a nested dict or None if the root is not found.
+        """
+        ...
+    def classify(self, ref_val: str) -> str | None:
+        """Classify an entity by its most specific type tag."""
         ...
     @property
     def version(self) -> int:
@@ -670,7 +703,7 @@ class Slot:
     @property
     def doc(self) -> str: ...
     @property
-    def val(self) -> Optional[str]: ...
+    def val(self) -> str | None: ...
     def __repr__(self) -> str: ...
 
 class Spec:
@@ -680,7 +713,7 @@ class Spec:
     @property
     def type_name(self) -> str: ...
     @property
-    def base(self) -> Optional[str]: ...
+    def base(self) -> str | None: ...
     @property
     def doc(self) -> str: ...
     @property
@@ -698,7 +731,7 @@ class Def:
     def lib(self) -> str: ...
     def supertypes(self) -> list[str]: ...
     @property
-    def kind(self) -> Optional[DefKind]: ...
+    def kind(self) -> DefKind | None: ...
     @property
     def doc(self) -> str: ...
     def tag_on(self) -> list[str]: ...
@@ -716,7 +749,7 @@ class Lib:
     @property
     def depends(self) -> list[str]: ...
     def defs(self) -> list[Def]: ...
-    def get_def(self, symbol: str) -> Optional[Def]: ...
+    def get_def(self, symbol: str) -> Def | None: ...
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
 
@@ -727,13 +760,13 @@ class DefNamespace:
     def load_trio_str(self, trio: str, lib_name: str) -> None: ...
     def fits(self, sub: str, super_: str) -> bool: ...
     def fits_explain(self, sub: str, super_: str) -> str: ...
-    def get_def(self, symbol: str) -> Optional[Def]: ...
+    def get_def(self, symbol: str) -> Def | None: ...
     def mandatory_tags(self, symbol: str) -> list[str]: ...
     def tags_for(self, symbol: str) -> HDict: ...
     def choices(self, symbol: str) -> list[str]: ...
     def defs(self) -> list[Def]: ...
     def libs(self) -> list[Lib]: ...
-    def get_lib(self, name: str) -> Optional[Lib]: ...
+    def get_lib(self, name: str) -> Lib | None: ...
     def __repr__(self) -> str: ...
 
 # ── auth ──
@@ -758,7 +791,7 @@ def client_final_message(
     """Create the SCRAM client-final-message."""
     ...
 
-def extract_client_nonce(client_first: str) -> Optional[str]:
+def extract_client_nonce(client_first: str) -> str | None:
     """Extract the nonce from a client-first-message."""
     ...
 
@@ -782,7 +815,7 @@ class TlsConfig:
     """TLS client configuration for mTLS connections."""
     @staticmethod
     def from_files(
-        cert_path: str, key_path: str, ca_path: Optional[str] = None
+        cert_path: str, key_path: str, ca_path: str | None = None
     ) -> TlsConfig:
         """Load TLS certificates from file paths."""
         ...
@@ -824,7 +857,7 @@ class HaystackClient:
     def libs(self) -> HGrid:
         """Query loaded ontology libraries."""
         ...
-    def read(self, filter: str, limit: Optional[int] = None) -> HGrid:
+    def read(self, filter: str, limit: int | None = None) -> HGrid:
         """Read entities matching a Haystack filter expression.
 
         Args:
@@ -835,19 +868,19 @@ class HaystackClient:
     def read_by_ids(self, ids: list[str]) -> HGrid:
         """Read entities by their ref ID strings."""
         ...
-    def nav(self, nav_id: Optional[str] = None) -> HGrid:
+    def nav(self, nav_id: str | None = None) -> HGrid:
         """Navigate the entity tree. None for root."""
         ...
-    def defs(self, filter: Optional[str] = None) -> HGrid:
+    def defs(self, filter: str | None = None) -> HGrid:
         """Query ontology definitions with optional filter."""
         ...
-    def watch_sub(self, ids: list[str], lease: Optional[str] = None) -> HGrid:
+    def watch_sub(self, ids: list[str], lease: str | None = None) -> HGrid:
         """Subscribe to entity watches. Lease: '1min', '1hr', etc."""
         ...
     def watch_poll(self, watch_id: str) -> HGrid:
         """Poll a watch for changed entities."""
         ...
-    def watch_unsub(self, watch_id: str, ids: Optional[list[str]] = None) -> HGrid:
+    def watch_unsub(self, watch_id: str, ids: list[str] | None = None) -> HGrid:
         """Unsubscribe from a watch. ids=None closes entire watch."""
         ...
     def point_write(self, id: str, level: int, val: Any) -> HGrid:
@@ -859,10 +892,10 @@ class HaystackClient:
     def his_write(self, id: str, items: list[HDict]) -> HGrid:
         """Write historical data. Items are HDict rows with 'ts' and 'val' tags."""
         ...
-    def invoke_action(self, id: str, action: str, args: Optional[HDict] = None) -> HGrid:
+    def invoke_action(self, id: str, action: str, args: HDict | None = None) -> HGrid:
         """Invoke a named action on an entity."""
         ...
-    def specs(self, lib: Optional[str] = None) -> HGrid:
+    def specs(self, lib: str | None = None) -> HGrid:
         """Query ontology specs, optionally filtered by library."""
         ...
     def spec(self, qname: str) -> HGrid:
@@ -906,16 +939,16 @@ class WsClient:
     def ops(self) -> HGrid:
         """Query supported operations over WebSocket."""
         ...
-    def read(self, filter: str, limit: Optional[int] = None) -> HGrid:
+    def read(self, filter: str, limit: int | None = None) -> HGrid:
         """Read entities matching a filter over WebSocket."""
         ...
     def read_by_ids(self, ids: list[str]) -> HGrid:
         """Read entities by ID over WebSocket."""
         ...
-    def nav(self, nav_id: Optional[str] = None) -> HGrid:
+    def nav(self, nav_id: str | None = None) -> HGrid:
         """Navigate entity tree over WebSocket."""
         ...
-    def watch_sub(self, ids: list[str], lease: Optional[str] = None) -> HGrid:
+    def watch_sub(self, ids: list[str], lease: str | None = None) -> HGrid:
         """Subscribe to entity watches over WebSocket."""
         ...
     def watch_poll(self, watch_id: str) -> HGrid:
@@ -956,59 +989,6 @@ class AuthManager:
         ...
     def __repr__(self) -> str: ...
 
-class ConnectorConfig:
-    """Configuration for a federation connector to a remote Haystack server."""
-    @property
-    def name(self) -> str:
-        """The connector name."""
-        ...
-    @property
-    def url(self) -> str:
-        """The remote server URL."""
-        ...
-    def __init__(
-        self,
-        name: str,
-        url: str,
-        username: str,
-        password: str,
-        id_prefix: Optional[str] = None,
-        ws_url: Optional[str] = None,
-        sync_interval_secs: Optional[int] = None,
-    ) -> None: ...
-    def __repr__(self) -> str: ...
-
-class Federation:
-    """Federation manager — connects to remote Haystack servers for distributed queries."""
-    def __init__(self) -> None: ...
-    @staticmethod
-    def from_toml(path: str) -> Federation:
-        """Load federation config from a TOML file."""
-        ...
-    @staticmethod
-    def from_toml_str(content: str) -> Federation:
-        """Load federation config from a TOML string."""
-        ...
-    def add(self, config: ConnectorConfig) -> None:
-        """Add a connector to the federation."""
-        ...
-    def sync_all(self) -> list[tuple[str, str]]:
-        """Sync all connectors. Returns list of (name, result_string)."""
-        ...
-    def all_cached_entities(self) -> list[HDict]:
-        """Return all cached entities across all connectors."""
-        ...
-    def filter_cached(self, filter_expr: str, limit: int = 0) -> HGrid:
-        """Filter cached entities using a Haystack filter expression."""
-        ...
-    def status(self) -> list[tuple[str, int]]:
-        """Status of each connector: list of (name, cached_entity_count)."""
-        ...
-    def connector_count(self) -> int:
-        """Return the number of configured connectors."""
-        ...
-    def __repr__(self) -> str: ...
-
 class HisStore:
     """In-memory history storage for time-series point data."""
     def __init__(self) -> None: ...
@@ -1020,7 +1000,7 @@ class HisStore:
 class HaystackServer:
     """Embedded Haystack HTTP API server with builder-pattern configuration.
 
-    Note: with_namespace/with_auth/with_federation consume their argument
+    Note: with_namespace/with_auth consume their argument
     (the original Python object becomes empty after the call).
 
     Examples:
@@ -1036,9 +1016,6 @@ class HaystackServer:
     def with_auth(self, auth: AuthManager) -> None:
         """Set the auth manager. Warning: consumes the auth manager."""
         ...
-    def with_federation(self, fed: Federation) -> None:
-        """Set the federation manager. Warning: consumes the federation."""
-        ...
     def port(self, port: int) -> None:
         """Set the HTTP listen port (default 8080)."""
         ...
@@ -1051,7 +1028,7 @@ class HaystackServer:
     def run_background(self) -> None:
         """Start the server in a background thread. Returns immediately."""
         ...
-    def bg_error(self) -> Optional[str]:
+    def bg_error(self) -> str | None:
         """Retrieve the background server error message, if any."""
         ...
     def __repr__(self) -> str: ...
@@ -1066,4 +1043,4 @@ class HaystackServer:
 #   rusty_haystack.ontology.DefNamespace, .Def, .Lib, .DefKind, .Spec, .Slot
 #   rusty_haystack.auth.derive_credentials, .generate_nonce, etc.
 #   rusty_haystack.client.HaystackClient, .WsClient, .TlsConfig
-#   rusty_haystack.server.HaystackServer, .AuthManager, .Federation, .HisStore, .ConnectorConfig
+#   rusty_haystack.server.HaystackServer, .AuthManager, .HisStore

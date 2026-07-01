@@ -44,6 +44,17 @@ impl SharedGraph {
         self.tx.subscribe()
     }
 
+    /// Subscribe and atomically capture the current version under the read lock.
+    ///
+    /// This avoids a TOCTOU race where a write could occur between
+    /// subscribing and reading the version.
+    pub fn subscribe_with_version(&self) -> (broadcast::Receiver<u64>, u64) {
+        let guard = self.inner.read();
+        let version = guard.version();
+        let rx = self.tx.subscribe();
+        (rx, version)
+    }
+
     /// Number of active subscribers.
     pub fn subscriber_count(&self) -> usize {
         self.tx.receiver_count()
@@ -179,53 +190,11 @@ impl SharedGraph {
         })
     }
 
-    /// Find all entities that structurally fit a spec/type name.
-    ///
-    /// Returns owned clones. See [`EntityGraph::entities_fitting`].
-    pub fn entities_fitting(&self, spec_name: &str) -> Vec<HDict> {
-        self.read(|g| g.entities_fitting(spec_name).into_iter().cloned().collect())
-    }
-
     /// Validate all entities against the namespace and check for dangling refs.
     ///
     /// See [`EntityGraph::validate`].
     pub fn validate(&self) -> Vec<ValidationIssue> {
         self.read(|g| g.validate())
-    }
-
-    /// Return all edges as `(source_ref, ref_tag, target_ref)` tuples.
-    pub fn all_edges(&self) -> Vec<(String, String, String)> {
-        self.read(|g| g.all_edges())
-    }
-
-    /// BFS neighborhood: entities and edges within `hops` of `ref_val`.
-    pub fn neighbors(
-        &self,
-        ref_val: &str,
-        hops: usize,
-        ref_types: Option<&[&str]>,
-    ) -> (Vec<HDict>, Vec<(String, String, String)>) {
-        self.read(|g| {
-            let (entities, edges) = g.neighbors(ref_val, hops, ref_types);
-            (entities.into_iter().cloned().collect(), edges)
-        })
-    }
-
-    /// BFS shortest path from `from` to `to`.
-    pub fn shortest_path(&self, from: &str, to: &str) -> Vec<String> {
-        self.read(|g| g.shortest_path(from, to))
-    }
-
-    /// Subtree rooted at `root` up to `max_depth` levels.
-    ///
-    /// Returns entities with their depth from root.
-    pub fn subtree(&self, root: &str, max_depth: usize) -> Vec<(HDict, usize)> {
-        self.read(|g| {
-            g.subtree(root, max_depth)
-                .into_iter()
-                .map(|(e, d)| (e.clone(), d))
-                .collect()
-        })
     }
 
     /// Walk a chain of ref tags. See [`EntityGraph::ref_chain`].
@@ -249,12 +218,14 @@ impl SharedGraph {
     }
 
     /// All points for an equip, optionally filtered. See [`EntityGraph::equip_points`].
-    pub fn equip_points(&self, equip_ref: &str, filter: Option<&str>) -> Vec<HDict> {
+    pub fn equip_points(
+        &self,
+        equip_ref: &str,
+        filter: Option<&str>,
+    ) -> Result<Vec<HDict>, GraphError> {
         self.read(|g| {
             g.equip_points(equip_ref, filter)
-                .into_iter()
-                .cloned()
-                .collect()
+                .map(|v| v.into_iter().cloned().collect())
         })
     }
 

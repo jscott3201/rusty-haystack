@@ -6,16 +6,12 @@ use haystack_core::data::HGrid;
 /// Default MIME type when no Accept header is provided or no supported type is found.
 const DEFAULT_MIME: &str = "text/zinc";
 
-/// MIME type for Haystack Binary Format (HBF).
-const HBF_MIME: &str = "application/x-haystack-binary";
-
 /// Supported MIME types in preference order.
 const SUPPORTED: &[&str] = &[
     "text/zinc",
     "application/json",
     "text/trio",
     "application/json;v=3",
-    HBF_MIME,
 ];
 
 /// Parse an Accept header and return the best supported MIME type.
@@ -86,18 +82,12 @@ pub fn decode_request_grid(body: &str, content_type: &str) -> Result<HGrid, Code
 
 /// Encode an HGrid for the response using the best Accept type.
 ///
-/// Returns `(body_bytes, content_type)`. Text codecs produce UTF-8 bytes;
-/// HBF produces raw binary.
+/// Returns `(body_bytes, content_type)`.
 pub fn encode_response_grid(
     grid: &HGrid,
     accept: &str,
 ) -> Result<(Vec<u8>, &'static str), CodecError> {
     let mime = parse_accept(accept);
-
-    if mime == HBF_MIME {
-        let bytes = haystack_core::codecs::encode_grid_binary(grid).map_err(CodecError::Encode)?;
-        return Ok((bytes, HBF_MIME));
-    }
 
     let codec = codec_for(mime)
         .unwrap_or_else(|| codec_for(DEFAULT_MIME).expect("default codec must exist"));
@@ -117,10 +107,6 @@ fn normalize_content_type(content_type: &str) -> &str {
     if ct.is_empty() {
         return DEFAULT_MIME;
     }
-    // Handle HBF binary format
-    if ct.starts_with(HBF_MIME) {
-        return HBF_MIME;
-    }
     // Handle "application/json; v=3" or "application/json;v=3"
     if ct.starts_with("application/json") && ct.contains("v=3") {
         return "application/json;v=3";
@@ -134,62 +120,6 @@ fn normalize_content_type(content_type: &str) -> &str {
         }
     }
     DEFAULT_MIME
-}
-
-/// Decode a request body (as raw bytes) into an HGrid using the given Content-Type.
-///
-/// Supports both text-based codecs and the binary HBF codec. Falls back to
-/// `"text/zinc"` if the content type is not recognized.
-pub fn decode_request_grid_bytes(body: &[u8], content_type: &str) -> Result<HGrid, CodecError> {
-    let ct = normalize_content_type(content_type);
-    if ct == HBF_MIME {
-        return haystack_core::codecs::decode_grid_binary(body).map_err(CodecError::Encode);
-    }
-    let text = std::str::from_utf8(body).map_err(|e| CodecError::Encode(e.to_string()))?;
-    decode_request_grid(text, content_type)
-}
-
-/// Encode a grid as a streaming byte iterator: yields header chunk then row chunks.
-///
-/// Returns `(header_bytes, row_batches, content_type)`.
-/// Rows are batched into groups of ~500 to balance streaming granularity against
-/// allocation overhead. For codecs without streaming support (or HBF), the header
-/// contains the full response and `row_batches` is empty.
-#[allow(clippy::type_complexity)]
-pub fn encode_response_streaming(
-    grid: &HGrid,
-    accept: &str,
-) -> Result<(Vec<u8>, Vec<Vec<u8>>, &'static str), CodecError> {
-    let mime = parse_accept(accept);
-
-    // HBF: full binary encode (zstd compression needs the full payload)
-    if mime == HBF_MIME {
-        let bytes = haystack_core::codecs::encode_grid_binary(grid).map_err(CodecError::Encode)?;
-        return Ok((bytes, Vec::new(), HBF_MIME));
-    }
-
-    let codec = codec_for(mime)
-        .unwrap_or_else(|| codec_for(DEFAULT_MIME).expect("default codec must exist"));
-
-    let header = codec.encode_grid_header(grid)?;
-
-    // Batch rows into chunks of 500 to avoid per-row allocation overhead
-    const BATCH_SIZE: usize = 500;
-    let mut batches = Vec::with_capacity(grid.rows.len() / BATCH_SIZE + 1);
-    for chunk in grid.rows.chunks(BATCH_SIZE) {
-        let mut buf = Vec::new();
-        for row in chunk {
-            buf.extend_from_slice(&codec.encode_grid_row(&grid.cols, row)?);
-        }
-        batches.push(buf);
-    }
-
-    let ct = SUPPORTED
-        .iter()
-        .find(|&&s| s == mime)
-        .copied()
-        .unwrap_or(DEFAULT_MIME);
-    Ok((header, batches, ct))
 }
 
 #[cfg(test)]
@@ -262,7 +192,6 @@ mod tests {
 
     #[test]
     fn decode_request_grid_empty_zinc() {
-        // Empty zinc grid: "ver:\"3.0\"\nempty\n"
         let result = decode_request_grid("ver:\"3.0\"\nempty\n", "text/zinc");
         assert!(result.is_ok());
     }
@@ -274,66 +203,5 @@ mod tests {
         assert!(result.is_ok());
         let (_, content_type) = result.unwrap();
         assert_eq!(content_type, "text/zinc");
-    }
-
-    #[test]
-    fn parse_accept_hbf() {
-        assert_eq!(parse_accept(HBF_MIME), HBF_MIME);
-    }
-
-    #[test]
-    fn normalize_content_type_hbf() {
-        assert_eq!(normalize_content_type(HBF_MIME), HBF_MIME);
-    }
-
-    #[test]
-    fn encode_decode_hbf_round_trip() {
-        let grid = HGrid::new();
-        let (bytes, ct) = encode_response_grid(&grid, HBF_MIME).unwrap();
-        assert_eq!(ct, HBF_MIME);
-        let decoded = decode_request_grid_bytes(&bytes, HBF_MIME).unwrap();
-        assert!(decoded.is_empty());
-    }
-
-    #[test]
-    fn decode_request_grid_bytes_text_fallback() {
-        let result = decode_request_grid_bytes(b"ver:\"3.0\"\nempty\n", "text/zinc");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn streaming_zinc_matches_full_encode() {
-        use haystack_core::data::{HCol, HDict};
-        use haystack_core::kinds::{HRef, Kind};
-
-        let mut rows = Vec::new();
-        for i in 0..5 {
-            let mut d = HDict::new();
-            d.set(
-                String::from("id"),
-                Kind::Ref(HRef::from_val(format!("r{i}"))),
-            );
-            d.set(String::from("dis"), Kind::Str(format!("Row {i}")));
-            rows.push(d);
-        }
-        let cols = vec![
-            HCol::new(String::from("id")),
-            HCol::new(String::from("dis")),
-        ];
-        let grid = HGrid::from_parts(HDict::new(), cols, rows);
-
-        // Full encode
-        let (full_bytes, ct) = encode_response_grid(&grid, "text/zinc").unwrap();
-        assert_eq!(ct, "text/zinc");
-
-        // Streaming encode
-        let (header, row_chunks, ct2) = encode_response_streaming(&grid, "text/zinc").unwrap();
-        assert_eq!(ct2, "text/zinc");
-
-        let mut streamed = header;
-        for chunk in row_chunks {
-            streamed.extend_from_slice(&chunk);
-        }
-        assert_eq!(full_bytes, streamed);
     }
 }

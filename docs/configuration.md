@@ -7,13 +7,14 @@ The server is configured entirely via CLI flags when using `haystack serve`:
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--port` | `-p` | TCP port to listen on | `8080` |
-| `--host` | | IP address to bind to | `0.0.0.0` |
+| `--host` | | IP address to bind to | `127.0.0.1` |
 | `--file` | `-f` | Load entities from a Zinc/Trio/JSON file at startup | Empty graph |
 | `--users` | `-u` | TOML file with user credentials for SCRAM auth | Auth disabled |
 | `--demo` | | Load a built-in demo building automation dataset | |
-| `--federation` | | TOML file with federation connector configuration | No federation |
 
 When no `--users` file is provided, authentication is disabled and all endpoints are accessible without credentials.
+
+The server password can also be provided via the `HAYSTACK_PASSWORD` environment variable.
 
 ## Users TOML Format
 
@@ -98,54 +99,11 @@ If neither `role` nor `permissions` is set, the user has no permissions (cannot 
 
 | Permission | Grants Access To |
 |------------|-----------------|
-| `read` | Entity reads, navigation, defs, libs, specs, history reads, watches, exports, RDF, federation status |
-| `write` | Point writes, history writes, actions, imports, library management, validation, federation sync |
-| `admin` | System status, backup, restore |
+| `read` | Entity reads, navigation, defs, libs, specs, history reads, watches, exports |
+| `write` | Point writes, history writes, actions, imports, library management, validation |
+| `admin` | (reserved for future use) |
 
 Public endpoints (no permission needed): `GET /api/about`, `GET /api/ops`, `GET /api/formats`.
-
-## Federation TOML Format
-
-Federation connectors are configured in a TOML file passed via `--federation`. Each connector is defined under `[connectors.<key>]` where `<key>` is an arbitrary identifier.
-
-### Example
-
-```toml
-[connectors.building-a]
-name = "Building A"
-url = "http://building-a:8080/api"
-username = "federation"
-password = "s3cret"
-id_prefix = "bldg-a-"
-sync_interval_secs = 30
-
-[connectors.building-b]
-name = "Building B"
-url = "https://building-b:8443/api"
-username = "federation"
-password = "s3cret"
-id_prefix = "bldg-b-"
-client_cert = "/etc/certs/federation.pem"
-client_key = "/etc/certs/federation-key.pem"
-ca_cert = "/etc/certs/ca.pem"
-```
-
-### Connector Fields
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `name` | String | Yes | | Display name for this connector |
-| `url` | String | Yes | | Base URL of the remote Haystack API |
-| `username` | String | Yes | | Username for SCRAM auth on the remote |
-| `password` | String | Yes | | Password for SCRAM auth on the remote |
-| `id_prefix` | String | No | None | Prefix for all entity Ref values from this remote |
-| `ws_url` | String | No | Derived from `url` | WebSocket URL override |
-| `sync_interval_secs` | Integer | No | `60` | Background sync interval in seconds |
-| `client_cert` | String | No | None | Path to PEM client certificate for mTLS |
-| `client_key` | String | No | None | Path to PEM client private key for mTLS |
-| `ca_cert` | String | No | None | Path to PEM CA certificate for server verification |
-
-See [Federation](federation.md) for full details on transport, sync behavior, write forwarding, and watch federation.
 
 ## Docker
 
@@ -153,8 +111,8 @@ See [Federation](federation.md) for full details on transport, sync behavior, wr
 
 The Dockerfile uses a multi-stage build:
 
-1. **Builder stage**: `rust:1.93-alpine` — compiles the CLI binary with static musl linking
-2. **Runtime stage**: `alpine:3.21` — minimal runtime (~15 MB)
+1. **Builder stage**: `rust:1.93-alpine` -- compiles the CLI binary with static musl linking
+2. **Runtime stage**: `alpine:3.21` -- minimal runtime (~15 MB)
 
 ```sh
 docker build -t rusty-haystack .
@@ -190,27 +148,23 @@ docker run rusty-haystack validate /data/entities.zinc
 
 ### Environment
 
-The container runs on Alpine Linux. No environment variables are required. All configuration is passed via CLI flags.
+The container runs on Alpine Linux. The `HAYSTACK_PASSWORD` environment variable can be used to provide the server password. All other configuration is passed via CLI flags.
 
 ## Programmatic Server Configuration
 
 When embedding the server in Rust code, use the builder API:
 
 ```rust
-use haystack_server::{HaystackServer, Federation};
+use haystack_server::HaystackServer;
 use haystack_core::graph::{EntityGraph, SharedGraph};
 
 let graph = SharedGraph::new(EntityGraph::new());
-
-// Load federation from TOML file or build programmatically
-let fed = Federation::from_toml_file("federation.toml")?;
 
 HaystackServer::new(graph)
     .with_namespace(ns)       // DefNamespace
     .with_auth(auth_manager)  // AuthManager
     .with_actions(actions)    // ActionRegistry
-    .with_federation(fed)     // Federation
-    .host("0.0.0.0")
+    .host("127.0.0.1")
     .port(8080)
     .run()
     .await?;

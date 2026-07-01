@@ -1,58 +1,27 @@
 //! The `nav` op — navigate a project for entity discovery.
-//!
-//! # Overview
-//!
-//! `POST /api/nav` supports hierarchical entity browsing. With no `navId`
-//! it returns top-level sites; with a `navId` it returns children of that
-//! entity (equips under a site, points under an equip, etc.).
-//!
-//! # Request Grid Columns
-//!
-//! | Column  | Kind      | Description                               |
-//! |---------|-----------|-------------------------------------------|
-//! | `navId` | Ref / Str | *(optional)* Parent entity to navigate into. Omit for root. |
-//!
-//! # Response Grid Columns
-//!
-//! | Column  | Kind | Description                    |
-//! |---------|------|--------------------------------|
-//! | `id`    | Ref  | Entity reference               |
-//! | `dis`   | Str  | Display name                   |
-//! | `navId` | Str  | Navigation ID for drill-down   |
-//!
-//! # Errors
-//!
-//! - **400 Bad Request** — request grid decode failure.
-//! - **404 Not Found** — `navId` references a non-existent entity.
-//! - **500 Internal Server Error** — graph query or encoding error.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
 
 use crate::content;
 use crate::error::HaystackError;
-use crate::state::AppState;
+use crate::state::SharedState;
 
 /// POST /api/nav
-///
-/// Request may have a `navId` column:
-/// - No navId or empty: return top-level sites
-/// - navId is a site ref: return children (equips/spaces with siteRef)
-/// - navId is an equip ref: return children (points with equipRef)
 pub async fn handle(
-    req: HttpRequest,
+    State(state): State<SharedState>,
+    headers: HeaderMap,
     body: String,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, HaystackError> {
-    let content_type = req
-        .headers()
+) -> Result<Response, HaystackError> {
+    let content_type = headers
         .get("Content-Type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let accept = req
-        .headers()
+    let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -105,7 +74,7 @@ pub async fn handle(
     let (encoded, ct) = content::encode_response_grid(&result_grid, accept)
         .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
 
-    Ok(HttpResponse::Ok().content_type(ct).body(encoded))
+    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
 }
 
 /// Build a navigation grid from a list of entity dicts.
