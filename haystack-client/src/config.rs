@@ -19,11 +19,14 @@ pub enum AuthMode {
 /// TLS and auth settings for [`crate::HaystackClient::connect_with_config`].
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// When false, accept self-signed or otherwise untrusted server certificates (lab use).
+    /// When false, accept self-signed or otherwise untrusted server certificates **and**
+    /// skip hostname (SAN) verification via `danger_accept_invalid_certs` (lab/dev only).
     pub tls_verify: bool,
+    /// Which authentication scheme the client uses (SCRAM or HTTP Basic).
     pub auth_mode: AuthMode,
     /// Response wire format MIME type (default `text/zinc`).
     pub wire_format: String,
+    /// Overall per-request timeout applied to the underlying reqwest client.
     pub timeout: Duration,
 }
 
@@ -61,6 +64,10 @@ impl ClientConfig {
     pub fn build_reqwest_client(&self) -> Result<reqwest::Client, ClientError> {
         let mut builder = reqwest::Client::builder().timeout(self.timeout);
         if !self.tls_verify {
+            log::warn!(
+                "TLS certificate AND hostname verification disabled (danger_accept_invalid_certs); \
+                 connection is vulnerable to MITM — lab/dev use only"
+            );
             builder = builder.danger_accept_invalid_certs(true);
         }
         builder

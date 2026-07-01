@@ -10,13 +10,16 @@ use clap::Parser;
 use haystack_client::{AuthMode, ClientConfig, HaystackClient};
 
 #[derive(Parser, Debug)]
-#[command(name = "niagara-read", about = "Haystack point read (Niagara nHaystack demo)")]
+#[command(
+    name = "niagara-read",
+    about = "Haystack point read (Niagara nHaystack demo)"
+)]
 struct Args {
-    /// Haystack API root, e.g. https://192.168.204.11/haystack
-    #[arg(long, env = "HAYSTACK_BASE", default_value = "https://192.168.204.11/haystack")]
+    /// Haystack API root (example: https://<jace-host>/haystack)
+    #[arg(long, env = "HAYSTACK_BASE")]
     url: String,
 
-    #[arg(long, env = "HAYSTACK_USER", default_value = "open_fdd")]
+    #[arg(long, env = "HAYSTACK_USER")]
     user: String,
 
     #[arg(long, env = "HAYSTACK_PASS")]
@@ -26,9 +29,13 @@ struct Args {
     #[arg(long, env = "HAYSTACK_AUTH", default_value = "basic")]
     auth: AuthChoice,
 
-    /// Verify TLS certificates (off by default for Niagara self-signed lab cert)
-    #[arg(long, env = "HAYSTACK_TLS_VERIFY", default_value_t = false)]
+    /// Verify TLS certificates (secure default). Use --insecure-tls for self-signed lab certs.
+    #[arg(long, env = "HAYSTACK_TLS_VERIFY", default_value_t = true, action = clap::ArgAction::Set)]
     tls_verify: bool,
+
+    /// Disable TLS certificate and hostname verification (lab self-signed certs only)
+    #[arg(long)]
+    insecure_tls: bool,
 
     #[arg(long, default_value = "point and cur")]
     filter: String,
@@ -57,8 +64,21 @@ async fn main() {
         AuthChoice::Scram => AuthMode::Scram,
     };
 
+    let tls_verify = if args.insecure_tls {
+        false
+    } else {
+        args.tls_verify
+    };
+
+    if !tls_verify {
+        eprintln!(
+            "WARNING: TLS certificate AND hostname verification disabled — \
+             credentials may be exposed to network attackers (lab/dev only)"
+        );
+    }
+
     let config = ClientConfig {
-        tls_verify: args.tls_verify,
+        tls_verify,
         auth_mode,
         ..ClientConfig::default()
     };
@@ -66,11 +86,11 @@ async fn main() {
     println!("url: {}", args.url.trim_end_matches('/'));
     println!("user: {}", args.user);
     println!("auth: {:?}", auth_mode);
-    println!("tls_verify: {}", args.tls_verify);
+    println!("tls_verify: {tls_verify}");
     println!();
 
     if args.probe_scram || auth_mode == AuthMode::Scram {
-        probe_scram_hello(&args).await;
+        probe_scram_hello(&args, tls_verify).await;
     }
 
     match HaystackClient::connect_with_config(
@@ -88,9 +108,8 @@ async fn main() {
                     let dis = kind_display(row.get("dis").or_else(|| row.get("id")));
                     let cur = kind_display(row.get("curVal"));
                     let unit = kind_display(row.get("unit"));
-                    let slot = kind_display(
-                        row.get("n4SlotPath").or_else(|| row.get("axSlotPath")),
-                    );
+                    let slot =
+                        kind_display(row.get("n4SlotPath").or_else(|| row.get("axSlotPath")));
                     if dis.contains("BacnetNetwork") || slot.contains("BacnetNetwork") {
                         println!("  {dis}  {cur} {unit}");
                     }
@@ -106,20 +125,26 @@ async fn main() {
             if auth_mode == AuthMode::Scram {
                 eprintln!();
                 eprintln!("Niagara nHaystack does not implement Haystack SCRAM on /about.");
-                eprintln!("Use: --auth basic   (and HTTPBasicScheme for the service user in Workbench)");
+                eprintln!(
+                    "Use: --auth basic   (and HTTPBasicScheme for the service user in Workbench)"
+                );
             }
             std::process::exit(1);
         }
     }
 }
 
-async fn probe_scram_hello(args: &Args) {
-    use base64::Engine;
+async fn probe_scram_hello(args: &Args, tls_verify: bool) {
     use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
     use haystack_core::auth;
 
     println!("--- SCRAM HELLO probe ---");
-    let config = ClientConfig::scram_insecure_tls();
+    let config = ClientConfig {
+        tls_verify,
+        auth_mode: AuthMode::Scram,
+        ..ClientConfig::default()
+    };
     let Ok(client) = config.build_reqwest_client() else {
         println!("could not build HTTP client");
         return;

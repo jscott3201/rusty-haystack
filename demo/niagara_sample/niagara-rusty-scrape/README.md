@@ -2,12 +2,13 @@
 
 Small Rust smoke test that compares how [rusty-haystack](https://github.com/jscott3201/rusty-haystack) talks to a Project Haystack server versus how Niagara nHaystack expects clients to authenticate.
 
-Target station (lab):
+Example lab target (see `env.example` for placeholders):
 
 ```
-https://192.168.204.11/haystack
-user: open_fdd
+https://<jace-host>/haystack
+user: <haystack-user>
 auth: HTTP Basic (Niagara HTTPBasicScheme)
+TLS: secure by default; pass --insecure-tls for self-signed lab certs only
 ```
 
 Related tutorial (curl + reqwest baseline): [nhaystack-niagara-pi-tutorial](https://github.com/bbartling/py-bacnet-stacks-playground/tree/develop/vibe_code_apps_17/nhaystack-niagara-pi-tutorial)
@@ -15,11 +16,11 @@ Related tutorial (curl + reqwest baseline): [nhaystack-niagara-pi-tutorial](http
 ## Setup
 
 ```bash
-cd /home/ben/haystack_samples/niagara-rusty-scrape
+cd demo/niagara_sample/niagara-rusty-scrape
 cp env.example .env
-# edit .env — set HAYSTACK_PASS
+# edit .env — set JACE_HOST, HAYSTACK_USER, HAYSTACK_PASS
 source .env
-cargo run
+cargo run -- --insecure-tls --probe-scram
 ```
 
 ## What it checks
@@ -33,16 +34,20 @@ cargo run
 | 4 | `HaystackClient::connect()` | fails — strict TLS + SCRAM-only auth |
 | 5 | GET `/read?filter=point and cur` Basic + CSV | writes `nhaystack_points.csv` |
 
-## Known gaps
+## TLS and auth flags
 
-Two blockers for using `rusty-haystack-client` against this Niagara lab as-is:
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--tls-verify` | `true` | Verify server certificate and hostname |
+| `--insecure-tls` | off | Lab only — disables cert **and** hostname checks |
+| `--auth basic` | yes | Niagara nHaystack (HTTP Basic) |
+| `--auth scram` | | SkySpark / rusty-haystack server |
 
-1. **Self-signed HTTPS** — `haystack-client` builds a default `reqwest` client with strict certificate verification. Niagara’s lab cert fails unless you use mTLS config with a custom CA or add an insecure/dev TLS option (what `curl -k` does in the [pi tutorial](https://github.com/bbartling/py-bacnet-stacks-playground/tree/develop/vibe_code_apps_17/nhaystack-niagara-pi-tutorial)).
+When `--insecure-tls` is used with Basic auth, the tool prints an explicit MITM warning.
 
-2. **HTTP Basic vs SCRAM** — Niagara nHaystack authenticates with HTTP Basic on every request. `rusty-haystack-client` only implements Project Haystack SCRAM SHA-256 (`HELLO` → `SCRAM` → `BEARER`). Niagara returns HTML `401` with no `WWW-Authenticate: SCRAM` challenge.
+## Known gaps (addressed in this PR)
 
-Possible follow-ups:
+This demo exercises the new `ClientConfig` / `AuthMode::Basic` path in `haystack-client`:
 
-- Add HTTP Basic transport mode to `haystack-client`
-- Or put a SCRAM-capable Haystack proxy in front of Niagara
-- Or use Open-FDD's existing Haystack driver (basic auth) until rusty-haystack grows Niagara support
+- **Self-signed HTTPS** — use `--insecure-tls` (not the default)
+- **HTTP Basic vs SCRAM** — use `--auth basic` for Niagara; `--probe-scram` shows why SCRAM fails
