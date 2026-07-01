@@ -32,7 +32,7 @@ fn add_submodule(
 
 #[pymodule]
 fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", "0.1.0")?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     // ── Top-level convenience re-exports ──
     // All types also available at top level for backward compatibility
