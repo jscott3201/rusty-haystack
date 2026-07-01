@@ -1,5 +1,5 @@
 # Multi-stage build for haystack CLI + server
-FROM rust:1.93-alpine AS builder
+FROM rust:1.95-alpine AS builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
 
@@ -12,7 +12,7 @@ COPY haystack-cli/ haystack-cli/
 
 # Create a stub for rusty-haystack (Python bindings) so the workspace resolves
 RUN mkdir -p rusty-haystack/src && \
-    printf '[package]\nname = "rusty-haystack"\nversion = "0.1.0"\nedition = "2024"\n\n[lib]\nname = "rusty_haystack"\ncrate-type = ["cdylib"]\n\n[dependencies]\npyo3 = { version = "0.28", features = ["extension-module"] }\n' > rusty-haystack/Cargo.toml && \
+    printf '[package]\nname = "rusty-haystack"\nversion = "0.1.0"\nedition = "2024"\n\n[lib]\nname = "rusty_haystack"\ncrate-type = ["cdylib"]\n\n[dependencies]\npyo3 = { version = "0.29", features = ["extension-module"] }\n' > rusty-haystack/Cargo.toml && \
     echo '' > rusty-haystack/src/lib.rs
 
 RUN cargo build --release -p rusty-haystack-cli && \

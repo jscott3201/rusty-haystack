@@ -42,7 +42,7 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 
 ### Prerequisites
 
-- Rust 1.93+ (edition 2024)
+- Rust 1.95+ (edition 2024)
 - cargo
 
 ### Build

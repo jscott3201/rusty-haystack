@@ -22,9 +22,9 @@ smallvec = { version = "1.15", features = ["serde"] }
 parking_lot = "0.12"
 indexmap = "2"
 tokio = { version = "1", features = ["sync"] }
-sha2 = "0.10"
-hmac = "0.12"
-pbkdf2 = { version = "0.12", features = ["simple"] }
+sha2 = "0.11"
+hmac = "0.13"
+pbkdf2 = { version = "0.13", features = ["hmac"] }
 base64 = "0.22"
 rand = "0.10"
 subtle = "2"
