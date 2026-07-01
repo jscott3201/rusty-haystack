@@ -88,6 +88,16 @@ impl std::fmt::Debug for ScramHandshake {
     }
 }
 
+impl Drop for ScramHandshake {
+    fn drop(&mut self) {
+        // Zeroize sensitive derived material when the in-flight handshake is
+        // dropped, mirroring ScramCredentials. (ScramHandshake previously had
+        // no Drop impl, so its stored_key lingered in memory.)
+        self.stored_key.zeroize();
+        self.server_signature.zeroize();
+    }
+}
+
 /// Parsed Haystack `Authorization` header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthHeader {
@@ -159,9 +169,18 @@ fn parse_scram_param<'a>(segment: &'a str, prefix: &str) -> Result<&'a str, Auth
     })
 }
 
+/// Escape a username for the SCRAM `n=` attribute per RFC 5802 section 5.1:
+/// `=` becomes `=3D` and `,` becomes `=2C`. The `=` substitution runs first so
+/// the `=` introduced by `=2C` is not itself re-escaped. Without this, a
+/// username containing `,` or `=` would corrupt the client-first-message and
+/// could hijack nonce parsing in [`extract_client_nonce`].
+fn escape_scram_username(username: &str) -> String {
+    username.replace('=', "=3D").replace(',', "=2C")
+}
+
 /// Build the client-first-message-bare: `n=<username>,r=<client_nonce>`.
 fn make_client_first_bare(username: &str, client_nonce: &str) -> String {
-    format!("n={},r={}", username, client_nonce)
+    format!("n={},r={}", escape_scram_username(username), client_nonce)
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +639,43 @@ mod tests {
         assert!(parse_auth_header("BEARER token=abc").is_err());
         // Empty
         assert!(parse_auth_header("").is_err());
+    }
+
+    #[test]
+    fn escape_scram_username_escapes_comma_and_equals() {
+        assert_eq!(escape_scram_username("a,b=c"), "a=2Cb=3Dc");
+        assert_eq!(escape_scram_username("plain"), "plain");
+        // '=' is escaped before ',' so the '=' in '=2C' is not double-escaped.
+        assert_eq!(escape_scram_username("=,"), "=3D=2C");
+    }
+
+    #[test]
+    fn extract_client_nonce_resists_username_injection() {
+        // A username containing a literal "r=" must not hijack nonce extraction.
+        let (client_nonce, client_first_b64) = client_first_message("evil,r=hijack");
+        assert_eq!(
+            extract_client_nonce(&client_first_b64).unwrap(),
+            client_nonce
+        );
+    }
+
+    #[test]
+    fn scram_handshake_succeeds_with_comma_equals_username() {
+        // Usernames with ',' and '=' complete the full handshake because both
+        // client and server escape the username identically per RFC 5802.
+        let username = "od,al=ice";
+        let password = "s3cret";
+        let salt = b"test-salt-12345";
+        let iterations = 4096;
+
+        let credentials = derive_credentials(password, salt, iterations);
+        let (client_nonce, _client_first_b64) = client_first_message(username);
+        let (handshake, server_first_b64) =
+            server_first_message(username, &client_nonce, &credentials);
+        let (client_final_b64, expected_server_sig) =
+            client_final_message(password, &client_nonce, &server_first_b64, username).unwrap();
+        let server_sig = server_verify_final(&handshake, &client_final_b64).unwrap();
+        assert_eq!(server_sig, expected_server_sig);
     }
 
     #[test]
