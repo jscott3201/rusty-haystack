@@ -471,6 +471,54 @@ impl DefNamespace {
 
     /// Unload a library by name. Removes all defs, specs, and taxonomy entries.
     /// Returns Err if another loaded library depends on this one or if it's bundled.
+    /// Rebuild all derived indexes (taxonomy, mandatory, conjuncts, tagOn,
+    /// choice) from the current `defs` map. Needed after `unload_lib` removes a
+    /// library's defs, because those indexes accumulate per-def entries that a
+    /// plain removal would otherwise leave stale.
+    fn rebuild_derived_indexes(&mut self) {
+        // Snapshot the data we need so we can clear and rebuild the indexes
+        // without holding an immutable borrow of `self.defs` while mutating.
+        let snapshot: Vec<(String, Vec<String>, bool, Vec<String>)> = self
+            .defs
+            .values()
+            .map(|d| {
+                (
+                    d.symbol.clone(),
+                    d.is_.clone(),
+                    d.mandatory,
+                    d.tag_on.clone(),
+                )
+            })
+            .collect();
+
+        self.taxonomy = TaxonomyTree::new();
+        self.conjuncts = ConjunctIndex::new();
+        self.mandatory_defs.clear();
+        self.tag_on_index.clear();
+        self.choice_index.clear();
+
+        for (symbol, is_, mandatory, tag_on) in &snapshot {
+            self.taxonomy.add(symbol, is_);
+            if *mandatory {
+                self.mandatory_defs.insert(symbol.clone());
+            }
+            if symbol.contains('-') {
+                let parts: Vec<String> = symbol.split('-').map(|s| s.to_string()).collect();
+                self.conjuncts.register(symbol, parts);
+            }
+            for target in tag_on {
+                self.tag_on_index
+                    .entry(target.clone())
+                    .or_default()
+                    .push(symbol.clone());
+            }
+        }
+        // Choice index needs every def present in `self.defs` (they are).
+        for (symbol, ..) in &snapshot {
+            self.register_def_choice_index(symbol);
+        }
+    }
+
     pub fn unload_lib(&mut self, lib_name: &str) -> Result<(), String> {
         // Check for dependents
         for (name, lib) in &self.libs {
@@ -502,8 +550,10 @@ impl DefNamespace {
         // Remove source tracking
         self.lib_sources.remove(lib_name);
 
-        // Invalidate mandatory tag cache
-        self.taxonomy.clear_cache();
+        // Rebuild derived indexes (taxonomy, mandatory, conjuncts, tagOn,
+        // choice) from the remaining defs so no stale entries from the unloaded
+        // library survive. This also resets the mandatory-tag cache.
+        self.rebuild_derived_indexes();
 
         Ok(())
     }
@@ -810,6 +860,54 @@ depends:[^lib:ph]
         assert_eq!(ns.specs(Some("test")).len(), 2);
         assert_eq!(ns.specs(Some("other")).len(), 1);
         assert_eq!(ns.specs(None).len(), 3);
+    }
+
+    #[test]
+    fn unload_lib_purges_taxonomy_and_indexes() {
+        fn def(symbol: &str, lib: &str, is_: &[&str]) -> Def {
+            Def {
+                symbol: symbol.to_string(),
+                lib: lib.to_string(),
+                is_: is_.iter().map(|s| s.to_string()).collect(),
+                tag_on: Vec::new(),
+                of: None,
+                mandatory: false,
+                doc: String::new(),
+                tags: HDict::new(),
+            }
+        }
+
+        let mut ns = DefNamespace::new();
+        // Base lib (kept): the "entity" root.
+        ns.register_lib(Lib {
+            name: "base".to_string(),
+            version: "1.0".to_string(),
+            doc: String::new(),
+            depends: Vec::new(),
+            defs: HashMap::from([("entity".to_string(), def("entity", "base", &[]))]),
+        });
+        // Custom lib (to be unloaded): "thing" is-a entity, plus a conjunct.
+        ns.register_lib(Lib {
+            name: "custom".to_string(),
+            version: "1.0".to_string(),
+            doc: String::new(),
+            depends: Vec::new(),
+            defs: HashMap::from([
+                ("thing".to_string(), def("thing", "custom", &["entity"])),
+                ("hot-water".to_string(), def("hot-water", "custom", &[])),
+            ]),
+        });
+        ns.set_lib_source("custom", LibSource::Xeto("x".to_string()));
+
+        // Sanity: the taxonomy edge exists before unload.
+        assert!(ns.is_a("thing", "entity"));
+
+        ns.unload_lib("custom").unwrap();
+
+        // Regression: the unloaded lib's taxonomy edge must be gone, not stale.
+        assert!(!ns.is_a("thing", "entity"));
+        // The kept base lib is unaffected.
+        assert!(ns.is_a("entity", "entity"));
     }
 
     #[test]
