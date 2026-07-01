@@ -1,6 +1,6 @@
 //! Haystack data collection types.
 //!
-//! - [`HDict`] — Tag dictionary (ordered map of name → [`Kind`](crate::kinds::Kind) value).
+//! - [`HDict`] — Tag dictionary (unordered `HashMap` of name → [`Kind`](crate::kinds::Kind) value; use `sorted_tags()` or `Display` for deterministic order).
 //!   Represents a single entity, grid metadata, or column metadata.
 //! - [`HGrid`] — Two-dimensional table of [`HCol`] columns and [`HDict`] rows.
 //!   The primary data exchange format in the Haystack protocol.
