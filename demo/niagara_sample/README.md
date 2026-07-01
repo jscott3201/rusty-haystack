@@ -1,6 +1,52 @@
 # Niagara nHaystack demo (rusty-haystack)
 
-Live lab target: `https://192.168.204.11/haystack` (Niagara 4.15 + nHaystack 3.3).
+Example lab target: `https://<jace-host>/haystack` (Niagara 4.15 + nHaystack 3.3).
+
+Bench notes below document one Open-FDD field deployment (2026-06); substitute your JACE host and credentials via `env.example`.
+
+## Observed Niagara station (example bench — N4.15 lab)
+
+| Field | Value |
+|-------|--------|
+| **Platform** | **Niagara 4 (N4)** — Tridium |
+| **Niagara build** | **4.15.3.28** (`productVersion` from `/about`) |
+| **Station name** | `v4Fifteen` (`serverName`) |
+| **nHaystack module** | **3.3.0.0** (`moduleVersion`) |
+| **Haystack protocol** | **2.0** (`haystackVersion` in about grid) |
+| **Product** | Niagara 4 (`productName`) |
+| **Time zone** | `America/Chicago` (`tz`) |
+| **HTTPS endpoint** | `https://192.168.204.11/haystack` |
+| **Servlet name** | `haystack` (`NHaystackService` in Workbench) |
+| **Auth (API user)** | HTTP Basic — `HTTPBasicScheme` (not DigestScheme, not Haystack SCRAM) |
+| **TLS** | Self-signed station cert — use `--insecure-tls` on the demo (secure default is strict verification) |
+| **BACnet driver** | `BacnetNetwork` → device **`BENS-BENCHTEST-BOX`** |
+| **Example slot path** | `@C.Drivers.BacnetNetwork.BENS-BENCHTEST-BOX.points.OA~2dT` |
+
+Example **`/about`** row (Zinc):
+
+```
+ver:"3.0"
+productName: Niagara 4
+productVersion: 4.15.3.28
+moduleName: nhaystack
+moduleVersion: 3.3.0.0
+serverName: v4Fifteen
+haystackVersion: 2.0
+```
+
+Example **current-value points** (same bench as BACnet device 5007 on MSTP):
+
+| dis | curVal (approx) | unit |
+|-----|-----------------|------|
+| OA-H | ~51 %RH | %RH |
+| OA-T | ~72 °F | °F |
+| DUCT-T | ~65–69 °F | °F |
+| DUCT-P | ~-0.14 | in/wc |
+| STAT ZN-T | ~73 °F | °F |
+| ACTUATOR-POS | ~0.58 | % |
+| ACTUATOR-0 | 0 | % |
+
+Ethernet adapter on the Windows station host: **192.168.204.11** (same subnet as bench `enp3s0` @ 192.168.204.55/24).
 
 ## Quick start
 
@@ -32,7 +78,7 @@ NHaystackService → Servlet enabled, name: haystack
 
 1. **`--auth basic`** — `HaystackClient::connect_with_config` + `ClientConfig::niagara_lab()` reads live BACnet points (OA-T, DUCT-T, …).
 2. **`--auth scram`** / **`--probe-scram`** — Niagara returns `401` HTML with **no** `WWW-Authenticate: SCRAM`. nHaystack does not speak Project Haystack SCRAM today.
-3. **Strict TLS** — Niagara lab cert requires `tls_verify: false` (same as `curl -k`).
+3. **Strict TLS** — Niagara lab cert requires `--insecure-tls` (same as `curl -k`; not the default).
 
 ## Library changes in this fork
 

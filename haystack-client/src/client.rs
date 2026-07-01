@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use crate::error::ClientError;
 use crate::config::ClientConfig;
+use crate::error::ClientError;
 use crate::transport::Transport;
 use crate::transport::http::HttpTransport;
 use crate::transport::ws::WsTransport;
@@ -47,13 +47,9 @@ impl HaystackClient<HttpTransport> {
                     crate::auth::authenticate(&client, url, username, password).await?;
                 HttpTransport::with_bearer(url, auth_token, client, &config.wire_format)
             }
-            crate::config::AuthMode::Basic => HttpTransport::with_basic(
-                url,
-                username,
-                password,
-                client,
-                &config.wire_format,
-            ),
+            crate::config::AuthMode::Basic => {
+                HttpTransport::with_basic(url, username, password, client, &config.wire_format)
+            }
         };
         Ok(Self { transport })
     }
