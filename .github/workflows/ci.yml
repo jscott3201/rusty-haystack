@@ -10,6 +10,9 @@ on:
     # dev-targeted run produced.
     types: [opened, synchronize, reopened, edited]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
@@ -74,8 +77,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: pyo3
-      - uses: astral-sh/setup-uv@v5
-      - run: uv venv
+      - uses: astral-sh/setup-uv@v9
+      # Pinned rather than inherited from the runner image, so the interpreter
+      # the extension is built against does not drift. pyo3 is configured
+      # without abi3, making every build interpreter-specific.
+      - run: uv venv --python 3.12
       - run: uv pip install maturin pytest
       # Activate rather than `uv run`, and reach the crate with -m. `uv run`
       # inside rusty-haystack/ sees its pyproject.toml, builds a second .venv

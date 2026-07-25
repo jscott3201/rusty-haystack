@@ -200,13 +200,13 @@ class TestSpecMatchNamespace:
 
     def test_spec_match_without_namespace_raises(self):
         # The whole point of the change: refuse to answer rather than say False.
-        with pytest.raises(Exception):
+        with pytest.raises(rh.FilterError):
             rh.matches_filter("ph::Point", self._point())
-        with pytest.raises(Exception):
+        with pytest.raises(rh.FilterError):
             rh.Filter.parse("ph::Point").matches(self._point())
 
     def test_spec_match_nested_in_conjunction_also_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(rh.FilterError):
             rh.matches_filter("point and ph::Point", self._point())
 
     def test_plain_filters_need_no_namespace(self):

@@ -1,4 +1,4 @@
-"""Tests for server types: AuthManager, ConnectorConfig, Federation, HisStore, HaystackServer."""
+"""Tests for server types: AuthManager, HisStore, HaystackServer."""
 
 import pytest
 import tempfile

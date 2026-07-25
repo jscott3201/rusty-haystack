@@ -53,6 +53,12 @@ pub enum FilterNode {
     And(Box<FilterNode>, Box<FilterNode>),
     /// Logical OR of two filters (short-circuit).
     Or(Box<FilterNode>, Box<FilterNode>),
-    /// Spec match stub — always returns false until ontology is wired up.
+    /// Structural spec match against a qualified type name, e.g. `ph::Point`.
+    ///
+    /// Resolved through [`DefNamespace::fits`](crate::ontology::DefNamespace::fits),
+    /// so it needs a namespace: evaluated without one it reports false, which is
+    /// indistinguishable from a genuine non-match. Use
+    /// [`matches_with_ns`](crate::filter::matches_with_ns) rather than
+    /// [`matches`](crate::filter::matches) wherever a namespace is available.
     SpecMatch(String),
 }

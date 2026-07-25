@@ -474,11 +474,17 @@ class GraphDiff:
     ref_val: str
     @property
     def old(self) -> HDict | None:
-        """Entity state before the mutation (None for Add)."""
+        """Entity state before the mutation. Populated for Remove only.
+
+        An Update reports None here; read previous_tags instead.
+        """
         ...
     @property
     def new(self) -> HDict | None:
-        """Entity state after the mutation (None for Remove)."""
+        """Entity state after the mutation. Populated for Add only.
+
+        An Update reports None here; read changed_tags instead.
+        """
         ...
     @property
     def changed_tags(self) -> HDict | None:

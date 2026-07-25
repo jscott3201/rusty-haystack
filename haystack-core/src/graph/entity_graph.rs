@@ -570,8 +570,8 @@ impl EntityGraph {
             Some(expr) => {
                 let ast = crate::filter::parse_filter(expr)
                     .map_err(|e| GraphError::Filter(e.to_string()))?;
-                // Same resolver and namespace as query(), so `fits` and ref-path
-                // traversal behave identically here.
+                // Same resolver and namespace as query(), so spec matching and
+                // ref-path traversal behave identically here.
                 let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
                 let ns = self.namespace.as_ref();
                 Ok(points
@@ -1836,7 +1836,7 @@ mod tests {
     #[test]
     fn equip_points_resolves_spec_match_against_namespace() {
         // equip_points used to evaluate its filter with no namespace, which made
-        // `fits` unconditionally false no matter what the namespace held.
+        // spec matching unconditionally false no matter what the namespace held.
         let ns = DefNamespace::load_standard().expect("bundled defs load");
         let mut g = EntityGraph::with_namespace(ns);
         g.add(make_site("s1")).unwrap();
@@ -1846,11 +1846,14 @@ mod tests {
 
         // Spec-match syntax is a bare qualified name; there is no `fits` keyword.
         let fitted = g.equip_points("e1", Some("ph::Point")).unwrap();
-        assert_eq!(
-            fitted.len(),
-            2,
-            "spec match must resolve through the namespace"
-        );
+        assert_eq!(fitted.len(), 2, "both points fit ph::Point");
+
+        // The negative case is what proves the namespace is consulted. An
+        // unregistered name has no mandatory tags, so `all()` over an empty set
+        // is vacuously true and every entity matches — meaning a positive
+        // assertion alone passes even with an empty namespace.
+        let mismatched = g.equip_points("e1", Some("ph::Ahu")).unwrap();
+        assert_eq!(mismatched.len(), 0, "points must not fit ph::Ahu");
     }
 
     #[test]

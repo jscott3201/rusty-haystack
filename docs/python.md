@@ -217,9 +217,17 @@ ast = rh.parse_filter("site and area > 1000")
 entity = rh.HDict({"site": rh.Marker(), "area": rh.Number(5000)})
 rh.matches_filter("site and area > 1000", entity)  # -> True
 rh.matches_filter("equip", entity)                  # -> False
+
+# Spec-match terms are bare qualified names and need a namespace
+ns = rh.DefNamespace.load_standard()
+rh.matches_filter("ph::Site", entity, ns)           # -> True
 ```
 
-Raises `ValueError` for invalid filter expressions.
+Raises `FilterError` for an invalid filter expression, and also when the
+expression contains a spec-match term but no namespace was given — a `False`
+there would be indistinguishable from a genuine non-match.
+
+`FilterError` subclasses `HaystackError`, not `ValueError`.
 
 ## EntityGraph
 
@@ -373,9 +381,13 @@ Represents a change to the graph (add, update, or remove).
 ```python
 diff.op          # -> DiffOp.Add, DiffOp.Update, or DiffOp.Remove
 diff.ref_val     # -> "site-1"
-diff.old         # -> HDict or None (previous state, for Update/Remove)
-diff.new         # -> HDict or None (new state, for Add/Update)
+diff.old         # -> HDict, for Remove only; None otherwise
+diff.new         # -> HDict, for Add only; None otherwise
+diff.changed_tags    # -> HDict of changed tags with their new values, Update only
+diff.previous_tags   # -> HDict of changed tags with their previous values, Update only
 ```
+
+An Update carries no `old`/`new`; read `changed_tags` and `previous_tags` instead.
 
 ## Filter Builder
 
@@ -391,11 +403,13 @@ f = rh.Filter.missing("deprecated")
 f = rh.Filter.cmp(rh.Path("area"), ">", rh.Number(1000))
 
 # Combine filters
-combined = f.and_filter(rh.Filter.has("geoCity"))
-combined = f.or_filter(rh.Filter.has("campus"))
+combined = f.and_(rh.Filter.has("geoCity"))
+combined = f.or_(rh.Filter.has("campus"))
+combined = f & rh.Filter.has("geoCity")   # & and | work too
 
 # Evaluate against an entity
-f.matches(entity)   # -> bool
+f.matches(entity)                          # -> bool
+rh.Filter.parse("ph::Point").matches(entity, ns)  # spec match needs a namespace
 
 # String representation
 str(f)              # -> "site and area > 1000"
