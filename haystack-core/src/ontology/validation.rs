@@ -1,7 +1,12 @@
 // Validation issue types for ontology and graph validation.
 
 /// Describes why an entity does not fit a type.
+///
+/// Non-exhaustive: new failure modes get added as the fitting rules grow, and
+/// that should not break a downstream `match`. `UnknownType` was added after
+/// `fits` stopped reporting unregistered types as a match.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FitIssue {
     /// Entity is missing a mandatory marker tag.
     MissingMarker {
@@ -53,6 +58,12 @@ pub enum FitIssue {
         /// Valid options.
         valid_options: Vec<String>,
     },
+    /// The named type is not registered in the namespace, so nothing can be said
+    /// about whether the entity fits it. Usually a typo or an unloaded library.
+    UnknownType {
+        /// The unregistered type or spec name.
+        spec: String,
+    },
 }
 
 /// A validation problem found in an entity or graph.
@@ -69,6 +80,9 @@ pub struct ValidationIssue {
 impl std::fmt::Display for FitIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            FitIssue::UnknownType { spec } => {
+                write!(f, "unknown type '{spec}': not registered in this namespace")
+            }
             FitIssue::MissingMarker { tag, spec } => {
                 write!(f, "missing mandatory marker '{tag}' for spec '{spec}'")
             }

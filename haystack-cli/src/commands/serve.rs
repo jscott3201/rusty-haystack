@@ -20,10 +20,15 @@ pub fn run(cfg: ServeConfig<'_>) {
         std::process::exit(1);
     });
     rt.block_on(async {
-        let ns = DefNamespace::load_standard().unwrap_or_else(|e| {
+        // Shared with every graph below. Without this the graph has no
+        // namespace and every spec-match filter (`ph::Point`) is refused, even
+        // though the server itself holds the ontology — they are separate
+        // owners, and only the graph's copy is consulted when evaluating a
+        // filter.
+        let ns = std::sync::Arc::new(DefNamespace::load_standard().unwrap_or_else(|e| {
             eprintln!("Error loading ontology: {}", e);
             std::process::exit(1);
-        });
+        }));
 
         let graph = if let Some(f) = cfg.file {
             eprintln!("Loading entities from: {}", f);
@@ -50,16 +55,17 @@ pub fn run(cfg: ServeConfig<'_>) {
                 std::process::exit(1);
             });
 
-            let eg = EntityGraph::from_grid(&grid, None).unwrap_or_else(|e| {
-                eprintln!("Error building graph: {}", e);
-                std::process::exit(1);
-            });
+            let eg = EntityGraph::from_grid(&grid, Some(std::sync::Arc::clone(&ns)))
+                .unwrap_or_else(|e| {
+                    eprintln!("Error building graph: {}", e);
+                    std::process::exit(1);
+                });
 
             eprintln!("Loaded {} entities", eg.len());
             SharedGraph::new(eg)
         } else if cfg.demo {
             let entities = haystack_server::demo::demo_entities();
-            let mut eg = EntityGraph::new();
+            let mut eg = EntityGraph::with_namespace(std::sync::Arc::clone(&ns));
             for e in entities {
                 eg.add(e).unwrap_or_else(|e| {
                     eprintln!("Error adding demo entity: {}", e);
@@ -69,7 +75,7 @@ pub fn run(cfg: ServeConfig<'_>) {
             eprintln!("Loaded {} demo entities", eg.len());
             SharedGraph::new(eg)
         } else {
-            SharedGraph::new(EntityGraph::new())
+            SharedGraph::new(EntityGraph::with_namespace(std::sync::Arc::clone(&ns)))
         };
 
         let auth = if let Some(uf) = cfg.users_file {
@@ -90,7 +96,9 @@ pub fn run(cfg: ServeConfig<'_>) {
         );
 
         HaystackServer::new(graph)
-            .with_namespace(ns)
+            // The server keeps its own mutable copy: the lib load/unload
+            // endpoints mutate it, and the graphs must not see that shift.
+            .with_namespace((*ns).clone())
             .with_auth(auth)
             .host(bind_host)
             .port(cfg.port)

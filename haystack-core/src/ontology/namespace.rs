@@ -28,10 +28,32 @@ pub enum LibSource {
     Directory(PathBuf),
 }
 
+/// What a qualified spec term in a filter resolves to.
+///
+/// A namespace holds two type systems — Haystack 4 defs in the taxonomy and
+/// Xeto specs in their own map — and a term like `ph::Ahu` may name either.
+/// See [`DefNamespace::resolve_spec_term`].
+#[derive(Debug, Clone)]
+pub enum SpecTerm<'a> {
+    /// A Xeto spec, matched on its exact qualified name.
+    Spec(&'a Spec),
+    /// A def, carrying the taxonomy symbol the term resolved to. This is not
+    /// always the bare name as written: `ph::Ahu` resolves to `ahu`.
+    Def(String),
+}
+
 /// Unified container for Haystack 4 defs.
 ///
 /// Provides resolution, taxonomy queries, structural typing (`fits`),
 /// and validation. Loads defs from Trio format.
+///
+/// Cloning is a deep copy of every index and is not cheap — a standard
+/// namespace holds several hundred defs. Prefer sharing an
+/// [`Arc<DefNamespace>`](std::sync::Arc), which is what
+/// [`EntityGraph`](crate::graph::EntityGraph) stores. `Clone` exists so an
+/// `Arc` can be forked with `Arc::make_mut` when one holder needs to load or
+/// unload a library without disturbing the others.
+#[derive(Clone)]
 pub struct DefNamespace {
     /// Symbol -> Def mapping.
     defs: HashMap<String, Def>,
@@ -282,8 +304,83 @@ impl DefNamespace {
     /// Checks whether `entity` has all mandatory markers defined by
     /// `type_name` and its supertypes.
     pub fn fits(&self, entity: &HDict, type_name: &str) -> bool {
+        // Fail closed on a name this namespace has never seen. `mandatory_tags`
+        // returns an empty set for an unregistered name and `.all()` over an
+        // empty iterator is vacuously true, so without this guard a misspelled
+        // or not-yet-loaded type matches every entity — a typo in a filter would
+        // widen the result set to the whole graph instead of narrowing it.
+        if !self.has_type(type_name) {
+            return false;
+        }
         let mandatory = self.mandatory_tags(type_name);
         mandatory.iter().all(|tag| entity.has(tag))
+    }
+
+    /// Whether `name` is a def registered in this namespace.
+    ///
+    /// This is the check [`fits`](Self::fits) uses to reject unknown types, and
+    /// the one callers should use to tell "does not fit" apart from "no such
+    /// type" — `fits` collapses both to `false`.
+    ///
+    /// Takes a bare def symbol, not a qualified name. To resolve a `lib::Name`
+    /// term use [`resolve_spec_term`](Self::resolve_spec_term), which also
+    /// searches Xeto specs.
+    pub fn has_type(&self, name: &str) -> bool {
+        self.taxonomy.contains(name)
+    }
+
+    /// Resolve a qualified spec term from a filter, such as `ph::Ahu`,
+    /// `ph::ahuZoneDelivery`, or `ph.equips::WaterMeter`.
+    ///
+    /// A term can name either of the two type systems this namespace holds, and
+    /// the spellings differ, so resolution tries each in turn:
+    ///
+    /// 1. A Xeto spec under its exact qualified name. Specs live in their own
+    ///    map keyed by qname and are never registered in the taxonomy, so a
+    ///    taxonomy lookup alone cannot see any of them.
+    /// 2. A def whose symbol is the bare name exactly as written — def symbols
+    ///    are frequently camelCase (`ahuZoneDelivery`), which lowercasing
+    ///    destroys.
+    /// 3. A def whose symbol is the lowercased bare name. This is the Haystack
+    ///    convention that writes `ph::Ahu` for the def `ahu`.
+    ///
+    /// Only rung 1 looks at the library qualifier. Rungs 2 and 3 match on the
+    /// bare name alone, so `totallyMadeUp::Ahu` resolves to the def `ahu` just
+    /// as `ph::Ahu` does. That mirrors how the term was reduced before specs
+    /// were consulted at all, and Haystack def symbols are globally unique.
+    ///
+    /// Returns `None` when the term matches nothing, which is what callers use
+    /// to reject a filter rather than silently evaluate it as a non-match.
+    pub fn resolve_spec_term(&self, term: &str) -> Option<SpecTerm<'_>> {
+        if let Some(spec) = self.specs.get(term) {
+            return Some(SpecTerm::Spec(spec));
+        }
+        let bare = term.rsplit("::").next().unwrap_or(term);
+        if self.has_type(bare) {
+            return Some(SpecTerm::Def(bare.to_string()));
+        }
+        let lowered = bare.to_lowercase();
+        if self.has_type(&lowered) {
+            return Some(SpecTerm::Def(lowered));
+        }
+        None
+    }
+
+    /// Whether `entity` fits the qualified spec term `term`.
+    ///
+    /// Dispatches on what the term resolves to: a Xeto spec is checked
+    /// structurally against its slots, a def against its mandatory markers.
+    /// An unresolvable term is `false` — callers that can report an error
+    /// should call [`resolve_spec_term`](Self::resolve_spec_term) first.
+    pub fn fits_spec_term(&self, entity: &HDict, term: &str) -> bool {
+        match self.resolve_spec_term(term) {
+            Some(SpecTerm::Def(name)) => self.fits(entity, &name),
+            Some(SpecTerm::Spec(spec)) => {
+                crate::xeto::fitting::explain_against_spec_in(entity, spec, &self.specs, None)
+                    .is_empty()
+            }
+            None => false,
+        }
     }
 
     /// Explain why an entity does or does not fit a type.
@@ -291,6 +388,14 @@ impl DefNamespace {
     /// Returns a list of `FitIssue` items; empty if entity fits.
     pub fn fits_explain(&self, entity: &HDict, type_name: &str) -> Vec<FitIssue> {
         let mut issues: Vec<FitIssue> = Vec::new();
+        // Distinguishing an unknown type from a genuine non-match is the whole
+        // point of this method — `fits` reports both as plain `false`.
+        if !self.has_type(type_name) {
+            issues.push(FitIssue::UnknownType {
+                spec: type_name.to_string(),
+            });
+            return issues;
+        }
         let mandatory = self.mandatory_tags(type_name);
         for tag in &mandatory {
             if entity.missing(tag) {
@@ -670,6 +775,195 @@ depends:[^lib:ph]
     fn is_a_direct_parent() {
         let ns = build_test_ns();
         assert!(ns.is_a("ahu", "equip"));
+    }
+
+    /// An entity that fits every *registered* type in the namespace. If `fits`
+    /// ever reports a match for an unregistered name, it will do so for this.
+    fn fits_everything() -> HDict {
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val("x")));
+        e.set("marker", Kind::Marker);
+        e.set("entity", Kind::Marker);
+        e.set("equip", Kind::Marker);
+        e.set("ahu", Kind::Marker);
+        e
+    }
+
+    #[test]
+    fn fits_is_false_for_an_unregistered_type() {
+        // `mandatory_tags` returns an empty set for an unknown name and
+        // `.all()` over an empty iterator is vacuously true, so this used to
+        // report a match for anything at all.
+        let ns = build_test_ns();
+        let e = fits_everything();
+        assert!(ns.fits(&e, "ahu"), "control: a known type still fits");
+
+        assert!(!ns.fits(&e, "bogus"));
+        assert!(!ns.fits(&e, "Ahu"), "lookup is case-sensitive");
+        assert!(!ns.fits(&e, ""));
+        assert!(!ns.fits(&HDict::new(), "bogus"));
+    }
+
+    #[test]
+    fn fits_is_false_for_every_type_in_an_empty_namespace() {
+        let ns = DefNamespace::new();
+        assert!(!ns.fits(&fits_everything(), "point"));
+        assert!(!ns.fits(&fits_everything(), "ahu"));
+    }
+
+    #[test]
+    fn has_type_separates_unknown_from_non_matching() {
+        let ns = build_test_ns();
+        assert!(ns.has_type("ahu"));
+        assert!(ns.has_type("point"));
+        assert!(!ns.has_type("bogus"));
+
+        // A site does not fit `ahu`, but `ahu` is a real type — `fits` collapses
+        // that distinction to `false` and `has_type` is how a caller recovers it.
+        let mut site = HDict::new();
+        site.set("site", Kind::Marker);
+        assert!(!ns.fits(&site, "ahu"));
+        assert!(ns.has_type("ahu"));
+    }
+
+    #[test]
+    fn fits_explain_reports_an_unknown_type() {
+        let ns = build_test_ns();
+        let issues = ns.fits_explain(&fits_everything(), "bogus");
+        assert_eq!(
+            issues,
+            vec![FitIssue::UnknownType {
+                spec: "bogus".to_string()
+            }]
+        );
+
+        // A registered type the entity does satisfy still explains cleanly.
+        assert!(ns.fits_explain(&fits_everything(), "ahu").is_empty());
+    }
+
+    #[test]
+    fn resolve_spec_term_finds_xeto_specs_by_qname() {
+        // Specs live in their own map keyed by qname and are never registered in
+        // the taxonomy, so a taxonomy-only lookup saw none of them. Every spec
+        // the standard namespace ships must resolve.
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+        let specs: Vec<String> = ns.specs(None).iter().map(|s| s.qname.clone()).collect();
+        assert!(!specs.is_empty(), "the standard namespace ships specs");
+
+        for qname in &specs {
+            assert!(
+                matches!(ns.resolve_spec_term(qname), Some(SpecTerm::Spec(_))),
+                "{qname} must resolve to its Xeto spec"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_spec_term_preserves_camel_case_def_names() {
+        // Def symbols are frequently camelCase. Lowercasing the bare name
+        // unconditionally made every one of them unresolvable.
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+        let camel: Vec<String> = ns
+            .defs()
+            .keys()
+            .filter(|d| d.chars().any(|c| c.is_uppercase()))
+            .cloned()
+            .collect();
+        assert!(
+            !camel.is_empty(),
+            "the standard namespace ships camelCase defs"
+        );
+
+        for name in &camel {
+            let term = format!("ph::{name}");
+            match ns.resolve_spec_term(&term) {
+                Some(SpecTerm::Def(resolved)) => assert_eq!(&resolved, name),
+                other => panic!("{term} resolved to {other:?}, expected the def {name}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_spec_term_accepts_the_haystack_capitalised_spelling() {
+        // `ph::Ahu` is how Haystack writes a reference to the def `ahu`, so the
+        // lowercased fallback has to stay — it just must not come first.
+        let ns = build_test_ns();
+        match ns.resolve_spec_term("ph::Ahu") {
+            Some(SpecTerm::Def(name)) => assert_eq!(name, "ahu"),
+            other => panic!("expected def `ahu`, got {other:?}"),
+        }
+        match ns.resolve_spec_term("ph::ahu") {
+            Some(SpecTerm::Def(name)) => assert_eq!(name, "ahu"),
+            other => panic!("expected def `ahu`, got {other:?}"),
+        }
+        assert!(ns.resolve_spec_term("ph::Bogus").is_none());
+    }
+
+    #[test]
+    fn fits_spec_term_dispatches_on_what_the_term_resolved_to() {
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+
+        let mut point = HDict::new();
+        point.set("id", Kind::Ref(HRef::from_val("p1")));
+        point.set("point", Kind::Marker);
+
+        assert!(ns.fits_spec_term(&point, "ph::Point"));
+        assert!(!ns.fits_spec_term(&point, "ph::Ahu"));
+        assert!(!ns.fits_spec_term(&point, "ph::Bogus"));
+
+        // A real Xeto spec goes through structural slot checking rather than
+        // def mandatory-marker checking, and must not vacuously accept a point.
+        let spec_qname = ns
+            .specs(None)
+            .iter()
+            .map(|s| s.qname.clone())
+            .find(|q| q.ends_with("::WaterMeter"));
+        if let Some(q) = spec_qname {
+            assert!(
+                matches!(ns.resolve_spec_term(&q), Some(SpecTerm::Spec(_))),
+                "{q} resolves as a spec"
+            );
+            assert!(!ns.fits_spec_term(&point, &q), "a bare point is not a {q}");
+        }
+    }
+
+    #[test]
+    fn clone_carries_xeto_specs_as_well_as_defs() {
+        // A clone that copied only the taxonomy would still answer def-backed
+        // terms correctly, so spec lookups are what pin the specs map.
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+        let qname = ns
+            .specs(None)
+            .first()
+            .map(|s| s.qname.clone())
+            .expect("the standard namespace ships specs");
+
+        let snapshot = ns.clone();
+        assert!(
+            snapshot.get_spec(&qname).is_some(),
+            "specs survive the clone"
+        );
+        assert!(matches!(
+            snapshot.resolve_spec_term(&qname),
+            Some(SpecTerm::Spec(_))
+        ));
+        assert_eq!(snapshot.specs(None).len(), ns.specs(None).len());
+    }
+
+    #[test]
+    fn clone_is_independent_of_the_original() {
+        let mut ns = build_test_ns();
+        let snapshot = ns.clone();
+        assert_eq!(snapshot.len(), ns.len());
+        assert!(snapshot.has_type("ahu"));
+
+        // Warm the taxonomy's memo cache on the clone, then mutate the original.
+        assert!(snapshot.fits(&fits_everything(), "ahu"));
+        ns.unload_lib("phIoT").expect("phIoT unloads");
+
+        assert!(!ns.has_type("ahu"), "original lost the lib");
+        assert!(snapshot.has_type("ahu"), "clone kept it");
+        assert!(snapshot.fits(&fits_everything(), "ahu"));
     }
 
     #[test]

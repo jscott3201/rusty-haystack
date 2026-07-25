@@ -31,7 +31,7 @@ pub use conjunct::ConjunctIndex;
 pub use def::{Def, DefKind};
 pub use graph_validation::{ValidationReport, ValidationSummary, validate_graph};
 pub use lib::Lib;
-pub use namespace::{DefNamespace, LibSource};
+pub use namespace::{DefNamespace, LibSource, SpecTerm};
 pub use taxonomy::TaxonomyTree;
 pub use trio_loader::load_trio;
 pub use validation::{FitIssue, ValidationIssue};

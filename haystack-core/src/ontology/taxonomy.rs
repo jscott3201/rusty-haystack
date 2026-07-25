@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Supports multiple inheritance (a def can have multiple supertypes via
 /// the `is` tag). Pre-computes mandatory marker sets on first access
 /// for fast `fits()` evaluation.
+#[derive(Debug)]
 pub struct TaxonomyTree {
     /// child -> parent symbols
     parents: HashMap<String, Vec<String>>,
@@ -15,6 +16,22 @@ pub struct TaxonomyTree {
     children: HashMap<String, Vec<String>>,
     /// Cached mandatory tag sets per type (RwLock for thread safety)
     mandatory_cache: RwLock<HashMap<String, HashSet<String>>>,
+}
+
+/// `RwLock` is not `Clone`, so this is written by hand rather than derived.
+///
+/// The clone starts with an empty cache instead of copying the entries. The
+/// cache is a pure memo of [`TaxonomyTree::mandatory_tags`] and refills lazily,
+/// so dropping it costs one recomputation per type and cannot carry a stale
+/// entry into the copy.
+impl Clone for TaxonomyTree {
+    fn clone(&self) -> Self {
+        Self {
+            parents: self.parents.clone(),
+            children: self.children.clone(),
+            mandatory_cache: RwLock::new(HashMap::new()),
+        }
+    }
 }
 
 impl TaxonomyTree {

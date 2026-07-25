@@ -44,16 +44,44 @@ pub fn matches_with_ns<'a>(
             matches_with_ns(left, entity, resolve_ref, namespace)
                 || matches_with_ns(right, entity, resolve_ref, namespace)
         }
+        FilterNode::SpecMatch(spec) => match namespace {
+            Some(ns) => ns.fits_spec_term(entity, spec),
+            None => false,
+        },
+    }
+}
+
+/// Collect the spec-match terms in `node` that `namespace` cannot resolve.
+///
+/// Evaluation reports an unresolvable spec as a plain non-match, which is
+/// indistinguishable from a real one — a typo silently returns nothing and an
+/// unloaded library silently returns nothing. Callers that can surface an error
+/// should run this first and refuse the filter instead.
+///
+/// Resolution is [`DefNamespace::resolve_spec_term`], the same call evaluation
+/// makes, so this cannot disagree with it about what a term means.
+///
+/// With `namespace` set to `None`, every spec term is unresolvable: without a
+/// namespace there is nothing to resolve against.
+pub fn unresolved_specs(node: &FilterNode, namespace: Option<&DefNamespace>) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_unresolved(node, namespace, &mut out);
+    out
+}
+
+fn collect_unresolved(node: &FilterNode, namespace: Option<&DefNamespace>, out: &mut Vec<String>) {
+    match node {
         FilterNode::SpecMatch(spec) => {
-            match namespace {
-                Some(ns) => {
-                    // Extract simple type name: "ph::Ahu" → "ahu", "ph.equips::Ahu" → "ahu"
-                    let type_name = spec.rsplit("::").next().unwrap_or(spec).to_lowercase();
-                    ns.fits(entity, &type_name)
-                }
-                None => false,
+            let known = namespace.is_some_and(|ns| ns.resolve_spec_term(spec).is_some());
+            if !known && !out.contains(spec) {
+                out.push(spec.clone());
             }
         }
+        FilterNode::And(l, r) | FilterNode::Or(l, r) => {
+            collect_unresolved(l, namespace, out);
+            collect_unresolved(r, namespace, out);
+        }
+        FilterNode::Has(_) | FilterNode::Missing(_) | FilterNode::Cmp { .. } => {}
     }
 }
 

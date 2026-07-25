@@ -375,7 +375,7 @@ fn ontology_benchmarks(c: &mut Criterion) {
 }
 
 fn xeto_benchmarks(c: &mut Criterion) {
-    let mut ns = DefNamespace::load_standard().unwrap();
+    let ns = DefNamespace::load_standard().unwrap();
 
     // Entity with ahu/equip markers for fitting tests
     let mut ahu_entity = HDict::new();
@@ -386,7 +386,7 @@ fn xeto_benchmarks(c: &mut Criterion) {
 
     // Benchmark xeto::fitting::fits against "ahu" (resolved via DefNamespace)
     c.bench_function("xeto_fits_ahu", |b| {
-        b.iter(|| xeto::fitting::fits(black_box(&ahu_entity), black_box("ahu"), &mut ns, None))
+        b.iter(|| xeto::fitting::fits(black_box(&ahu_entity), black_box("ahu"), &ns, None))
     });
 
     // Benchmark fits with a missing marker (should fail fast)
@@ -396,25 +396,13 @@ fn xeto_benchmarks(c: &mut Criterion) {
     // Missing "equip" marker
 
     c.bench_function("xeto_fits_missing_marker", |b| {
-        b.iter(|| {
-            xeto::fitting::fits(
-                black_box(&incomplete_entity),
-                black_box("ahu"),
-                &mut ns,
-                None,
-            )
-        })
+        b.iter(|| xeto::fitting::fits(black_box(&incomplete_entity), black_box("ahu"), &ns, None))
     });
 
     // Benchmark fits_explain for detailed issue reporting
     c.bench_function("xeto_fits_explain", |b| {
         b.iter(|| {
-            xeto::fitting::fits_explain(
-                black_box(&incomplete_entity),
-                black_box("ahu"),
-                &mut ns,
-                None,
-            )
+            xeto::fitting::fits_explain(black_box(&incomplete_entity), black_box("ahu"), &ns, None)
         })
     });
 
@@ -425,7 +413,7 @@ fn xeto_benchmarks(c: &mut Criterion) {
     site_entity.set("dis", Kind::Str("Main Site".into()));
 
     c.bench_function("xeto_fits_site", |b| {
-        b.iter(|| xeto::fitting::fits(black_box(&site_entity), black_box("site"), &mut ns, None))
+        b.iter(|| xeto::fitting::fits(black_box(&site_entity), black_box("site"), &ns, None))
     });
 
     // Benchmark effective_slots on specs from the loaded namespace

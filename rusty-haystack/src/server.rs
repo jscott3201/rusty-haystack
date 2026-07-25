@@ -110,8 +110,8 @@ impl PyHisStore {
 ///
 /// Builder-pattern configuration: set graph, namespace, auth,
 /// then call run() (blocking) or run_background() (returns immediately).
-/// Note: with_namespace/with_auth consume their argument
-/// (the original Python object becomes empty after the call).
+/// Note: with_auth consumes its argument (the original AuthManager becomes
+/// empty after the call). with_namespace does not — it copies.
 ///
 /// Examples:
 ///     server = HaystackServer(graph)
@@ -138,11 +138,13 @@ impl PyHaystackServer {
     }
 
     /// Set the ontology namespace for validation and spec management.
-    /// Warning: consumes the namespace — the original object becomes empty.
-    fn with_namespace(&mut self, ns: &mut PyDefNamespace) -> PyResult<()> {
-        let taken = std::mem::replace(&mut ns.inner, haystack_core::ontology::DefNamespace::new());
+    ///
+    /// The namespace is copied into the server, so `ns` stays usable. The server
+    /// holds its own mutable copy because lib load/unload endpoints mutate it;
+    /// later changes on either side do not affect the other.
+    fn with_namespace(&mut self, ns: &PyDefNamespace) -> PyResult<()> {
         if let Some(server) = self.inner.take() {
-            self.inner = Some(server.with_namespace(taken));
+            self.inner = Some(server.with_namespace((*ns.inner).clone()));
         }
         Ok(())
     }

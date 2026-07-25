@@ -15,32 +15,31 @@ use crate::ontology::PyDefNamespace;
 
 /// True if evaluating `node` needs an ontology namespace, i.e. it contains a
 /// spec-match term anywhere in the tree.
-fn needs_namespace(node: &FilterNode) -> bool {
-    match node {
-        FilterNode::SpecMatch(_) => true,
-        FilterNode::And(l, r) | FilterNode::Or(l, r) => needs_namespace(l) || needs_namespace(r),
-        FilterNode::Has(_) | FilterNode::Missing(_) | FilterNode::Cmp { .. } => false,
-    }
-}
-
-/// Evaluate a filter, refusing to answer a spec-match term without a namespace.
+/// Evaluate a filter, refusing to answer a spec-match term it cannot resolve.
 ///
 /// The core evaluator reports `false` for a spec match it cannot resolve, which
 /// is indistinguishable from a genuine non-match. Raising instead means a caller
-/// who forgets the namespace gets told so rather than silently receiving no rows.
+/// who forgets the namespace — or misspells a spec — gets told so rather than
+/// silently receiving no rows. Mirrors `EntityGraph::query`.
 fn eval_filter(
     node: &FilterNode,
     entity: &haystack_core::data::HDict,
     namespace: Option<&PyDefNamespace>,
 ) -> PyResult<bool> {
-    match namespace {
-        Some(ns) => Ok(filter::matches_with_ns(node, entity, None, Some(&ns.inner))),
-        None if needs_namespace(node) => Err(PyErr::new::<exceptions::FilterError, _>(
-            "filter contains a spec-match term (e.g. `ph::Point`) and needs a namespace: \
-             pass namespace=DefNamespace.load_standard()",
-        )),
-        None => Ok(filter::matches(node, entity, None)),
+    let ns = namespace.map(|n| &*n.inner);
+    let unresolved = filter::unresolved_specs(node, ns);
+    if !unresolved.is_empty() {
+        let names = unresolved.join(", ");
+        return Err(PyErr::new::<exceptions::FilterError, _>(if ns.is_some() {
+            format!("filter names specs the namespace does not define: {names}")
+        } else {
+            format!(
+                "filter contains spec-match terms ({names}) and needs a namespace: \
+                 pass namespace=DefNamespace.load_standard()"
+            )
+        }));
     }
+    Ok(filter::matches_with_ns(node, entity, None, ns))
 }
 
 // ── CmpOp ──
