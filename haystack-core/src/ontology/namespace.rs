@@ -344,6 +344,11 @@ impl DefNamespace {
     /// 3. A def whose symbol is the lowercased bare name. This is the Haystack
     ///    convention that writes `ph::Ahu` for the def `ahu`.
     ///
+    /// Only rung 1 looks at the library qualifier. Rungs 2 and 3 match on the
+    /// bare name alone, so `totallyMadeUp::Ahu` resolves to the def `ahu` just
+    /// as `ph::Ahu` does. That mirrors how the term was reduced before specs
+    /// were consulted at all, and Haystack def symbols are globally unique.
+    ///
     /// Returns `None` when the term matches nothing, which is what callers use
     /// to reject a filter rather than silently evaluate it as a non-match.
     pub fn resolve_spec_term(&self, term: &str) -> Option<SpecTerm<'_>> {

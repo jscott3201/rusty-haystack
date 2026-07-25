@@ -39,7 +39,14 @@ pub fn run(format: &str, output: Option<&str>, filter: Option<&str>) {
     // If filter is specified, apply it
     let output_grid = if let Some(filter_expr) = filter {
         use haystack_core::graph::EntityGraph;
-        let graph = EntityGraph::from_grid(&grid, None).unwrap_or_else(|e| {
+        use haystack_core::ontology::DefNamespace;
+        // The graph needs the ontology, not just the server: a spec-match filter
+        // (`ph::Ahu`) is refused outright without one. `import` already does this.
+        let ns = DefNamespace::load_standard().unwrap_or_else(|e| {
+            eprintln!("Error: failed to load ontology: {e}");
+            std::process::exit(1);
+        });
+        let graph = EntityGraph::from_grid(&grid, Some(ns.into())).unwrap_or_else(|e| {
             eprintln!("Error building graph: {}", e);
             std::process::exit(1);
         });

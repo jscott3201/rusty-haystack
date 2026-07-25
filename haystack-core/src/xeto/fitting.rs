@@ -25,7 +25,7 @@ pub type EntityResolver = dyn Fn(&HRef) -> Option<HDict>;
 pub fn fits(
     entity: &HDict,
     spec_qname: &str,
-    ns: &mut DefNamespace,
+    ns: &DefNamespace,
     resolver: Option<&EntityResolver>,
 ) -> bool {
     fits_explain(entity, spec_qname, ns, resolver).is_empty()
@@ -37,7 +37,7 @@ pub fn fits(
 pub fn fits_explain(
     entity: &HDict,
     spec_qname: &str,
-    ns: &mut DefNamespace,
+    ns: &DefNamespace,
     resolver: Option<&EntityResolver>,
 ) -> Vec<FitIssue> {
     // Resolution goes through the namespace so this agrees with filter
@@ -539,35 +539,35 @@ depends:[^lib:ph]
 
     #[test]
     fn entity_fits_with_all_markers() {
-        let mut ns = build_test_ns();
+        let ns = build_test_ns();
         let mut entity = HDict::new();
         entity.set("id", Kind::Ref(HRef::from_val("ahu-1")));
         entity.set("ahu", Kind::Marker);
         entity.set("equip", Kind::Marker);
 
-        assert!(fits(&entity, "ahu", &mut ns, None));
+        assert!(fits(&entity, "ahu", &ns, None));
     }
 
     #[test]
     fn entity_missing_mandatory_marker_fails() {
-        let mut ns = build_test_ns();
+        let ns = build_test_ns();
         let mut entity = HDict::new();
         entity.set("id", Kind::Ref(HRef::from_val("ahu-1")));
         entity.set("ahu", Kind::Marker);
         // Missing "equip" marker
 
-        assert!(!fits(&entity, "ahu", &mut ns, None));
+        assert!(!fits(&entity, "ahu", &ns, None));
     }
 
     #[test]
     fn fits_explain_returns_missing_marker_issues() {
-        let mut ns = build_test_ns();
+        let ns = build_test_ns();
         let mut entity = HDict::new();
         entity.set("id", Kind::Ref(HRef::from_val("ahu-1")));
         entity.set("ahu", Kind::Marker);
         // Missing "equip"
 
-        let issues = fits_explain(&entity, "ahu", &mut ns, None);
+        let issues = fits_explain(&entity, "ahu", &ns, None);
         assert!(!issues.is_empty());
 
         let has_equip_issue = issues
@@ -578,12 +578,12 @@ depends:[^lib:ph]
 
     #[test]
     fn fits_explain_empty_when_valid() {
-        let mut ns = build_test_ns();
+        let ns = build_test_ns();
         let mut entity = HDict::new();
         entity.set("ahu", Kind::Marker);
         entity.set("equip", Kind::Marker);
 
-        let issues = fits_explain(&entity, "ahu", &mut ns, None);
+        let issues = fits_explain(&entity, "ahu", &ns, None);
         assert!(issues.is_empty());
     }
 
@@ -1070,11 +1070,11 @@ depends:[^lib:ph]
 
     #[test]
     fn fits_with_resolver_none_works() {
-        let mut ns = build_test_ns();
+        let ns = build_test_ns();
         let mut entity = HDict::new();
         entity.set("ahu", Kind::Marker);
         entity.set("equip", Kind::Marker);
-        assert!(fits(&entity, "ahu", &mut ns, None));
+        assert!(fits(&entity, "ahu", &ns, None));
     }
 
     #[test]
