@@ -373,9 +373,12 @@ fn decode_datetime(m: &Map<String, Value>) -> Result<Kind, CodecError> {
             pos: 0,
             message: format!("invalid datetime: {e}"),
         })?;
+    // An absent `tz` means UTC, matching Zinc, Trio, and JSON v3. Leaving it
+    // empty made v4 the lone codec that decoded a bare `Z` to a nameless value,
+    // which then re-encoded through Zinc or Trio with a stray trailing space.
     let tz = match m.get("tz") {
-        Some(Value::String(t)) => t.clone(),
-        _ => String::new(),
+        Some(Value::String(t)) if !t.is_empty() => t.clone(),
+        _ => "UTC".to_string(),
     };
     Ok(Kind::DateTime(HDateTime::new(dt, tz)))
 }
