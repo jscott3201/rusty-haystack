@@ -38,7 +38,7 @@ pub fn run(file: &str, format: Option<&str>) {
         eprintln!("Error: failed to load ontology: {e}");
         std::process::exit(1);
     });
-    let graph = match EntityGraph::from_grid(&grid, Some(ns)) {
+    let graph = match EntityGraph::from_grid(&grid, Some(ns.into())) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error building graph: {}", e);

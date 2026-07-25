@@ -32,6 +32,14 @@ pub enum LibSource {
 ///
 /// Provides resolution, taxonomy queries, structural typing (`fits`),
 /// and validation. Loads defs from Trio format.
+///
+/// Cloning is a deep copy of every index and is not cheap — a standard
+/// namespace holds several hundred defs. Prefer sharing an
+/// [`Arc<DefNamespace>`](std::sync::Arc), which is what
+/// [`EntityGraph`](crate::graph::EntityGraph) stores. `Clone` exists so an
+/// `Arc` can be forked with `Arc::make_mut` when one holder needs to load or
+/// unload a library without disturbing the others.
+#[derive(Clone)]
 pub struct DefNamespace {
     /// Symbol -> Def mapping.
     defs: HashMap<String, Def>,
@@ -282,8 +290,25 @@ impl DefNamespace {
     /// Checks whether `entity` has all mandatory markers defined by
     /// `type_name` and its supertypes.
     pub fn fits(&self, entity: &HDict, type_name: &str) -> bool {
+        // Fail closed on a name this namespace has never seen. `mandatory_tags`
+        // returns an empty set for an unregistered name and `.all()` over an
+        // empty iterator is vacuously true, so without this guard a misspelled
+        // or not-yet-loaded type matches every entity — a typo in a filter would
+        // widen the result set to the whole graph instead of narrowing it.
+        if !self.has_type(type_name) {
+            return false;
+        }
         let mandatory = self.mandatory_tags(type_name);
         mandatory.iter().all(|tag| entity.has(tag))
+    }
+
+    /// Whether `name` is a def registered in this namespace.
+    ///
+    /// This is the check [`fits`](Self::fits) uses to reject unknown types, and
+    /// the one callers should use to tell "does not fit" apart from "no such
+    /// type" — `fits` collapses both to `false`.
+    pub fn has_type(&self, name: &str) -> bool {
+        self.taxonomy.contains(name)
     }
 
     /// Explain why an entity does or does not fit a type.
@@ -291,6 +316,14 @@ impl DefNamespace {
     /// Returns a list of `FitIssue` items; empty if entity fits.
     pub fn fits_explain(&self, entity: &HDict, type_name: &str) -> Vec<FitIssue> {
         let mut issues: Vec<FitIssue> = Vec::new();
+        // Distinguishing an unknown type from a genuine non-match is the whole
+        // point of this method — `fits` reports both as plain `false`.
+        if !self.has_type(type_name) {
+            issues.push(FitIssue::UnknownType {
+                spec: type_name.to_string(),
+            });
+            return issues;
+        }
         let mandatory = self.mandatory_tags(type_name);
         for tag in &mandatory {
             if entity.missing(tag) {
@@ -670,6 +703,86 @@ depends:[^lib:ph]
     fn is_a_direct_parent() {
         let ns = build_test_ns();
         assert!(ns.is_a("ahu", "equip"));
+    }
+
+    /// An entity that fits every *registered* type in the namespace. If `fits`
+    /// ever reports a match for an unregistered name, it will do so for this.
+    fn fits_everything() -> HDict {
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val("x")));
+        e.set("marker", Kind::Marker);
+        e.set("entity", Kind::Marker);
+        e.set("equip", Kind::Marker);
+        e.set("ahu", Kind::Marker);
+        e
+    }
+
+    #[test]
+    fn fits_is_false_for_an_unregistered_type() {
+        // `mandatory_tags` returns an empty set for an unknown name and
+        // `.all()` over an empty iterator is vacuously true, so this used to
+        // report a match for anything at all.
+        let ns = build_test_ns();
+        let e = fits_everything();
+        assert!(ns.fits(&e, "ahu"), "control: a known type still fits");
+
+        assert!(!ns.fits(&e, "bogus"));
+        assert!(!ns.fits(&e, "Ahu"), "lookup is case-sensitive");
+        assert!(!ns.fits(&e, ""));
+        assert!(!ns.fits(&HDict::new(), "bogus"));
+    }
+
+    #[test]
+    fn fits_is_false_for_every_type_in_an_empty_namespace() {
+        let ns = DefNamespace::new();
+        assert!(!ns.fits(&fits_everything(), "point"));
+        assert!(!ns.fits(&fits_everything(), "ahu"));
+    }
+
+    #[test]
+    fn has_type_separates_unknown_from_non_matching() {
+        let ns = build_test_ns();
+        assert!(ns.has_type("ahu"));
+        assert!(ns.has_type("point"));
+        assert!(!ns.has_type("bogus"));
+
+        // A site does not fit `ahu`, but `ahu` is a real type — `fits` collapses
+        // that distinction to `false` and `has_type` is how a caller recovers it.
+        let mut site = HDict::new();
+        site.set("site", Kind::Marker);
+        assert!(!ns.fits(&site, "ahu"));
+        assert!(ns.has_type("ahu"));
+    }
+
+    #[test]
+    fn fits_explain_reports_an_unknown_type() {
+        let ns = build_test_ns();
+        let issues = ns.fits_explain(&fits_everything(), "bogus");
+        assert_eq!(
+            issues,
+            vec![FitIssue::UnknownType {
+                spec: "bogus".to_string()
+            }]
+        );
+
+        // A registered type the entity does satisfy still explains cleanly.
+        assert!(ns.fits_explain(&fits_everything(), "ahu").is_empty());
+    }
+
+    #[test]
+    fn clone_is_independent_of_the_original() {
+        let mut ns = build_test_ns();
+        let snapshot = ns.clone();
+        assert_eq!(snapshot.len(), ns.len());
+        assert!(snapshot.has_type("ahu"));
+
+        // Warm the taxonomy's memo cache on the clone, then mutate the original.
+        assert!(snapshot.fits(&fits_everything(), "ahu"));
+        ns.unload_lib("phIoT").expect("phIoT unloads");
+
+        assert!(!ns.has_type("ahu"), "original lost the lib");
+        assert!(snapshot.has_type("ahu"), "clone kept it");
+        assert!(snapshot.fits(&fits_everything(), "ahu"));
     }
 
     #[test]

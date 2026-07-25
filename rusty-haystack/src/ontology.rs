@@ -1,6 +1,8 @@
 // Ontology bindings — DefNamespace with taxonomy, fits, and validation.
 // Also exposes Xeto Spec/Slot types, Def/Lib types, and library management.
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 
 use haystack_core::ontology::{Def, DefKind, DefNamespace, Lib};
@@ -329,7 +331,11 @@ impl PyLib {
 ///     ns.fits("ahu", "equip")  # True
 #[pyclass(name = "DefNamespace")]
 pub struct PyDefNamespace {
-    pub(crate) inner: DefNamespace,
+    /// Shared so that handing this namespace to a graph or server costs a
+    /// refcount bump instead of moving it out and leaving the Python object
+    /// hollow. The two mutating methods fork via `Arc::make_mut`, so a caller
+    /// that loads a library after sharing does not mutate anyone else's view.
+    pub(crate) inner: Arc<DefNamespace>,
 }
 
 #[pymethods]
@@ -337,7 +343,7 @@ impl PyDefNamespace {
     #[new]
     fn new() -> Self {
         Self {
-            inner: DefNamespace::new(),
+            inner: Arc::new(DefNamespace::new()),
         }
     }
 
@@ -346,7 +352,9 @@ impl PyDefNamespace {
     fn load_standard() -> PyResult<Self> {
         let inner = DefNamespace::load_standard()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     /// Check nominal subtype relationship: is `name` a subtype of `supertype`?
@@ -426,15 +434,21 @@ impl PyDefNamespace {
     // -- Xeto library management ------------------------------------------
 
     /// Load a Xeto library from source text. Returns list of spec qnames.
+    ///
+    /// If this namespace is shared with a graph or server, it forks first: the
+    /// caller sees the new library, the other holders keep the namespace they
+    /// were given.
     fn load_xeto(&mut self, source: &str, lib_name: &str) -> PyResult<Vec<String>> {
-        self.inner
+        Arc::make_mut(&mut self.inner)
             .load_xeto_str(source, lib_name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
     /// Unload a library by name.
+    ///
+    /// Forks a shared namespace, as [`load_xeto`](Self::load_xeto) does.
     fn unload_lib(&mut self, name: &str) -> PyResult<()> {
-        self.inner
+        Arc::make_mut(&mut self.inner)
             .unload_lib(name)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }

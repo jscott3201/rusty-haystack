@@ -1,6 +1,7 @@
 // EntityGraph — in-memory entity store with bitmap indexing and ref adjacency.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;
@@ -53,7 +54,7 @@ pub struct EntityGraph {
     /// Bidirectional ref adjacency for graph traversal.
     adjacency: RefAdjacency,
     /// Optional ontology namespace for spec-aware operations.
-    namespace: Option<DefNamespace>,
+    namespace: Option<Arc<DefNamespace>>,
     /// Monotonic version counter, incremented on every mutation.
     version: u64,
     /// Ordered list of mutations.
@@ -163,11 +164,61 @@ impl EntityGraph {
     }
 
     /// Create an entity graph with an ontology namespace.
-    pub fn with_namespace(ns: DefNamespace) -> Self {
+    ///
+    /// The namespace is stored behind an [`Arc`], so passing an existing
+    /// `Arc<DefNamespace>` shares one instance across graphs rather than
+    /// deep-copying several hundred defs per graph. A bare `DefNamespace` is
+    /// accepted too and gets wrapped.
+    pub fn with_namespace(ns: impl Into<Arc<DefNamespace>>) -> Self {
         Self {
-            namespace: Some(ns),
+            namespace: Some(ns.into()),
             ..Self::new()
         }
+    }
+
+    /// The attached ontology namespace, if any.
+    pub fn namespace(&self) -> Option<&DefNamespace> {
+        self.namespace.as_deref()
+    }
+
+    /// The attached namespace as a shared handle, for cheaply attaching the same
+    /// ontology to another graph.
+    pub fn namespace_arc(&self) -> Option<&Arc<DefNamespace>> {
+        self.namespace.as_ref()
+    }
+
+    /// Refuse a filter whose spec-match terms this graph's namespace cannot
+    /// resolve.
+    ///
+    /// Evaluation treats an unresolvable spec as a non-match, so a typo or an
+    /// unloaded library would quietly return zero rows and look like a legitimate
+    /// empty result. Queries have an error channel, so use it.
+    fn reject_unresolved_specs(
+        &self,
+        ast: &FilterNode,
+        ns: Option<&DefNamespace>,
+    ) -> Result<(), GraphError> {
+        let unresolved = crate::filter::unresolved_specs(ast, ns);
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+        Err(GraphError::Filter(if ns.is_some() {
+            format!(
+                "filter names {} that this graph's namespace does not define: {}",
+                if unresolved.len() == 1 {
+                    "a spec"
+                } else {
+                    "specs"
+                },
+                unresolved.join(", ")
+            )
+        } else {
+            format!(
+                "filter contains spec-match terms ({}) but this graph has no \
+                 namespace: build it with EntityGraph::with_namespace",
+                unresolved.join(", ")
+            )
+        }))
     }
 
     // ── Value Indexes ──
@@ -414,13 +465,15 @@ impl EntityGraph {
             }
         };
 
+        let ns = self.namespace();
+        self.reject_unresolved_specs(&ast, ns)?;
+
         // Phase 1: bitmap acceleration (tag + value index).
         let universe = RoaringBitmap::from_iter(self.id_map.values().map(|&id| id as u32));
         let candidates = bitmap_candidates(&ast, &self.tag_index, &self.value_index, &universe);
 
         // Phase 2: full filter evaluation.
         let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
-        let ns = self.namespace.as_ref();
 
         let mut results: Vec<&HDict>;
 
@@ -570,10 +623,11 @@ impl EntityGraph {
             Some(expr) => {
                 let ast = crate::filter::parse_filter(expr)
                     .map_err(|e| GraphError::Filter(e.to_string()))?;
-                // Same resolver and namespace as query(), so spec matching and
-                // ref-path traversal behave identically here.
+                // Same resolver, namespace, and spec checking as query(), so
+                // spec matching and ref-path traversal behave identically here.
                 let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
-                let ns = self.namespace.as_ref();
+                let ns = self.namespace();
+                self.reject_unresolved_specs(&ast, ns)?;
                 Ok(points
                     .into_iter()
                     .filter(|e| matches_with_ns(&ast, e, Some(&resolver), ns))
@@ -663,7 +717,10 @@ impl EntityGraph {
     /// Build an EntityGraph from a grid.
     ///
     /// Rows without a valid `id` Ref tag are silently skipped.
-    pub fn from_grid(grid: &HGrid, namespace: Option<DefNamespace>) -> Result<Self, GraphError> {
+    pub fn from_grid(
+        grid: &HGrid,
+        namespace: Option<Arc<DefNamespace>>,
+    ) -> Result<Self, GraphError> {
         let mut graph = match namespace {
             Some(ns) => Self::with_namespace(ns),
             None => Self::new(),
@@ -1854,6 +1911,108 @@ mod tests {
         // assertion alone passes even with an empty namespace.
         let mismatched = g.equip_points("e1", Some("ph::Ahu")).unwrap();
         assert_eq!(mismatched.len(), 0, "points must not fit ph::Ahu");
+    }
+
+    /// A graph with the standard namespace and one site, one equip, two points.
+    fn spec_graph() -> EntityGraph {
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+        let mut g = EntityGraph::with_namespace(ns);
+        g.add(make_site("s1")).unwrap();
+        g.add(make_equip("e1", "s1")).unwrap();
+        g.add(make_point("p1", "e1")).unwrap();
+        g.add(make_point("p2", "e1")).unwrap();
+        g
+    }
+
+    #[test]
+    fn query_rejects_a_spec_the_namespace_does_not_define() {
+        // Failing open is the wrong direction for a filter: an unregistered name
+        // has no mandatory tags, so `fits` was vacuously true and a typo returned
+        // the entire graph. Erroring is better than silently returning zero rows
+        // too — that reads as a legitimate empty result.
+        let g = spec_graph();
+        assert_eq!(g.read_all("ph::Point", 0).unwrap().len(), 2, "control");
+
+        let err = g.read_all("ph::Bogus", 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ph::Bogus"), "message names the spec: {msg}");
+        assert!(msg.contains("does not define"), "message says why: {msg}");
+
+        // Both sides of a conjunction are checked, not just the first.
+        assert!(g.read_all("point and ph::Bogus", 0).is_err());
+        assert!(g.read_all("ph::Bogus and point", 0).is_err());
+        assert!(g.read_all("ph::Bogus or point", 0).is_err());
+    }
+
+    #[test]
+    fn query_rejects_a_spec_term_when_no_namespace_is_attached() {
+        // Without a namespace every spec term is unresolvable, so the same rule
+        // applies — but the message has to point at the missing namespace rather
+        // than blame the spec name.
+        let mut g = EntityGraph::new();
+        g.add(make_point("p1", "e1")).unwrap();
+
+        let err = g.read_all("ph::Point", 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no namespace"), "{msg}");
+        assert!(msg.contains("with_namespace"), "{msg}");
+
+        // Filters without a spec term are unaffected.
+        assert_eq!(g.read_all("point", 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn equip_points_rejects_an_unknown_spec_like_query_does() {
+        let g = spec_graph();
+        assert_eq!(g.equip_points("e1", Some("ph::Point")).unwrap().len(), 2);
+        assert!(g.equip_points("e1", Some("ph::Bogus")).is_err());
+    }
+
+    #[test]
+    fn namespace_is_shared_not_consumed() {
+        // Two graphs built from one Arc must point at the same allocation, so a
+        // caller can attach one ontology to many graphs without deep-copying it.
+        let ns: Arc<DefNamespace> =
+            Arc::new(DefNamespace::load_standard().expect("bundled defs load"));
+        let before = Arc::strong_count(&ns);
+
+        let g1 = EntityGraph::with_namespace(Arc::clone(&ns));
+        let g2 = EntityGraph::with_namespace(Arc::clone(&ns));
+        assert_eq!(Arc::strong_count(&ns), before + 2);
+
+        assert!(!ns.is_empty(), "the caller's handle is still populated");
+        assert!(Arc::ptr_eq(g1.namespace_arc().unwrap(), &ns));
+        assert!(Arc::ptr_eq(g2.namespace_arc().unwrap(), &ns));
+        assert_eq!(g1.namespace().unwrap().len(), ns.len());
+    }
+
+    #[test]
+    fn mutating_a_shared_namespace_forks_it() {
+        // `Arc::make_mut` is how the Python wrapper keeps load/unload working on
+        // a namespace that has already been handed to a graph: with a second
+        // holder it clones first, so the graph keeps the ontology it was built
+        // with instead of having a library appear or vanish underneath it.
+        let mut ns: Arc<DefNamespace> =
+            Arc::new(DefNamespace::load_standard().expect("bundled defs load"));
+        let g = EntityGraph::with_namespace(Arc::clone(&ns));
+        let graph_ptr = Arc::as_ptr(g.namespace_arc().unwrap());
+
+        Arc::make_mut(&mut ns)
+            .load_xeto_str("Widget : Dict {\n  widget: Marker\n}\n", "forkTestLib")
+            .expect("xeto lib loads");
+
+        assert!(
+            !std::ptr::eq(Arc::as_ptr(&ns), graph_ptr),
+            "the writer must fork away from the shared allocation"
+        );
+        assert!(ns.get_spec("forkTestLib::Widget").is_some());
+        assert!(
+            g.namespace()
+                .unwrap()
+                .get_spec("forkTestLib::Widget")
+                .is_none(),
+            "the graph must keep the namespace it was given"
+        );
     }
 
     #[test]

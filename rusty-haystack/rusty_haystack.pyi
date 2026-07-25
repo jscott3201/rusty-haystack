@@ -509,14 +509,16 @@ class EntityGraph:
     def with_namespace(ns: DefNamespace) -> EntityGraph:
         """Create a graph with an attached ontology namespace for validation.
 
-        Warning: consumes the namespace — the original object becomes empty.
+        The namespace is shared, not consumed: ns stays fully usable and can be
+        attached to further graphs. Calling ns.load_xeto() or ns.unload_lib()
+        afterwards forks it, leaving graphs already built from it unchanged.
         """
         ...
     @staticmethod
     def from_grid(grid: HGrid, ns: DefNamespace | None = None) -> EntityGraph:
         """Bulk-load entities from an HGrid. Each row must have an 'id' Ref tag.
 
-        Warning: if ns is provided, it is consumed.
+        The namespace, if given, is shared rather than consumed.
         """
         ...
     def add(self, entity: HDict) -> str:
@@ -1018,8 +1020,8 @@ class HisStore:
 class HaystackServer:
     """Embedded Haystack HTTP API server with builder-pattern configuration.
 
-    Note: with_namespace/with_auth consume their argument
-    (the original Python object becomes empty after the call).
+    Note: with_auth consumes its argument (the original AuthManager becomes
+    empty after the call). with_namespace does not.
 
     Examples:
         server = HaystackServer(SharedGraph())
@@ -1029,7 +1031,12 @@ class HaystackServer:
     """
     def __init__(self, graph: SharedGraph) -> None: ...
     def with_namespace(self, ns: DefNamespace) -> None:
-        """Set the ontology namespace. Warning: consumes the namespace."""
+        """Set the ontology namespace for validation and spec management.
+
+        The namespace is copied into the server, so ns stays usable. The server
+        keeps its own mutable copy because the lib load/unload endpoints mutate
+        it; later changes on either side do not affect the other.
+        """
         ...
     def with_auth(self, auth: AuthManager) -> None:
         """Set the auth manager. Warning: consumes the auth manager."""

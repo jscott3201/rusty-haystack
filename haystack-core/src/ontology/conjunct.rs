@@ -6,6 +6,7 @@ use std::collections::HashMap;
 ///
 /// A conjunct like `"hot-water"` decomposes into `["hot", "water"]`.
 /// Components are the individual marker tags separated by `"-"`.
+#[derive(Debug, Clone)]
 pub struct ConjunctIndex {
     /// conjunct name -> component tag list
     parts: HashMap<String, Vec<String>>,

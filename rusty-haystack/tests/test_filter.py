@@ -212,3 +212,24 @@ class TestSpecMatchNamespace:
     def test_plain_filters_need_no_namespace(self):
         assert rh.matches_filter("point", self._point()) is True
         assert rh.matches_filter("equip", self._point()) is False
+
+    def test_unregistered_spec_raises_rather_than_matching_everything(self):
+        # `fits` used to return True for any name it had never heard of, because
+        # an unregistered type has no mandatory tags and `all()` over an empty
+        # set is vacuously true. A typo silently matched every entity.
+        ns = rh.DefNamespace.load_standard()
+        with pytest.raises(rh.FilterError):
+            rh.matches_filter("ph::Bogus", self._point(), ns)
+        with pytest.raises(rh.FilterError):
+            rh.matches_filter("zz::Nope", self._point(), ns)
+
+    def test_unregistered_spec_error_names_the_spec(self):
+        ns = rh.DefNamespace.load_standard()
+        with pytest.raises(rh.FilterError, match="ph::Bogus"):
+            rh.matches_filter("ph::Bogus", self._point(), ns)
+
+    def test_registered_spec_that_does_not_fit_is_false_not_an_error(self):
+        # The error is reserved for "no such spec". A real spec the entity
+        # simply does not satisfy must still answer False.
+        ns = rh.DefNamespace.load_standard()
+        assert rh.matches_filter("ph::Ahu", self._point(), ns) is False

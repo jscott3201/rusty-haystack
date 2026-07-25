@@ -1,6 +1,8 @@
 // Graph bindings — EntityGraph with CRUD, query, and ref traversal.
 // Also SharedGraph (thread-safe) and GraphDiff/DiffOp change tracking.
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -180,21 +182,22 @@ impl PyEntityGraph {
     }
 
     /// Create a graph with an attached ontology namespace for validation.
+    ///
+    /// The namespace is shared, not consumed — `ns` stays fully usable.
     #[staticmethod]
-    fn with_namespace(ns: &mut PyDefNamespace) -> Self {
-        // Take the namespace out to avoid Clone (DefNamespace doesn't implement Clone)
-        let taken = std::mem::replace(&mut ns.inner, haystack_core::ontology::DefNamespace::new());
+    fn with_namespace(ns: &PyDefNamespace) -> Self {
         Self {
-            inner: EntityGraph::with_namespace(taken),
+            inner: EntityGraph::with_namespace(Arc::clone(&ns.inner)),
         }
     }
 
     /// Bulk-load entities from an HGrid. Each row must have an 'id' Ref tag.
+    ///
+    /// The namespace, if given, is shared rather than consumed.
     #[staticmethod]
     #[pyo3(signature = (grid, ns = None))]
-    fn from_grid(grid: &PyHGrid, ns: Option<&mut PyDefNamespace>) -> PyResult<Self> {
-        let namespace = ns
-            .map(|n| std::mem::replace(&mut n.inner, haystack_core::ontology::DefNamespace::new()));
+    fn from_grid(grid: &PyHGrid, ns: Option<&PyDefNamespace>) -> PyResult<Self> {
+        let namespace = ns.map(|n| Arc::clone(&n.inner));
         EntityGraph::from_grid(&grid.inner, namespace)
             .map(|g| Self { inner: g })
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))
@@ -458,9 +461,8 @@ impl PySharedGraph {
     /// Create a SharedGraph from an HGrid.
     #[staticmethod]
     #[pyo3(signature = (grid, ns = None))]
-    fn from_grid(grid: &PyHGrid, ns: Option<&mut PyDefNamespace>) -> PyResult<Self> {
-        let namespace = ns
-            .map(|n| std::mem::replace(&mut n.inner, haystack_core::ontology::DefNamespace::new()));
+    fn from_grid(grid: &PyHGrid, ns: Option<&PyDefNamespace>) -> PyResult<Self> {
+        let namespace = ns.map(|n| Arc::clone(&n.inner));
         let eg = EntityGraph::from_grid(&grid.inner, namespace)
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))?;
         Ok(Self {

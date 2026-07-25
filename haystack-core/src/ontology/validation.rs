@@ -53,6 +53,12 @@ pub enum FitIssue {
         /// Valid options.
         valid_options: Vec<String>,
     },
+    /// The named type is not registered in the namespace, so nothing can be said
+    /// about whether the entity fits it. Usually a typo or an unloaded library.
+    UnknownType {
+        /// The unregistered type or spec name.
+        spec: String,
+    },
 }
 
 /// A validation problem found in an entity or graph.
@@ -69,6 +75,9 @@ pub struct ValidationIssue {
 impl std::fmt::Display for FitIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            FitIssue::UnknownType { spec } => {
+                write!(f, "unknown type '{spec}': not registered in this namespace")
+            }
             FitIssue::MissingMarker { tag, spec } => {
                 write!(f, "missing mandatory marker '{tag}' for spec '{spec}'")
             }
