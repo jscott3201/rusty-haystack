@@ -34,13 +34,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings
 
+  # Anything targeting main runs the full three-OS matrix. Everything else
+  # (dev PRs, dev pushes) tests on ubuntu alone, which takes the wall clock
+  # from ~2-3 minutes down to under one — windows is 2-4x slower than the
+  # other runners and sets the pace for the whole workflow.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON((github.base_ref == 'main' || github.ref == 'refs/heads/main') && '["ubuntu-latest", "macos-latest", "windows-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

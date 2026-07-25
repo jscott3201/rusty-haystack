@@ -1,0 +1,26 @@
+name: Audit
+
+# Advisories get published against code that has not changed — RUSTSEC-2026-0204
+# turned the deny gate red without a single commit touching the lockfile. CI only
+# catches that on the next push, so this runs the same check on a timer.
+#
+# GitHub fires scheduled workflows from the default branch only, so this file has
+# to reach main before the cron starts running at all.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  deny:
+    name: Cargo Deny (${{ matrix.branch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [main, dev]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
