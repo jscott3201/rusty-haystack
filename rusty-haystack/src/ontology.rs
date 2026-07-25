@@ -325,10 +325,15 @@ impl PyLib {
 /// Provides fits checking, mandatory tag computation, and taxonomy traversal
 /// for the Haystack 4 ontology.
 ///
+/// A namespace is shared, not consumed, when handed to a graph or server, so
+/// one load_standard() can back any number of them.
+///
 /// Examples:
-///     ns = DefNamespace()
-///     ns.load_lib("phIoT")
-///     ns.fits("ahu", "equip")  # True
+///     ns = DefNamespace.load_standard()
+///     ahu = HDict({"id": Ref("a1"), "ahu": Marker(), "equip": Marker()})
+///     ns.fits(ahu, "ahu")     # True  -- entity vs. type name
+///     ns.is_a("ahu", "equip") # True  -- type vs. type
+///     ns.fits(ahu, "bogus")   # False -- unregistered types never fit
 #[pyclass(name = "DefNamespace")]
 pub struct PyDefNamespace {
     /// Shared so that handing this namespace to a graph or server costs a

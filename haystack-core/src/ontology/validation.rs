@@ -1,7 +1,12 @@
 // Validation issue types for ontology and graph validation.
 
 /// Describes why an entity does not fit a type.
+///
+/// Non-exhaustive: new failure modes get added as the fitting rules grow, and
+/// that should not break a downstream `match`. `UnknownType` was added after
+/// `fits` stopped reporting unregistered types as a match.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FitIssue {
     /// Entity is missing a mandatory marker tag.
     MissingMarker {

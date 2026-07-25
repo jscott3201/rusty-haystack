@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::data::HDict;
 use crate::kinds::{HRef, Kind};
-use crate::ontology::DefNamespace;
 use crate::ontology::validation::FitIssue;
+use crate::ontology::{DefNamespace, SpecTerm};
 
 use super::spec::Spec;
 
@@ -40,39 +40,39 @@ pub fn fits_explain(
     ns: &mut DefNamespace,
     resolver: Option<&EntityResolver>,
 ) -> Vec<FitIssue> {
-    // Try to look up as a Xeto spec first.
-    // If the spec is not found in our local registry, fall back to
-    // the DefNamespace for traditional Haystack 4 def-based fitting.
-    let spec = resolve_spec(spec_qname, ns);
-    match spec {
-        Some(spec) => explain_against_spec_with_specs(entity, &spec, &HashMap::new(), resolver),
-        None => {
-            // Fall back to plain def-based fitting
-            // Strip any lib:: prefix to get bare def name
-            let bare_name = spec_qname.split("::").last().unwrap_or(spec_qname);
-            ns.fits_explain(entity, bare_name)
+    // Resolution goes through the namespace so this agrees with filter
+    // evaluation about what a `lib::Name` term means. Doing its own bare-name
+    // split here is what made `xeto::fits(e, "ph::Ahu")` disagree with
+    // `matches_with_ns` on the same string.
+    match ns.resolve_spec_term(spec_qname) {
+        Some(SpecTerm::Spec(spec)) => {
+            explain_against_spec_with_specs(entity, spec, ns.specs_map(), resolver)
         }
+        Some(SpecTerm::Def(name)) => match synthetic_spec_for_def(&name, spec_qname, ns) {
+            Some(spec) => explain_against_spec_with_specs(entity, &spec, &HashMap::new(), resolver),
+            None => ns.fits_explain(entity, &name),
+        },
+        None => vec![FitIssue::UnknownType {
+            spec: spec_qname.to_string(),
+        }],
     }
 }
 
-/// Attempt to resolve a spec from the DefNamespace.
+/// Build a synthetic Spec from a def's mandatory markers, so a def-backed name
+/// can be checked by the same slot machinery a real Xeto spec goes through.
 ///
-/// This builds a synthetic Spec from the def's mandatory markers
-/// and slot information when available.
-fn resolve_spec(spec_qname: &str, ns: &mut DefNamespace) -> Option<Spec> {
-    // Extract bare name
-    let bare_name = spec_qname.split("::").last().unwrap_or(spec_qname);
-
-    // Check if the def exists in the namespace
-    let def = ns.get_def(bare_name)?;
+/// `def_name` is a taxonomy symbol already resolved by
+/// [`DefNamespace::resolve_spec_term`]; `qname` is the term as the caller wrote
+/// it, kept only for the resulting spec's identity.
+fn synthetic_spec_for_def(def_name: &str, qname: &str, ns: &DefNamespace) -> Option<Spec> {
+    let def = ns.get_def(def_name)?;
     let doc = def.doc.clone();
     let lib = def.lib.clone();
 
-    // Build a synthetic Spec from mandatory markers
-    let mandatory = ns.mandatory_tags(bare_name);
+    let mandatory = ns.mandatory_tags(def_name);
     let mut spec = Spec {
-        qname: spec_qname.to_string(),
-        name: bare_name.to_string(),
+        qname: qname.to_string(),
+        name: def_name.to_string(),
         lib,
         base: None,
         meta: std::collections::HashMap::new(),
@@ -101,6 +101,23 @@ fn resolve_spec(spec_qname: &str, ns: &mut DefNamespace) -> Option<Spec> {
 #[cfg(test)]
 fn explain_against_spec(entity: &HDict, spec: &Spec) -> Vec<FitIssue> {
     explain_against_spec_with_specs(entity, spec, &HashMap::new(), None)
+}
+
+/// Check an entity against an already-resolved Spec, given the namespace's own
+/// spec map for walking the inheritance chain.
+///
+/// This is the entry point [`DefNamespace::fits_spec_term`] uses once it has
+/// resolved a filter term to a Xeto spec, so filter evaluation and Xeto fitting
+/// share one implementation.
+///
+/// [`DefNamespace::fits_spec_term`]: crate::ontology::DefNamespace::fits_spec_term
+pub(crate) fn explain_against_spec_in(
+    entity: &HDict,
+    spec: &Spec,
+    specs: &HashMap<String, Spec>,
+    resolver: Option<&EntityResolver>,
+) -> Vec<FitIssue> {
+    explain_against_spec_with_specs(entity, spec, specs, resolver)
 }
 
 /// Check an entity against a resolved Spec, with access to a specs map for

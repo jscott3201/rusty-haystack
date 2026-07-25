@@ -110,8 +110,8 @@ impl PyHisStore {
 ///
 /// Builder-pattern configuration: set graph, namespace, auth,
 /// then call run() (blocking) or run_background() (returns immediately).
-/// Note: with_namespace/with_auth consume their argument
-/// (the original Python object becomes empty after the call).
+/// Note: with_auth consumes its argument (the original AuthManager becomes
+/// empty after the call). with_namespace does not — it copies.
 ///
 /// Examples:
 ///     server = HaystackServer(graph)

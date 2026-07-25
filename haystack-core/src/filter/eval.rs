@@ -45,19 +45,10 @@ pub fn matches_with_ns<'a>(
                 || matches_with_ns(right, entity, resolve_ref, namespace)
         }
         FilterNode::SpecMatch(spec) => match namespace {
-            Some(ns) => ns.fits(entity, &spec_type_name(spec)),
+            Some(ns) => ns.fits_spec_term(entity, spec),
             None => false,
         },
     }
-}
-
-/// Reduce a qualified spec name to the taxonomy key it is looked up under:
-/// `ph::Ahu` -> `ahu`, `ph.equips::Ahu` -> `ahu`.
-///
-/// Shared by evaluation and by [`unresolved_specs`] so the two cannot disagree
-/// about which name a spec term resolves to.
-pub fn spec_type_name(spec: &str) -> String {
-    spec.rsplit("::").next().unwrap_or(spec).to_lowercase()
 }
 
 /// Collect the spec-match terms in `node` that `namespace` cannot resolve.
@@ -66,6 +57,9 @@ pub fn spec_type_name(spec: &str) -> String {
 /// indistinguishable from a real one — a typo silently returns nothing and an
 /// unloaded library silently returns nothing. Callers that can surface an error
 /// should run this first and refuse the filter instead.
+///
+/// Resolution is [`DefNamespace::resolve_spec_term`], the same call evaluation
+/// makes, so this cannot disagree with it about what a term means.
 ///
 /// With `namespace` set to `None`, every spec term is unresolvable: without a
 /// namespace there is nothing to resolve against.
@@ -78,7 +72,7 @@ pub fn unresolved_specs(node: &FilterNode, namespace: Option<&DefNamespace>) -> 
 fn collect_unresolved(node: &FilterNode, namespace: Option<&DefNamespace>, out: &mut Vec<String>) {
     match node {
         FilterNode::SpecMatch(spec) => {
-            let known = namespace.is_some_and(|ns| ns.has_type(&spec_type_name(spec)));
+            let known = namespace.is_some_and(|ns| ns.resolve_spec_term(spec).is_some());
             if !known && !out.contains(spec) {
                 out.push(spec.clone());
             }

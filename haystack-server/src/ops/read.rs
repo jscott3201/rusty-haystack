@@ -85,7 +85,9 @@ fn read_by_filter(request_grid: &HGrid, state: &SharedState) -> Result<HGrid, Ha
         let local_grid = state
             .graph
             .read_filter(filter, limit)
-            .map_err(|e| HaystackError::bad_request(format!("filter error: {e}")))?;
+            // `GraphError::Filter` already renders as "filter error: ...", so
+            // adding another prefix here produced "filter error: filter error:".
+            .map_err(|e| HaystackError::bad_request(e.to_string()))?;
         local_grid.rows.into_iter().map(Arc::new).collect()
     };
 

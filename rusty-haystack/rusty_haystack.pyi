@@ -615,11 +615,19 @@ class SharedGraph:
     """Thread-safe shared entity graph backed by Arc<RwLock<EntityGraph>>.
 
     Safe for concurrent reads and serialized writes.
+
+    Note: the constructor consumes its EntityGraph argument (the original is
+    left empty). An entity graph is mutable state and cannot be shared by
+    copying. A DefNamespace attached to it is shared, not consumed, and the
+    SharedGraph inherits it.
     """
     def __init__(self, graph: EntityGraph | None = None) -> None: ...
     @staticmethod
     def from_grid(grid: HGrid, ns: DefNamespace | None = None) -> SharedGraph:
-        """Create a SharedGraph from an HGrid."""
+        """Create a SharedGraph from an HGrid.
+
+        The namespace, if given, is shared rather than consumed.
+        """
         ...
     def add(self, entity: HDict) -> str:
         """Add an entity. Returns the ref value string."""

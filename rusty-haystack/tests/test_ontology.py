@@ -270,6 +270,37 @@ class TestNamespaceSharing:
         assert ns.get_spec("forkTestLib::Widget") is not None, "caller sees it"
         assert len(g.read("ph::Point")) == 1, "graph is unaffected"
 
+    def test_mutating_a_shared_namespace_does_not_raise(self):
+        # `Arc::get_mut().unwrap()` would panic here instead of forking, because
+        # the graph holds a second reference. Kept separate from the assertions
+        # above so the failure mode is unambiguous.
+        ns = rh.DefNamespace.load_standard()
+        rh.EntityGraph.with_namespace(ns)
+        rh.EntityGraph.with_namespace(ns)
+
+        ns.load_xeto("Gadget : Dict {\n  gadget: Marker\n}\n", "getMutTestLib")
+        assert ns.get_spec("getMutTestLib::Gadget") is not None
+
+    def test_graph_keeps_working_after_the_caller_drops_the_namespace(self):
+        # If `with_namespace` moved rather than shared, dropping the Python
+        # handle would be fine — but if it borrowed without owning, this breaks.
+        ns = rh.DefNamespace.load_standard()
+        g = rh.EntityGraph.with_namespace(ns)
+        g.add(rh.HDict({"id": rh.Ref("p1"), "point": rh.Marker()}))
+        del ns
+
+        assert len(g.read("ph::Point")) == 1
+
+    def test_server_with_namespace_does_not_empty_it(self):
+        # The same hollowing bug lived in HaystackServer.with_namespace.
+        ns = rh.DefNamespace.load_standard()
+        before = len(ns)
+
+        server = rh.server.HaystackServer(rh.SharedGraph())
+        server.with_namespace(ns)
+        assert len(ns) == before, "namespace was emptied by server.with_namespace"
+        assert ns.contains("site")
+
 
 class TestFitsUnknownType:
     """fits used to return True for any name not in the taxonomy."""
@@ -300,3 +331,42 @@ class TestFitsUnknownType:
         assert len(g.read("ph::Point")) == 1
         with pytest.raises((ValueError, rh.GraphError)):
             g.read("ph::Bogus")
+
+
+class TestSpecTermResolution:
+    """A `lib::Name` term may name a Xeto spec or a def, in either casing."""
+
+    def test_xeto_spec_names_resolve(self, namespace):
+        # Specs are keyed by qname in their own map and never enter the
+        # taxonomy, so a taxonomy-only lookup rejected every one of them.
+        specs = namespace.specs(None)
+        assert len(specs) > 0
+
+        g = rh.EntityGraph.with_namespace(namespace)
+        g.add(rh.HDict({"id": rh.Ref("p1"), "point": rh.Marker()}))
+        for spec in specs:
+            # Must not raise: the namespace demonstrably holds this name.
+            g.read(spec.qname)
+
+    def test_camel_case_def_names_resolve(self, namespace):
+        # Restricted to symbols the filter grammar can carry in a spec term.
+        # Conjuncts (`fuelOil-input`) and feature defs (`op:watchSub`, `lib:phIoT`)
+        # are excluded because `-` reads as an operator and `:` as a qualifier
+        # separator — a parser limitation, unrelated to name resolution.
+        camel = [
+            d.symbol
+            for d in namespace.defs()
+            if any(c.isupper() for c in d.symbol) and d.symbol.replace("_", "").isalnum()
+        ]
+        assert len(camel) > 200, f"expected most camelCase defs to be testable, got {len(camel)}"
+
+        point = rh.HDict({"id": rh.Ref("p1"), "point": rh.Marker()})
+        for name in camel:
+            # Lowercasing the bare name unconditionally made these unresolvable.
+            rh.matches_filter(f"ph::{name}", point, namespace)
+
+    def test_capitalised_haystack_spelling_still_resolves(self, namespace):
+        point = rh.HDict({"id": rh.Ref("p1"), "point": rh.Marker()})
+        assert rh.matches_filter("ph::Point", point, namespace) is True
+        assert rh.matches_filter("ph::point", point, namespace) is True
+        assert rh.matches_filter("ph::Ahu", point, namespace) is False

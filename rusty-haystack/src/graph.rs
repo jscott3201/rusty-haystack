@@ -446,6 +446,12 @@ impl PySharedGraph {
 #[pymethods]
 impl PySharedGraph {
     /// Create a new SharedGraph wrapping an EntityGraph.
+    ///
+    /// Warning: consumes `graph` — the original EntityGraph is left empty. A
+    /// SharedGraph takes ownership of the entities, and unlike a namespace an
+    /// entity graph is mutable state that cannot meaningfully be shared by
+    /// copying, so this one really does move. Attach the namespace instead if
+    /// you want both: it is shared, and the SharedGraph inherits it.
     #[new]
     #[pyo3(signature = (graph = None))]
     fn new(graph: Option<&mut PyEntityGraph>) -> Self {
