@@ -3,11 +3,12 @@
 // ref traversal -> validate -> encode/decode round-trip through
 // Zinc, JSON v4, JSON v3, and Trio.
 
+use chrono::{FixedOffset, TimeZone};
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::filter;
 use haystack_core::graph::EntityGraph;
-use haystack_core::kinds::{HRef, Kind, Number};
+use haystack_core::kinds::{HDateTime, HRef, Kind, Number};
 use haystack_core::ontology::DefNamespace;
 
 #[test]
@@ -393,4 +394,232 @@ fn ontology_fits_and_validation_in_graph() {
         !missing_marker_issues.is_empty(),
         "Should find missing marker issues for invalid ahu"
     );
+}
+
+// ── Cross-codec DateTime conformance ──
+//
+// The per-codec round-trip tests encode and decode with the *same* codec, so
+// they check an encoder against its own decoder rather than against a second
+// implementation. DateTime is the kind most prone to drift between them —
+// Niagara and SkySpark have historically disagreed on offset formatting, on
+// `Z` versus `+00:00` for UTC, and on the tz-name suffix — so these walk a
+// value through every ordered pair of codecs instead.
+
+/// Codecs that preserve values across an encode/decode round trip. CSV is
+/// excluded: it flattens values to display strings and cannot round-trip.
+const ROUND_TRIP_CODECS: &[&str] = &[
+    "text/zinc",
+    "application/json",
+    "application/json;v=3",
+    "text/trio",
+];
+
+fn grid_with_datetime(ts: &HDateTime) -> HGrid {
+    let mut entity = HDict::new();
+    entity.set("id", Kind::Ref(HRef::from_val("p1")));
+    entity.set("ts", Kind::DateTime(ts.clone()));
+    HGrid::from_parts(
+        HDict::new(),
+        vec![HCol::new("id"), HCol::new("ts")],
+        vec![entity],
+    )
+}
+
+/// Re-encode `grid` with `mime` and decode it back.
+fn hop(grid: &HGrid, mime: &str) -> HGrid {
+    let codec = codec_for(mime).unwrap_or_else(|| panic!("no codec for {mime}"));
+    let encoded = codec
+        .encode_grid(grid)
+        .unwrap_or_else(|e| panic!("encode failed for {mime}: {e}"));
+    codec
+        .decode_grid(&encoded)
+        .unwrap_or_else(|e| panic!("decode failed for {mime}: {e}\n--- payload ---\n{encoded}"))
+}
+
+fn datetime_of(grid: &HGrid, ctx: &str) -> HDateTime {
+    let row = grid
+        .rows
+        .first()
+        .unwrap_or_else(|| panic!("{ctx}: grid lost its only row"));
+    match row.get("ts") {
+        Some(Kind::DateTime(dt)) => dt.clone(),
+        other => panic!("{ctx}: `ts` is {other:?}, expected a DateTime"),
+    }
+}
+
+#[test]
+fn datetime_survives_every_cross_codec_hop() {
+    let cases: Vec<(&str, HDateTime)> = vec![
+        (
+            "negative offset (winter, New_York)",
+            HDateTime::new(
+                FixedOffset::west_opt(5 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 1, 1, 8, 12, 5)
+                    .unwrap(),
+                "New_York",
+            ),
+        ),
+        (
+            "negative offset (summer, New_York)",
+            HDateTime::new(
+                FixedOffset::west_opt(4 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 7, 1, 8, 12, 5)
+                    .unwrap(),
+                "New_York",
+            ),
+        ),
+        (
+            "positive offset (Tokyo)",
+            HDateTime::new(
+                FixedOffset::east_opt(9 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 3, 15, 23, 45, 30)
+                    .unwrap(),
+                "Tokyo",
+            ),
+        ),
+        (
+            "zero offset (UTC)",
+            HDateTime::new(
+                FixedOffset::east_opt(0)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 6, 30, 0, 0, 0)
+                    .unwrap(),
+                "UTC",
+            ),
+        ),
+    ];
+
+    for (label, original) in &cases {
+        for from in ROUND_TRIP_CODECS {
+            for to in ROUND_TRIP_CODECS {
+                let ctx = format!("{label}: {from} -> {to}");
+
+                let first = hop(&grid_with_datetime(original), from);
+                let after_first = datetime_of(&first, &ctx);
+                assert_eq!(&after_first, original, "{ctx}: lost on the first hop");
+
+                let second = hop(&first, to);
+                let after_second = datetime_of(&second, &ctx);
+
+                // Both fields matter independently: the instant can survive
+                // while the tz name is dropped, which still breaks a consumer
+                // that renders local time.
+                assert_eq!(
+                    after_second.dt, original.dt,
+                    "{ctx}: instant changed across codecs"
+                );
+                assert_eq!(
+                    after_second.tz_name, original.tz_name,
+                    "{ctx}: timezone name changed across codecs"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn datetime_utc_offset_spelling_is_stable_across_codecs() {
+    // UTC is the case implementations most often disagree on, writing `Z` in
+    // one codec and `+00:00` in another. Whichever spelling each encoder picks,
+    // decoding it elsewhere has to land on the same instant and tz name.
+    let utc = HDateTime::new(
+        FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2024, 6, 30, 12, 0, 0)
+            .unwrap(),
+        "UTC",
+    );
+
+    for mime in ROUND_TRIP_CODECS {
+        let codec = codec_for(mime).unwrap();
+        let encoded = codec.encode_grid(&grid_with_datetime(&utc)).unwrap();
+
+        for other in ROUND_TRIP_CODECS {
+            let ctx = format!("UTC written by {mime}, re-encoded via {other}");
+            let decoded = codec.decode_grid(&encoded).unwrap();
+            let round_tripped = datetime_of(&hop(&decoded, other), &ctx);
+            assert_eq!(round_tripped, utc, "{ctx}");
+        }
+    }
+}
+
+#[test]
+fn utc_z_from_external_producers_decodes_everywhere() {
+    // Round-trip tests can only cover what our own encoders emit, and all four
+    // write UTC as `+00:00`. Niagara and SkySpark emit `Z`, so the decode side
+    // needs hand-written payloads or the interop gap is invisible. JSON v3 used
+    // to reject the `Z UTC` form outright: its offset scan only recognised a
+    // trailing `Z`, so a following tz name pushed the whole string into the
+    // datetime parser.
+    let expected = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2024, 6, 30, 12, 0, 0)
+        .unwrap();
+
+    let payloads: &[(&str, &str, &str)] = &[
+        (
+            "text/zinc",
+            "Z with tz name",
+            "ver:\"3.0\"\nts\n2024-06-30T12:00:00Z UTC\n",
+        ),
+        (
+            "text/zinc",
+            "bare Z",
+            "ver:\"3.0\"\nts\n2024-06-30T12:00:00Z\n",
+        ),
+        (
+            "application/json;v=3",
+            "Z with tz name",
+            "{\"meta\":{\"ver\":\"3.0\"},\"cols\":[{\"name\":\"ts\"}],\"rows\":[{\"ts\":\"t:2024-06-30T12:00:00Z UTC\"}]}",
+        ),
+        (
+            "application/json",
+            "Z with tz field",
+            "{\"_kind\":\"grid\",\"cols\":[{\"name\":\"ts\"}],\"rows\":[{\"ts\":{\"_kind\":\"dateTime\",\"tz\":\"UTC\",\"val\":\"2024-06-30T12:00:00Z\"}}]}",
+        ),
+        (
+            "text/trio",
+            "Z with tz name",
+            "ts: 2024-06-30T12:00:00Z UTC\n",
+        ),
+    ];
+
+    for (mime, shape, payload) in payloads {
+        let ctx = format!("{mime} / {shape}");
+        let grid = codec_for(mime)
+            .unwrap_or_else(|| panic!("no codec for {mime}"))
+            .decode_grid(payload)
+            .unwrap_or_else(|e| panic!("{ctx}: decode failed: {e}"));
+        let ts = datetime_of(&grid, &ctx);
+        assert_eq!(ts.dt, expected, "{ctx}: wrong instant");
+
+        // Re-encoding must then agree with every other codec, so a `Z` that
+        // arrived from outside survives onward conversion.
+        for onward in ROUND_TRIP_CODECS {
+            let ctx2 = format!("{ctx} -> {onward}");
+            assert_eq!(
+                datetime_of(&hop(&grid, onward), &ctx2).dt,
+                expected,
+                "{ctx2}: instant changed"
+            );
+        }
+    }
+}
+
+/// A tz name containing `Z` must not be mistaken for the UTC designator.
+#[test]
+fn tz_name_containing_z_is_not_read_as_utc() {
+    let grid = codec_for("application/json;v=3")
+        .unwrap()
+        .decode_grid(
+            "{\"meta\":{\"ver\":\"3.0\"},\"cols\":[{\"name\":\"ts\"}],\
+             \"rows\":[{\"ts\":\"t:2024-06-30T12:00:00+01:00 Zurich\"}]}",
+        )
+        .expect("Zurich payload decodes");
+    let ts = datetime_of(&grid, "Zurich");
+    assert_eq!(ts.tz_name, "Zurich");
+    assert_eq!(ts.dt.offset().local_minus_utc(), 3600);
 }

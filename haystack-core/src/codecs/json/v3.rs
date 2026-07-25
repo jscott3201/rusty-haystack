@@ -349,9 +349,16 @@ fn split_datetime_tz(s: &str) -> (&str, &str) {
 /// Find the end position (relative to input) of the UTC offset in a datetime string.
 /// Returns the position after the offset (e.g., after "-05:00" or "Z" or "+00:00").
 fn find_offset_end(s: &str) -> Option<usize> {
-    // Look for Z
-    if s.ends_with('Z') {
-        return Some(s.len());
+    // `Z` terminates the offset. It ends the string when no timezone name
+    // follows and precedes a space when one does, so `ends_with` alone misses
+    // the `2024-06-30T12:00:00Z UTC` form that Niagara and SkySpark emit.
+    // Anything else after it is part of a tz name that merely contains a Z
+    // (Zurich), which the +/- scan below handles.
+    if let Some(z) = s.find('Z') {
+        let after = &s[z + 1..];
+        if after.is_empty() || after.starts_with(' ') {
+            return Some(z + 1);
+        }
     }
     // Look for +HH:MM or -HH:MM at the end or before a space
     // Find the last occurrence of +/- that could be an offset
