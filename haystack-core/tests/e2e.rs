@@ -3,7 +3,7 @@
 // ref traversal -> validate -> encode/decode round-trip through
 // Zinc, JSON v4, JSON v3, and Trio.
 
-use chrono::{FixedOffset, TimeZone};
+use chrono::{FixedOffset, TimeZone, Timelike};
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::filter;
@@ -490,6 +490,28 @@ fn datetime_survives_every_cross_codec_hop() {
                 "UTC",
             ),
         ),
+        (
+            "half-hour offset (Kolkata)",
+            HDateTime::new(
+                FixedOffset::east_opt(5 * 3600 + 1800)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 2, 29, 6, 15, 0)
+                    .unwrap(),
+                "Kolkata",
+            ),
+        ),
+        (
+            "fractional seconds (New_York)",
+            HDateTime::new(
+                FixedOffset::west_opt(5 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2024, 1, 1, 8, 12, 5)
+                    .unwrap()
+                    .with_nanosecond(123_000_000)
+                    .unwrap(),
+                "New_York",
+            ),
+        ),
     ];
 
     for (label, original) in &cases {
@@ -500,16 +522,29 @@ fn datetime_survives_every_cross_codec_hop() {
                 let first = hop(&grid_with_datetime(original), from);
                 let after_first = datetime_of(&first, &ctx);
                 assert_eq!(&after_first, original, "{ctx}: lost on the first hop");
+                assert_eq!(
+                    after_first.dt.offset().local_minus_utc(),
+                    original.dt.offset().local_minus_utc(),
+                    "{ctx}: UTC offset lost on the first hop"
+                );
 
                 let second = hop(&first, to);
                 let after_second = datetime_of(&second, &ctx);
 
-                // Both fields matter independently: the instant can survive
-                // while the tz name is dropped, which still breaks a consumer
-                // that renders local time.
+                // Three fields matter independently. `DateTime<FixedOffset>`
+                // compares as an instant, so a codec that normalised every
+                // value to +00:00 would still pass the first assertion; the
+                // offset has to be compared explicitly. And the instant can
+                // survive while the tz name is dropped, which still breaks a
+                // consumer that renders local time.
                 assert_eq!(
                     after_second.dt, original.dt,
                     "{ctx}: instant changed across codecs"
+                );
+                assert_eq!(
+                    after_second.dt.offset().local_minus_utc(),
+                    original.dt.offset().local_minus_utc(),
+                    "{ctx}: UTC offset changed across codecs"
                 );
                 assert_eq!(
                     after_second.tz_name, original.tz_name,
@@ -521,10 +556,11 @@ fn datetime_survives_every_cross_codec_hop() {
 }
 
 #[test]
-fn datetime_utc_offset_spelling_is_stable_across_codecs() {
+fn datetime_utc_offset_spelling_is_pinned_per_codec() {
     // UTC is the case implementations most often disagree on, writing `Z` in
-    // one codec and `+00:00` in another. Whichever spelling each encoder picks,
-    // decoding it elsewhere has to land on the same instant and tz name.
+    // one codec and `+00:00` in another. Our four encoders must not drift
+    // apart, and a round-trip assertion cannot catch drift because each codec
+    // reads back whatever it wrote. So pin the wire text itself.
     let utc = HDateTime::new(
         FixedOffset::east_opt(0)
             .unwrap()
@@ -533,16 +569,22 @@ fn datetime_utc_offset_spelling_is_stable_across_codecs() {
         "UTC",
     );
 
-    for mime in ROUND_TRIP_CODECS {
-        let codec = codec_for(mime).unwrap();
-        let encoded = codec.encode_grid(&grid_with_datetime(&utc)).unwrap();
+    let expected: &[(&str, &str)] = &[
+        ("text/zinc", "2024-06-30T12:00:00+00:00 UTC"),
+        ("application/json;v=3", "t:2024-06-30T12:00:00+00:00 UTC"),
+        ("application/json", "2024-06-30T12:00:00+00:00"),
+        ("text/trio", "2024-06-30T12:00:00+00:00 UTC"),
+    ];
 
-        for other in ROUND_TRIP_CODECS {
-            let ctx = format!("UTC written by {mime}, re-encoded via {other}");
-            let decoded = codec.decode_grid(&encoded).unwrap();
-            let round_tripped = datetime_of(&hop(&decoded, other), &ctx);
-            assert_eq!(round_tripped, utc, "{ctx}");
-        }
+    for (mime, spelling) in expected {
+        let encoded = codec_for(mime)
+            .unwrap()
+            .encode_grid(&grid_with_datetime(&utc))
+            .unwrap();
+        assert!(
+            encoded.contains(spelling),
+            "{mime}: expected UTC spelled `{spelling}`\n--- payload ---\n{encoded}"
+        );
     }
 }
 
@@ -559,6 +601,8 @@ fn utc_z_from_external_producers_decodes_everywhere() {
         .with_ymd_and_hms(2024, 6, 30, 12, 0, 0)
         .unwrap();
 
+    // A bare `Z` carries no name; every codec must fill in UTC rather than
+    // leaving it empty, so the tz name is "UTC" in all of these.
     let payloads: &[(&str, &str, &str)] = &[
         (
             "text/zinc",
@@ -574,6 +618,11 @@ fn utc_z_from_external_producers_decodes_everywhere() {
             "application/json;v=3",
             "Z with tz name",
             "{\"meta\":{\"ver\":\"3.0\"},\"cols\":[{\"name\":\"ts\"}],\"rows\":[{\"ts\":\"t:2024-06-30T12:00:00Z UTC\"}]}",
+        ),
+        (
+            "application/json;v=3",
+            "bare Z",
+            "{\"meta\":{\"ver\":\"3.0\"},\"cols\":[{\"name\":\"ts\"}],\"rows\":[{\"ts\":\"t:2024-06-30T12:00:00Z\"}]}",
         ),
         (
             "application/json",
@@ -595,16 +644,15 @@ fn utc_z_from_external_producers_decodes_everywhere() {
             .unwrap_or_else(|e| panic!("{ctx}: decode failed: {e}"));
         let ts = datetime_of(&grid, &ctx);
         assert_eq!(ts.dt, expected, "{ctx}: wrong instant");
+        assert_eq!(ts.tz_name, "UTC", "{ctx}: wrong timezone name");
 
         // Re-encoding must then agree with every other codec, so a `Z` that
-        // arrived from outside survives onward conversion.
+        // arrived from outside survives onward conversion — name included.
         for onward in ROUND_TRIP_CODECS {
             let ctx2 = format!("{ctx} -> {onward}");
-            assert_eq!(
-                datetime_of(&hop(&grid, onward), &ctx2).dt,
-                expected,
-                "{ctx2}: instant changed"
-            );
+            let onward_ts = datetime_of(&hop(&grid, onward), &ctx2);
+            assert_eq!(onward_ts.dt, expected, "{ctx2}: instant changed");
+            assert_eq!(onward_ts.tz_name, "UTC", "{ctx2}: timezone name changed");
         }
     }
 }

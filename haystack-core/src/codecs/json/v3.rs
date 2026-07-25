@@ -297,11 +297,6 @@ fn decode_time_str(s: &str) -> Result<Kind, CodecError> {
 /// Decode a datetime from the v3 `t:` prefix body:
 /// `"2024-01-01T12:30:45-05:00 New_York"` or `"2024-01-01T12:30:45-05:00"`.
 fn decode_datetime_str(s: &str) -> Result<Kind, CodecError> {
-    // The tz name is separated by a space after the offset.
-    // We need to find the tz name carefully — the offset ends after the timezone
-    // offset pattern (e.g., "-05:00" or "+00:00" or "Z").
-    // Strategy: try to find the last space that comes after the datetime part.
-
     let (dt_str, tz_name) = split_datetime_tz(s);
 
     let dt = chrono::DateTime::parse_from_rfc3339(dt_str)
@@ -312,74 +307,43 @@ fn decode_datetime_str(s: &str) -> Result<Kind, CodecError> {
             message: format!("invalid v3 datetime: {e}"),
         })?;
 
+    // Same character set the Zinc parser accepts for a tz name. Zinc stops at the
+    // first character outside it because a delimiter follows; here the value runs
+    // to the end of the string, so anything outside the set is malformed rather
+    // than a terminator — reject it instead of folding it into the name.
+    if !tz_name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '/')
+    {
+        return Err(CodecError::Parse {
+            pos: 0,
+            message: format!("invalid v3 datetime timezone name: {tz_name:?}"),
+        });
+    }
+
+    // An absent tz name means UTC, matching the Zinc parser (zinc/parser.rs).
+    // Without this, a bare `Z` decodes here to an empty name while Zinc and Trio
+    // give "UTC", and re-encoding the result emits a stray trailing space.
+    let tz_name = if tz_name.is_empty() { "UTC" } else { tz_name };
+
     Ok(Kind::DateTime(HDateTime::new(dt, tz_name)))
 }
 
-/// Split a datetime string into the ISO datetime part and optional timezone name.
+/// Split a v3 datetime body into the ISO datetime and the timezone name.
 ///
-/// Input formats:
+/// Haystack writes the name after the offset separated by whitespace, and names
+/// never contain spaces, so the first space is the boundary however the offset
+/// was spelled — `Z`, `+05:30`, `-05:00`, or absent entirely. Leading whitespace
+/// is trimmed so a doubled space does not become part of the name.
+///
 /// - `"2024-01-01T12:30:45-05:00 New_York"` -> `("2024-01-01T12:30:45-05:00", "New_York")`
+/// - `"2024-06-30T12:00:00Z UTC"` -> `("2024-06-30T12:00:00Z", "UTC")`
 /// - `"2024-01-01T12:30:45+00:00"` -> `("2024-01-01T12:30:45+00:00", "")`
 fn split_datetime_tz(s: &str) -> (&str, &str) {
-    // Look for the offset pattern — it's either +HH:MM, -HH:MM, or Z
-    // After the offset, there may be a space followed by the tz name.
-
-    // Find the offset: scan for + or - after the T
-    if let Some(t_pos) = s.find('T') {
-        let after_t = &s[t_pos..];
-        // Find the last +/- in the string after T (for the offset)
-        // The offset is the last sign followed by HH:MM
-        let offset_end = find_offset_end(after_t);
-        if let Some(end) = offset_end {
-            let abs_end = t_pos + end;
-            if abs_end < s.len() {
-                let rest = &s[abs_end..];
-                if let Some(space_pos) = rest.find(' ') {
-                    let dt_part = &s[..abs_end + space_pos];
-                    let tz_part = &s[abs_end + space_pos + 1..];
-                    return (dt_part, tz_part);
-                }
-            }
-            return (s, "");
-        }
+    match s.find(' ') {
+        Some(i) => (&s[..i], s[i..].trim_start()),
+        None => (s, ""),
     }
-    (s, "")
-}
-
-/// Find the end position (relative to input) of the UTC offset in a datetime string.
-/// Returns the position after the offset (e.g., after "-05:00" or "Z" or "+00:00").
-fn find_offset_end(s: &str) -> Option<usize> {
-    // `Z` terminates the offset. It ends the string when no timezone name
-    // follows and precedes a space when one does, so `ends_with` alone misses
-    // the `2024-06-30T12:00:00Z UTC` form that Niagara and SkySpark emit.
-    // Anything else after it is part of a tz name that merely contains a Z
-    // (Zurich), which the +/- scan below handles.
-    if let Some(z) = s.find('Z') {
-        let after = &s[z + 1..];
-        if after.is_empty() || after.starts_with(' ') {
-            return Some(z + 1);
-        }
-    }
-    // Look for +HH:MM or -HH:MM at the end or before a space
-    // Find the last occurrence of +/- that could be an offset
-    for (i, c) in s.char_indices().rev() {
-        if (c == '+' || c == '-') && i + 6 <= s.len() {
-            // Check if this looks like an offset: +HH:MM or -HH:MM
-            let candidate = &s[i..];
-            if candidate.len() >= 6 {
-                let hh = &candidate[1..3];
-                let colon = &candidate[3..4];
-                let mm = &candidate[4..6];
-                if colon == ":"
-                    && hh.chars().all(|c| c.is_ascii_digit())
-                    && mm.chars().all(|c| c.is_ascii_digit())
-                {
-                    return Some(i + 6);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Decode a coord from the v3 `c:` prefix body: `"37.5,-77.4"`.
@@ -860,6 +824,76 @@ mod tests {
             codec.encode_scalar(&k).unwrap(),
             "\"t:2024-01-01T12:30:45-05:00 New_York\""
         );
+    }
+
+    /// Decode a `t:` body (without the JSON quotes) as an `HDateTime`.
+    fn decode_dt(body: &str) -> Result<HDateTime, CodecError> {
+        match Json3Codec.decode_scalar(&format!("\"t:{body}\""))? {
+            Kind::DateTime(hdt) => Ok(hdt),
+            other => panic!("expected DateTime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn datetime_z_offset_keeps_tz_name() {
+        // Niagara and SkySpark spell UTC as `Z` and still append the name.
+        let hdt = decode_dt("2024-06-30T12:00:00Z UTC").unwrap();
+        assert_eq!(hdt.tz_name, "UTC");
+        assert_eq!(hdt.dt.offset().local_minus_utc(), 0);
+    }
+
+    #[test]
+    fn datetime_z_offset_with_tz_name_containing_z() {
+        // `Zurich` both starts and ends with a Z, so neither a `find('Z')` nor an
+        // `ends_with('Z')` scan can locate the offset here.
+        let hdt = decode_dt("2024-06-30T12:00:00Z Zurich").unwrap();
+        assert_eq!(hdt.tz_name, "Zurich");
+    }
+
+    #[test]
+    fn datetime_bare_z_defaults_tz_name_to_utc() {
+        // Matches the Zinc and Trio parsers, which default an absent name to UTC.
+        assert_eq!(decode_dt("2024-06-30T12:00:00Z").unwrap().tz_name, "UTC");
+        assert_eq!(
+            decode_dt("2024-06-30T12:00:00+00:00").unwrap().tz_name,
+            "UTC"
+        );
+    }
+
+    #[test]
+    fn datetime_preserves_non_hour_offset() {
+        // Kolkata is +05:30. A decoder that normalized every offset to +00:00
+        // would still compare equal on the instant, so assert the offset itself.
+        let hdt = decode_dt("2024-01-01T12:30:45+05:30 Kolkata").unwrap();
+        assert_eq!(hdt.tz_name, "Kolkata");
+        assert_eq!(hdt.dt.offset().local_minus_utc(), 5 * 3600 + 1800);
+    }
+
+    #[test]
+    fn datetime_preserves_fractional_seconds_with_tz_name() {
+        let hdt = decode_dt("2024-01-01T12:30:45.123-05:00 New_York").unwrap();
+        assert_eq!(hdt.tz_name, "New_York");
+        assert_eq!(hdt.dt.offset().local_minus_utc(), -5 * 3600);
+        assert_eq!(hdt.dt.nanosecond(), 123_000_000);
+    }
+
+    #[test]
+    fn datetime_tolerates_extra_space_before_tz_name() {
+        assert_eq!(
+            decode_dt("2024-06-30T12:00:00Z  UTC").unwrap().tz_name,
+            "UTC"
+        );
+    }
+
+    #[test]
+    fn datetime_rejects_garbage_after_tz_name() {
+        assert!(decode_dt("2024-06-30T12:00:00Z UTC extra").is_err());
+    }
+
+    #[test]
+    fn datetime_rejects_non_ascii_junk_without_panicking() {
+        // `-€abcdef` used to be scanned as a UTC offset and sliced mid-codepoint.
+        assert!(decode_dt("2024-06-30T12:00:00 -\u{20ac}abcdef").is_err());
     }
 
     // ── Coord ──
