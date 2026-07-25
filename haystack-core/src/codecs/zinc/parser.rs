@@ -444,10 +444,16 @@ impl<'a> ZincParser<'a> {
         Ok(String::new())
     }
 
+    /// Read a timezone name. `+` is accepted for the `Etc/GMT+N` family, which
+    /// `data/tz_map.txt` lists and `kinds::tz::tz_for` resolves; without it,
+    /// `GMT+5` truncated to `GMT` here while the encoder wrote `GMT+5` back out,
+    /// so the zone silently changed on every round trip. A tz name is always
+    /// followed by a delimiter (`,`, newline, or end of input), never by a value,
+    /// so widening the set cannot swallow the next token.
     fn read_tz_name(&mut self) -> String {
         let start = self.pos;
         while let Some(ch) = self.peek() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '/' {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '+') {
                 self.pos += ch.len_utf8();
             } else {
                 break;
@@ -974,6 +980,39 @@ mod tests {
     #[test]
     fn parse_null() {
         assert_eq!(decode_scalar("N").unwrap(), Kind::Null);
+    }
+
+    #[test]
+    fn tz_name_with_plus_round_trips() {
+        // `read_tz_name` used to stop at the `+`, truncating `GMT+5` to `GMT`
+        // while the encoder wrote `GMT+5` back out — the zone silently changed
+        // on every hop. Both spellings are live keys in `data/tz_map.txt`.
+        for name in ["GMT+5", "Etc/GMT+5", "GMT-5", "Etc/GMT-5"] {
+            let dt = FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2024, 6, 30, 12, 0, 0)
+                .unwrap();
+            let k = Kind::DateTime(HDateTime::new(dt, name));
+            assert_eq!(round_trip(&k), k, "{name} lost on round trip");
+
+            match decode_scalar(&format!("2024-06-30T12:00:00+00:00 {name}")).unwrap() {
+                Kind::DateTime(hdt) => assert_eq!(hdt.tz_name, name),
+                other => panic!("{name}: expected DateTime, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tz_name_stops_at_the_cell_delimiter() {
+        // Widening the tz-name charset must not let it run past the end of the
+        // cell and swallow the next value.
+        let grid = decode_grid("ver:\"3.0\"\nts,n\n2024-06-30T12:00:00+00:00 GMT+5,42\n").unwrap();
+        let row = &grid.rows[0];
+        match row.get("ts") {
+            Some(Kind::DateTime(hdt)) => assert_eq!(hdt.tz_name, "GMT+5"),
+            other => panic!("expected DateTime, got {other:?}"),
+        }
+        assert_eq!(row.get("n"), Some(&Kind::Number(Number::unitless(42.0))));
     }
 
     #[test]

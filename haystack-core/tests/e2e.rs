@@ -630,6 +630,11 @@ fn utc_z_from_external_producers_decodes_everywhere() {
             "{\"_kind\":\"grid\",\"cols\":[{\"name\":\"ts\"}],\"rows\":[{\"ts\":{\"_kind\":\"dateTime\",\"tz\":\"UTC\",\"val\":\"2024-06-30T12:00:00Z\"}}]}",
         ),
         (
+            "application/json",
+            "Z with no tz field",
+            "{\"_kind\":\"grid\",\"cols\":[{\"name\":\"ts\"}],\"rows\":[{\"ts\":{\"_kind\":\"dateTime\",\"val\":\"2024-06-30T12:00:00Z\"}}]}",
+        ),
+        (
             "text/trio",
             "Z with tz name",
             "ts: 2024-06-30T12:00:00Z UTC\n",
