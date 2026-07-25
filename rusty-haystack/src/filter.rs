@@ -9,6 +9,39 @@ use haystack_core::filter::{CmpOp, FilterNode, Path};
 use crate::convert::{kind_to_py, py_to_kind};
 use crate::data::PyHDict;
 use crate::exceptions;
+use crate::ontology::PyDefNamespace;
+
+// ── Shared evaluation ──
+
+/// True if evaluating `node` needs an ontology namespace, i.e. it contains a
+/// spec-match term anywhere in the tree.
+fn needs_namespace(node: &FilterNode) -> bool {
+    match node {
+        FilterNode::SpecMatch(_) => true,
+        FilterNode::And(l, r) | FilterNode::Or(l, r) => needs_namespace(l) || needs_namespace(r),
+        FilterNode::Has(_) | FilterNode::Missing(_) | FilterNode::Cmp { .. } => false,
+    }
+}
+
+/// Evaluate a filter, refusing to answer a spec-match term without a namespace.
+///
+/// The core evaluator reports `false` for a spec match it cannot resolve, which
+/// is indistinguishable from a genuine non-match. Raising instead means a caller
+/// who forgets the namespace gets told so rather than silently receiving no rows.
+fn eval_filter(
+    node: &FilterNode,
+    entity: &haystack_core::data::HDict,
+    namespace: Option<&PyDefNamespace>,
+) -> PyResult<bool> {
+    match namespace {
+        Some(ns) => Ok(filter::matches_with_ns(node, entity, None, Some(&ns.inner))),
+        None if needs_namespace(node) => Err(PyErr::new::<exceptions::FilterError, _>(
+            "filter contains a spec-match term (e.g. `ph::Point`) and needs a namespace: \
+             pass namespace=DefNamespace.load_standard()",
+        )),
+        None => Ok(filter::matches(node, entity, None)),
+    }
+}
 
 // ── CmpOp ──
 
@@ -260,8 +293,13 @@ impl PyFilter {
     // -- Evaluation --
 
     /// Evaluate this filter against an entity dict.
-    fn matches(&self, entity: &PyHDict) -> bool {
-        filter::matches(&self.inner, &entity.inner, None)
+    ///
+    /// `namespace` is required for spec-match terms such as `ph::Point`.
+    /// Evaluating one without a namespace raises FilterError rather than
+    /// reporting a non-match.
+    #[pyo3(signature = (entity, namespace=None))]
+    fn matches(&self, entity: &PyHDict, namespace: Option<&PyDefNamespace>) -> PyResult<bool> {
+        eval_filter(&self.inner, &entity.inner, namespace)
     }
 
     fn __repr__(&self) -> String {
@@ -306,10 +344,18 @@ pub fn parse_filter(expr: &str) -> PyResult<String> {
 
 /// Evaluate a filter expression against an entity dict.
 /// Returns True if the entity matches the filter, False otherwise.
-/// Raises FilterError if the filter expression is invalid.
+///
+/// `namespace` is required for spec-match terms such as `ph::Point`.
+/// Raises FilterError if the expression is invalid, or if it contains a
+/// spec-match term and no namespace was given.
 #[pyfunction]
-pub fn matches_filter(filter_expr: &str, entity: &PyHDict) -> PyResult<bool> {
+#[pyo3(signature = (filter_expr, entity, namespace=None))]
+pub fn matches_filter(
+    filter_expr: &str,
+    entity: &PyHDict,
+    namespace: Option<&PyDefNamespace>,
+) -> PyResult<bool> {
     let node = filter::parse_filter(filter_expr)
         .map_err(|e| PyErr::new::<exceptions::FilterError, _>(e.to_string()))?;
-    Ok(filter::matches(&node, &entity.inner, None))
+    eval_filter(&node, &entity.inner, namespace)
 }

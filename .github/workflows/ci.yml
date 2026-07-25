@@ -60,6 +60,27 @@ jobs:
           key: ${{ matrix.os }}
       - run: cargo test --workspace --exclude rusty-haystack
 
+  # The PyO3 crate is excluded from `cargo test --workspace`, so nothing above
+  # covers it. Without this job the Python suite rots unnoticed — 11 of its tests
+  # spent four months failing against APIs removed in v0.8.0.
+  python:
+    name: Python Bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pyo3
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv
+      - run: uv pip install maturin pytest
+      - run: uv run maturin develop --release
+        working-directory: rusty-haystack
+      - run: uv run pytest rusty-haystack/tests -q
+
   deny:
     name: Cargo Deny
     runs-on: ubuntu-latest

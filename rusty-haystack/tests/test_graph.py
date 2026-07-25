@@ -140,9 +140,16 @@ class TestGraphDiff:
         g.update("x", rh.HDict({"dis": "After"}))
         diffs = g.changes_since(v)
         assert len(diffs) == 1
-        assert diffs[0].op == rh.graph.DiffOp.Update
-        assert diffs[0].old is not None
-        assert diffs[0].new is not None
+        d = diffs[0]
+        assert d.op == rh.graph.DiffOp.Update
+        # An Update carries its payload in changed_tags/previous_tags. `old` and
+        # `new` are only populated for Remove and Add respectively.
+        assert d.old is None
+        assert d.new is None
+        assert d.changed_tags is not None
+        assert d.changed_tags.get("dis") == "After"
+        assert d.previous_tags is not None
+        assert d.previous_tags.get("dis") == "Before"
 
     def test_diff_on_remove(self):
         g = rh.EntityGraph()

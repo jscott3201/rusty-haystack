@@ -44,90 +44,6 @@ role = "viewer"
         assert isinstance(repr(auth), str)
 
 
-class TestConnectorConfig:
-    def test_create(self):
-        cfg = rh.server.ConnectorConfig(
-            name="Building A",
-            url="http://building-a:8080/api",
-            username="fed",
-            password="secret",
-        )
-        assert cfg.name == "Building A"
-        assert cfg.url == "http://building-a:8080/api"
-
-    def test_with_optional_fields(self):
-        cfg = rh.server.ConnectorConfig(
-            name="Building B",
-            url="http://building-b:8080/api",
-            username="fed",
-            password="secret",
-            id_prefix="bldg-b-",
-            ws_url="ws://building-b:8080/api/ws",
-            sync_interval_secs=30,
-        )
-        assert cfg.name == "Building B"
-
-    def test_repr(self):
-        cfg = rh.server.ConnectorConfig(
-            name="Test",
-            url="http://test:8080/api",
-            username="u",
-            password="p",
-        )
-        assert isinstance(repr(cfg), str)
-
-
-class TestFederation:
-    def test_empty(self):
-        fed = rh.server.Federation()
-        assert fed.connector_count() == 0
-
-    def test_add_connector(self):
-        fed = rh.server.Federation()
-        cfg = rh.server.ConnectorConfig(
-            name="Test",
-            url="http://test:8080/api",
-            username="u",
-            password="p",
-        )
-        fed.add(cfg)
-        assert fed.connector_count() == 1
-
-    def test_from_toml_str(self):
-        toml_content = """
-[connectors.building-a]
-name = "Building A"
-url = "http://building-a:8080/api"
-username = "federation"
-password = "secret"
-id_prefix = "bldg-a-"
-sync_interval_secs = 30
-"""
-        fed = rh.server.Federation.from_toml_str(toml_content)
-        assert fed.connector_count() == 1
-
-    def test_status(self):
-        fed = rh.server.Federation()
-        status = fed.status()
-        assert isinstance(status, list)
-
-    def test_filter_cached_empty(self):
-        fed = rh.server.Federation()
-        cfg = rh.server.ConnectorConfig(
-            name="Test",
-            url="http://test:8080/api",
-            username="u",
-            password="p",
-        )
-        fed.add(cfg)
-        result = fed.filter_cached("site")
-        assert isinstance(result, rh.HGrid)
-
-    def test_repr(self):
-        fed = rh.server.Federation()
-        assert isinstance(repr(fed), str)
-
-
 class TestHisStore:
     def test_create(self):
         store = rh.server.HisStore()
@@ -169,12 +85,6 @@ class TestHaystackServer:
         graph = rh.SharedGraph()
         server = rh.server.HaystackServer(graph)
         server.with_namespace(namespace)
-
-    def test_with_federation(self):
-        graph = rh.SharedGraph()
-        server = rh.server.HaystackServer(graph)
-        fed = rh.server.Federation()
-        server.with_federation(fed)
 
     def test_bg_error_before_run(self):
         graph = rh.SharedGraph()

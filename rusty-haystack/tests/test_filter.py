@@ -173,3 +173,42 @@ class TestFilterBuilder:
         f = rh.Filter.has("site")
         e = rh.HDict({"equip": rh.Marker()})
         assert f.matches(e) is False
+
+
+class TestSpecMatchNamespace:
+    """Spec-match terms need a namespace; without one they used to report False."""
+
+    @staticmethod
+    def _point():
+        return rh.HDict(
+            {
+                "id": rh.Ref("p1"),
+                "point": rh.Marker(),
+                "sensor": rh.Marker(),
+                "temp": rh.Marker(),
+            }
+        )
+
+    def test_spec_match_resolves_with_namespace(self):
+        ns = rh.DefNamespace.load_standard()
+        assert rh.matches_filter("ph::Point", self._point(), ns) is True
+
+    def test_spec_match_via_filter_object(self):
+        ns = rh.DefNamespace.load_standard()
+        f = rh.Filter.parse("ph::Point")
+        assert f.matches(self._point(), ns) is True
+
+    def test_spec_match_without_namespace_raises(self):
+        # The whole point of the change: refuse to answer rather than say False.
+        with pytest.raises(Exception):
+            rh.matches_filter("ph::Point", self._point())
+        with pytest.raises(Exception):
+            rh.Filter.parse("ph::Point").matches(self._point())
+
+    def test_spec_match_nested_in_conjunction_also_raises(self):
+        with pytest.raises(Exception):
+            rh.matches_filter("point and ph::Point", self._point())
+
+    def test_plain_filters_need_no_namespace(self):
+        assert rh.matches_filter("point", self._point()) is True
+        assert rh.matches_filter("equip", self._point()) is False
