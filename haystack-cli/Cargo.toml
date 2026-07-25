@@ -2,6 +2,7 @@
 name = "rusty-haystack-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "CLI tool for importing, exporting, serving, and querying Project Haystack data"
 repository.workspace = true
 license.workspace = true

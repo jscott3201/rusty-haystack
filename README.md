@@ -42,7 +42,7 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 
 ### Prerequisites
 
-- Rust 1.95+ (edition 2024)
+- Rust 1.97+ (edition 2024)
 - cargo
 
 ### Build
@@ -129,7 +129,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | tower / tower-http | 0.5 / 0.7 | Middleware (auth, CORS, body limits) |
 | reqwest | 0.13 | HTTP client (rustls TLS) |
 | tokio | 1.x | Async runtime |
-| tokio-tungstenite | 0.29 | WebSocket client |
+| tokio-tungstenite | 0.30 | WebSocket client |
 | serde / serde_json | 1.0 | Serialization framework |
 | roaring | 0.11 | Compressed bitmap indexes (RoaringBitmap) |
 | parking_lot | 0.12 | Fast synchronization primitives |

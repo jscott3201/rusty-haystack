@@ -111,7 +111,7 @@ Public endpoints (no permission needed): `GET /api/about`, `GET /api/ops`, `GET 
 
 The Dockerfile uses a multi-stage build:
 
-1. **Builder stage**: `rust:1.93-alpine` -- compiles the CLI binary with static musl linking
+1. **Builder stage**: `rust:1.97-alpine` -- compiles the CLI binary with static musl linking
 2. **Runtime stage**: `alpine:3.21` -- minimal runtime (~15 MB)
 
 ```sh

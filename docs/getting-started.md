@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Rust 1.95+** (edition 2024) -- install via [rustup](https://rustup.rs/)
+- **Rust 1.97+** (edition 2024) -- install via [rustup](https://rustup.rs/)
 - **cargo** (included with Rust)
 - **Docker** (optional, for containerized deployment)
 
