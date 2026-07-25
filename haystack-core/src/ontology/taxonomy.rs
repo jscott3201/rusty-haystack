@@ -16,20 +16,23 @@ pub struct TaxonomyTree {
     children: HashMap<String, Vec<String>>,
     /// Cached mandatory tag sets per type (RwLock for thread safety)
     mandatory_cache: RwLock<HashMap<String, HashSet<String>>>,
+    /// Cached descendant sets per type, for membership tests.
+    descendant_cache: RwLock<HashMap<String, HashSet<String>>>,
 }
 
 /// `RwLock` is not `Clone`, so this is written by hand rather than derived.
 ///
-/// The clone starts with an empty cache instead of copying the entries. The
-/// cache is a pure memo of [`TaxonomyTree::mandatory_tags`] and refills lazily,
-/// so dropping it costs one recomputation per type and cannot carry a stale
-/// entry into the copy.
+/// The clone starts with empty caches instead of copying their entries. Both
+/// are pure memos of `parents`/`children` — [`TaxonomyTree::mandatory_tags`] and
+/// [`TaxonomyTree::any_is_subtype`] — and refill lazily, so dropping them costs
+/// one recomputation per type and cannot carry a stale entry into the copy.
 impl Clone for TaxonomyTree {
     fn clone(&self) -> Self {
         Self {
             parents: self.parents.clone(),
             children: self.children.clone(),
             mandatory_cache: RwLock::new(HashMap::new()),
+            descendant_cache: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -41,6 +44,7 @@ impl TaxonomyTree {
             parents: HashMap::new(),
             children: HashMap::new(),
             mandatory_cache: RwLock::new(HashMap::new()),
+            descendant_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -61,6 +65,7 @@ impl TaxonomyTree {
         }
         // Invalidate cache
         self.mandatory_cache.write().clear();
+        self.descendant_cache.write().clear();
     }
 
     /// Check if `child` is a subtype of `parent`.
@@ -180,6 +185,45 @@ impl TaxonomyTree {
         tags
     }
 
+    /// Whether any of `tags` names `name` or a subtype of it.
+    ///
+    /// Equivalent to `tags.iter().any(|t| self.is_subtype(t, name))`, but
+    /// answers from a memoised descendant set rather than running a fresh BFS
+    /// up the parent chain per tag. Filter evaluation asks this once per entity,
+    /// so the uncached form allocates a `HashSet` and a `VecDeque` per tag per
+    /// entity across a whole graph scan.
+    pub fn any_is_subtype<'t>(&self, tags: impl Iterator<Item = &'t str>, name: &str) -> bool {
+        if let Some(cached) = self.descendant_cache.read().get(name) {
+            let mut tags = tags;
+            return tags.any(|t| cached.contains(t));
+        }
+        let set = self.descendants_of(name);
+        let hit = {
+            let mut tags = tags;
+            tags.any(|t| set.contains(t))
+        };
+        self.descendant_cache.write().insert(name.to_string(), set);
+        hit
+    }
+
+    /// `name` plus every type that transitively declares it as a supertype.
+    fn descendants_of(&self, name: &str) -> HashSet<String> {
+        let mut out: HashSet<String> = HashSet::new();
+        out.insert(name.to_string());
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        queue.push_back(name);
+        while let Some(current) = queue.pop_front() {
+            if let Some(kids) = self.children.get(current) {
+                for k in kids {
+                    if out.insert(k.clone()) {
+                        queue.push_back(k.as_str());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Check if a type is registered in the taxonomy.
     pub fn contains(&self, name: &str) -> bool {
         self.parents.contains_key(name)
@@ -198,6 +242,7 @@ impl TaxonomyTree {
     /// Clear the mandatory tag cache (used after library unload).
     pub fn clear_cache(&self) {
         self.mandatory_cache.write().clear();
+        self.descendant_cache.write().clear();
     }
 }
 
@@ -340,6 +385,42 @@ mod tests {
         let tags1 = tree.mandatory_tags("ahu", &mandatory_defs);
         let tags2 = tree.mandatory_tags("ahu", &mandatory_defs);
         assert_eq!(tags1, tags2);
+    }
+
+    #[test]
+    fn any_is_subtype_matches_the_uncached_form() {
+        let tree = build_tree();
+        // Every answer must agree with the `is_subtype` loop it replaces.
+        for name in ["ahu", "equip", "entity", "marker", "meter", "nonexistent"] {
+            for tags in [
+                vec!["ahu"],
+                vec!["equip"],
+                vec!["meter", "equip"],
+                vec!["site"],
+                vec![],
+            ] {
+                let expected = tags.iter().any(|t| tree.is_subtype(t, name));
+                let actual = tree.any_is_subtype(tags.iter().copied(), name);
+                assert_eq!(actual, expected, "tags {tags:?} vs {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn any_is_subtype_is_cached_and_invalidated_by_add() {
+        let mut tree = TaxonomyTree::new();
+        tree.add("equip", &[]);
+        tree.add("ahu", &["equip".to_string()]);
+
+        assert!(tree.any_is_subtype(["ahu"].into_iter(), "equip"));
+        // Warm, then extend the hierarchy. A cache that outlived `add` would
+        // still say a chiller is not an equip.
+        assert!(!tree.any_is_subtype(["chiller"].into_iter(), "equip"));
+        tree.add("chiller", &["equip".to_string()]);
+        assert!(
+            tree.any_is_subtype(["chiller"].into_iter(), "equip"),
+            "the descendant cache must be invalidated by add()"
+        );
     }
 
     #[test]

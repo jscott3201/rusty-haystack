@@ -1987,8 +1987,12 @@ mod tests {
     }
 
     /// A graph exercising the three ways mandatory-marker semantics answered a
-    /// type query wrongly. Entities are tagged the way Haystack conventionally
-    /// tags them, so the wrong answers below are not artefacts of odd data.
+    /// type query wrongly.
+    ///
+    /// `f1` carries `floor` without the `space` marker the ontology makes
+    /// mandatory — deliberately, because that is how imperfect real data is
+    /// tagged and it is the case conformance semantics got backwards. The demo
+    /// dataset ships floors the same way.
     fn typed_graph() -> EntityGraph {
         let ns = DefNamespace::load_standard().expect("bundled defs load");
         let mut g = EntityGraph::with_namespace(ns);
@@ -2091,9 +2095,15 @@ mod tests {
         );
         assert!(ns.entity_is_a(&floor, "floor"), "it is still a floor");
 
+        // The probe entity must actually carry a `bogus` marker, or this passes
+        // for the wrong reason: with no such tag the scan finds nothing whether
+        // or not the `has_type` guard is present.
+        let mut bogus = HDict::new();
+        bogus.set("bogus", Kind::Marker);
+        assert!(!ns.has_type("bogus"));
         assert!(
-            !ns.entity_is_a(&floor, "bogus"),
-            "unknown types match nothing"
+            !ns.entity_is_a(&bogus, "bogus"),
+            "a marker whose def is unregistered is not a type claim"
         );
 
         // Only *marker* tags declare a type. `siteRef` and `dis` are real defs,

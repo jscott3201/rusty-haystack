@@ -349,13 +349,22 @@ impl DefNamespace {
     /// `{space}`, so a floor that omits the conventional `space` marker does not
     /// conform to its own type. Neither answer is what `ph::Sensor` or
     /// `ph::Floor` means to someone writing a query.
+    ///
+    /// Conjunct defs (`hot-water`, `elec-meter`) are out of scope: an entity
+    /// expresses those through their component markers rather than a literal
+    /// conjunct marker, and this does not decompose them. They are unreachable
+    /// from a filter anyway — the grammar reads the `-` as an operator.
     pub fn entity_is_a(&self, entity: &HDict, type_name: &str) -> bool {
         if !self.has_type(type_name) {
             return false;
         }
-        entity.iter().any(|(tag, val)| {
-            matches!(val, Kind::Marker) && self.taxonomy.is_subtype(tag, type_name)
-        })
+        self.taxonomy.any_is_subtype(
+            entity
+                .iter()
+                .filter(|(_, val)| matches!(val, Kind::Marker))
+                .map(|(tag, _)| tag),
+            type_name,
+        )
     }
 
     /// Resolve a qualified spec term from a filter, such as `ph::Ahu`,

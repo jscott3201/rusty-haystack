@@ -407,6 +407,22 @@ class TestSpecMatchIsMembershipNotConformance:
     def test_subtypes_are_included(self):
         assert len(self._graph().read("ph::Equip")) == 2
 
+    def test_entity_is_a_is_exposed_and_agrees_with_the_filter(self, namespace):
+        # The Rust split has to be visible from Python, or callers reach for
+        # fits() and get the other question's answer.
+        empty = rh.HDict({"id": rh.Ref("x")})
+        sensor = rh.HDict({"id": rh.Ref("p1"), "point": rh.Marker(), "sensor": rh.Marker()})
+
+        assert namespace.entity_is_a(sensor, "sensor") is True
+        assert namespace.entity_is_a(empty, "sensor") is False
+        assert namespace.fits(empty, "sensor") is True, "the other question"
+
+        # Subtypes count, and the filter form agrees.
+        ahu = rh.HDict({"id": rh.Ref("a1"), "ahu": rh.Marker(), "equip": rh.Marker()})
+        assert namespace.entity_is_a(ahu, "equip") is True
+        assert rh.matches_filter("ph::Equip", ahu, namespace) is True
+        assert rh.matches_filter("ph::Equip", sensor, namespace) is False
+
     def test_fits_keeps_conformance_semantics(self, namespace):
         # The distinction, asserted directly: `fits` is unchanged.
         empty = rh.HDict({"id": rh.Ref("x")})

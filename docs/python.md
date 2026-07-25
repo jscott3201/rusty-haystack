@@ -293,8 +293,14 @@ ns.is_a("ahu", "equip")      # -> True (nominal subtype)
 ns.contains("site")          # -> True
 len(ns)                       # number of defs
 
+# Entity type checks -- two different questions
+ns.entity_is_a(entity, "site")  # -> is it a site? (what `ph::Site` filters on)
+ns.fits(entity, "site")         # -> is it well-formed as a site?
+
+# They differ: 579 of the 719 standard defs have no mandatory markers, so
+# fits() is True against those for any entity, including an empty one.
+
 # Entity validation
-ns.fits(entity, "site")      # -> True (structural fitting)
 issues = ns.validate_entity(entity)  # -> list of issue strings
 
 # Type relationships
