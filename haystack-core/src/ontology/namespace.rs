@@ -302,7 +302,14 @@ impl DefNamespace {
     /// Check if an entity structurally fits a type.
     ///
     /// Checks whether `entity` has all mandatory markers defined by
-    /// `type_name` and its supertypes.
+    /// `type_name` and its supertypes — a **conformance** question: is this
+    /// entity well-formed as a `type_name`?
+    ///
+    /// That is deliberately not the same question a filter asks. A filter asks
+    /// **membership**: is this entity a `type_name`? Use
+    /// [`entity_is_a`](Self::entity_is_a) for that. The two differ sharply — an
+    /// entity with no markers at all conforms to any type with no mandatory
+    /// markers (579 of the 719 standard defs), but is a member of none of them.
     pub fn fits(&self, entity: &HDict, type_name: &str) -> bool {
         // Fail closed on a name this namespace has never seen. `mandatory_tags`
         // returns an empty set for an unregistered name and `.all()` over an
@@ -327,6 +334,28 @@ impl DefNamespace {
     /// searches Xeto specs.
     pub fn has_type(&self, name: &str) -> bool {
         self.taxonomy.contains(name)
+    }
+
+    /// Whether `entity` **is a** `type_name` — the membership question a filter
+    /// asks, as opposed to the conformance question [`fits`](Self::fits) asks.
+    ///
+    /// An entity declares its types with marker tags. It is a `type_name` if it
+    /// carries any marker whose def is `type_name` or a subtype of it, so an
+    /// entity tagged `ahu` is an `ahu`, an `equip`, and an `entity`.
+    ///
+    /// This is why filters cannot use `fits`: a def's mandatory-marker set is a
+    /// well-formedness rule, not an identity. `mandatory_tags("sensor")` is
+    /// empty, so every entity conforms to `sensor`; `mandatory_tags("floor")` is
+    /// `{space}`, so a floor that omits the conventional `space` marker does not
+    /// conform to its own type. Neither answer is what `ph::Sensor` or
+    /// `ph::Floor` means to someone writing a query.
+    pub fn entity_is_a(&self, entity: &HDict, type_name: &str) -> bool {
+        if !self.has_type(type_name) {
+            return false;
+        }
+        entity.iter().any(|(tag, val)| {
+            matches!(val, Kind::Marker) && self.taxonomy.is_subtype(tag, type_name)
+        })
     }
 
     /// Resolve a qualified spec term from a filter, such as `ph::Ahu`,
@@ -366,15 +395,20 @@ impl DefNamespace {
         None
     }
 
-    /// Whether `entity` fits the qualified spec term `term`.
+    /// Whether `entity` matches the qualified spec term `term`, as a filter
+    /// means it.
     ///
-    /// Dispatches on what the term resolves to: a Xeto spec is checked
-    /// structurally against its slots, a def against its mandatory markers.
-    /// An unresolvable term is `false` — callers that can report an error
-    /// should call [`resolve_spec_term`](Self::resolve_spec_term) first.
+    /// Dispatches on what the term resolves to. A def is answered by
+    /// [`entity_is_a`](Self::entity_is_a) — membership, not conformance, so
+    /// `ph::Vav` matches vavs rather than everything carrying `equip`. A Xeto
+    /// spec is answered structurally against its slots, which is the only
+    /// meaning a spec has.
+    ///
+    /// An unresolvable term is `false`; callers that can report an error should
+    /// call [`resolve_spec_term`](Self::resolve_spec_term) first.
     pub fn fits_spec_term(&self, entity: &HDict, term: &str) -> bool {
         match self.resolve_spec_term(term) {
-            Some(SpecTerm::Def(name)) => self.fits(entity, &name),
+            Some(SpecTerm::Def(name)) => self.entity_is_a(entity, &name),
             Some(SpecTerm::Spec(spec)) => {
                 crate::xeto::fitting::explain_against_spec_in(entity, spec, &self.specs, None)
                     .is_empty()

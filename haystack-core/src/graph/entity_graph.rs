@@ -1986,6 +1986,139 @@ mod tests {
         assert_eq!(g1.namespace().unwrap().len(), ns.len());
     }
 
+    /// A graph exercising the three ways mandatory-marker semantics answered a
+    /// type query wrongly. Entities are tagged the way Haystack conventionally
+    /// tags them, so the wrong answers below are not artefacts of odd data.
+    fn typed_graph() -> EntityGraph {
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+        let mut g = EntityGraph::with_namespace(ns);
+
+        let mut mk = |id: &str, tags: &[&str]| {
+            let mut d = HDict::new();
+            d.set("id", Kind::Ref(HRef::from_val(id)));
+            for t in tags {
+                d.set(*t, Kind::Marker);
+            }
+            g.add(d).unwrap();
+        };
+        mk("s1", &["site"]);
+        mk("f1", &["floor"]);
+        mk("a1", &["ahu", "equip"]);
+        mk("v1", &["vav", "equip"]);
+        mk("p1", &["point", "sensor"]);
+        g
+    }
+
+    #[test]
+    fn spec_match_asks_membership_not_conformance() {
+        let g = typed_graph();
+        let n = |f: &str| {
+            g.read_all(f, 0)
+                .unwrap_or_else(|e| panic!("{f}: {e}"))
+                .len()
+        };
+
+        // `mandatory_tags("sensor")` is empty, so every entity *conforms* to
+        // sensor. Only one entity *is* a sensor.
+        assert_eq!(n("ph::Sensor"), 1, "sensor must not match everything");
+
+        // `mandatory_tags("vav")` is {equip}, so the AHU conforms to vav.
+        // It is not a vav.
+        assert_eq!(n("ph::Vav"), 1, "the AHU is not a vav");
+
+        // `mandatory_tags("floor")` is {space}, and a floor tagged only `floor`
+        // does not conform to its own type. It is still a floor.
+        assert_eq!(n("ph::Floor"), 1, "a floor is a floor");
+
+        // Subtypes count: both the AHU and the VAV are equips.
+        assert_eq!(n("ph::Equip"), 2, "ahu and vav are both equips");
+
+        assert_eq!(n("ph::Ahu"), 1);
+        assert_eq!(n("ph::Site"), 1);
+        assert_eq!(n("ph::Point"), 1);
+    }
+
+    #[test]
+    fn spec_match_agrees_with_the_plain_marker_term_where_both_apply() {
+        // `ph::X` and a bare `x` term should not disagree about a marker the
+        // entity literally carries; the spec form additionally picks up subtypes.
+        let g = typed_graph();
+        let n = |f: &str| g.read_all(f, 0).unwrap().len();
+
+        for tag in ["site", "floor", "ahu", "vav", "point", "sensor"] {
+            let spec = format!("ph::{tag}");
+            assert_eq!(n(&spec), n(tag), "{spec} and {tag} must agree");
+        }
+
+        // The one intended divergence: `equip` as a bare tag matches only what
+        // carries the marker, while `ph::Equip` also matches subtypes. Here both
+        // equips carry the marker, so they agree — assert the subtype reach
+        // separately with an entity that omits the supertype marker.
+        let mut g2 = typed_graph();
+        let mut bare_ahu = HDict::new();
+        bare_ahu.set("id", Kind::Ref(HRef::from_val("a2")));
+        bare_ahu.set("ahu", Kind::Marker);
+        g2.add(bare_ahu).unwrap();
+
+        assert_eq!(g2.read_all("equip", 0).unwrap().len(), 2, "marker tag only");
+        assert_eq!(
+            g2.read_all("ph::Equip", 0).unwrap().len(),
+            3,
+            "ph::Equip reaches an ahu that omits the equip marker"
+        );
+    }
+
+    #[test]
+    fn entity_is_a_is_not_fits() {
+        // Pinning the distinction directly, so the two are not quietly merged.
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+
+        let empty = HDict::new();
+        assert!(
+            ns.fits(&empty, "sensor"),
+            "an empty entity conforms to sensor: it has no mandatory markers"
+        );
+        assert!(
+            !ns.entity_is_a(&empty, "sensor"),
+            "but an empty entity is not a sensor"
+        );
+
+        let mut floor = HDict::new();
+        floor.set("floor", Kind::Marker);
+        assert!(
+            !ns.fits(&floor, "floor"),
+            "a floor without `space` does not conform to floor"
+        );
+        assert!(ns.entity_is_a(&floor, "floor"), "it is still a floor");
+
+        assert!(
+            !ns.entity_is_a(&floor, "bogus"),
+            "unknown types match nothing"
+        );
+
+        // Only *marker* tags declare a type. `siteRef` and `dis` are real defs,
+        // but carrying them as a Ref and a Str says nothing about what the
+        // entity is — without the Kind::Marker check every tag name would
+        // become a type claim.
+        let mut equip = HDict::new();
+        equip.set("equip", Kind::Marker);
+        equip.set("siteRef", Kind::Ref(HRef::from_val("s1")));
+        equip.set("dis", Kind::Str("Boiler".into()));
+        assert!(
+            ns.has_type("siteRef") && ns.has_type("dis"),
+            "both are defs"
+        );
+        assert!(ns.entity_is_a(&equip, "equip"));
+        assert!(
+            !ns.entity_is_a(&equip, "siteRef"),
+            "a Ref-valued tag is not a type claim"
+        );
+        assert!(
+            !ns.entity_is_a(&equip, "dis"),
+            "a Str-valued tag is not a type claim"
+        );
+    }
+
     #[test]
     fn mutating_a_shared_namespace_forks_it() {
         // `Arc::make_mut` is how the Python wrapper keeps load/unload working on

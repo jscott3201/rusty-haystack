@@ -53,12 +53,23 @@ pub enum FilterNode {
     And(Box<FilterNode>, Box<FilterNode>),
     /// Logical OR of two filters (short-circuit).
     Or(Box<FilterNode>, Box<FilterNode>),
-    /// Structural spec match against a qualified type name, e.g. `ph::Point`.
+    /// Type match against a qualified name, e.g. `ph::Point` or
+    /// `ph.equips::WaterMeter`.
     ///
-    /// Resolved through [`DefNamespace::fits`](crate::ontology::DefNamespace::fits),
-    /// so it needs a namespace: evaluated without one it reports false, which is
+    /// Reads as "is this entity one of these": a def term matches an entity
+    /// carrying that marker or a subtype of it, and a Xeto spec term matches an
+    /// entity satisfying the spec's slots. Resolved through
+    /// [`DefNamespace::fits_spec_term`](crate::ontology::DefNamespace::fits_spec_term).
+    ///
+    /// Note this is *not*
+    /// [`DefNamespace::fits`](crate::ontology::DefNamespace::fits), which asks
+    /// the different question of whether an entity is well-formed as a type.
+    ///
+    /// Needs a namespace: evaluated without one it reports false, which is
     /// indistinguishable from a genuine non-match. Use
     /// [`matches_with_ns`](crate::filter::matches_with_ns) rather than
-    /// [`matches`](crate::filter::matches) wherever a namespace is available.
+    /// [`matches`](crate::filter::matches) wherever a namespace is available,
+    /// and [`unresolved_specs`](crate::filter::unresolved_specs) to reject a
+    /// filter naming a type the namespace does not define.
     SpecMatch(String),
 }
