@@ -64,7 +64,7 @@ fn print_tag_summary(graph: &EntityGraph) {
     }
 
     let mut tags: Vec<_> = tag_counts.into_iter().collect();
-    tags.sort_by(|a, b| b.1.cmp(&a.1));
+    tags.sort_by_key(|b| std::cmp::Reverse(b.1));
     println!("\nTag distribution:");
     for (tag, count) in tags.iter().take(15) {
         println!("  {:<20} {}", tag, count);

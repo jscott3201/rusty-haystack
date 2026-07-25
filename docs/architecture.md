@@ -67,7 +67,7 @@ EntityGraph
   +-- adjacency: RefAdjacency             (bidirectional ref links)
   +-- namespace: Option<DefNamespace>     (ontology for spec-aware ops)
   +-- version: u64                        (monotonic counter)
-  +-- changelog: Vec<GraphDiff>           (capped at 10,000 entries)
+  +-- changelog: Vec<GraphDiff>           (capped at 50,000 entries)
 ```
 
 CRUD operations: `add`, `get`, `update`, `remove`. Query operations: `read(filter, limit)`.

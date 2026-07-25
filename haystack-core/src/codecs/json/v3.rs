@@ -206,21 +206,9 @@ fn decode_prefixed_string(s: &str) -> Result<Kind, CodecError> {
         let prefix = &s[..2];
         let rest = &s[2..];
         match prefix {
-            "m:" => {
-                if rest.is_empty() {
-                    return Ok(Kind::Marker);
-                }
-            }
-            "z:" => {
-                if rest.is_empty() {
-                    return Ok(Kind::NA);
-                }
-            }
-            "-:" => {
-                if rest.is_empty() {
-                    return Ok(Kind::Remove);
-                }
-            }
+            "m:" if rest.is_empty() => return Ok(Kind::Marker),
+            "z:" if rest.is_empty() => return Ok(Kind::NA),
+            "-:" if rest.is_empty() => return Ok(Kind::Remove),
             "s:" => return Ok(Kind::Str(rest.to_string())),
             "n:" => return decode_number_str(rest),
             "r:" => return decode_ref_str(rest),

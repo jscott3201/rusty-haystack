@@ -83,9 +83,11 @@ impl HaystackServer {
 
     /// Merge additional routes into the server.
     ///
-    /// **Note:** Routes added via `with_router()` are NOT protected by the built-in
-    /// auth middleware. To protect custom routes, apply your own auth layer to the
-    /// router before passing it, or use `with_authenticated_router()` instead.
+    /// **Note:** Routes added via `with_router()` are merged after the built-in
+    /// middleware stack, so they are protected by NEITHER the auth middleware NOR
+    /// the 2 MB request-body limit. To protect custom routes, apply your own auth
+    /// and body-size layers to the router before passing it, or use
+    /// `with_authenticated_router()` instead (which is also covered by the body limit).
     ///
     /// The router's routes are merged at the top level, so paths must
     /// include any prefix (e.g. `/custom/endpoint`).

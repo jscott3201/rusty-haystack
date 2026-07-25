@@ -22,10 +22,10 @@ smallvec = { version = "1.15", features = ["serde"] }
 parking_lot = "0.12"
 indexmap = "2"
 tokio = { version = "1", features = ["sync"] }
-sha2 = "0.10"
-hmac = "0.12"
-pbkdf2 = { version = "0.12", features = ["simple"] }
-base64 = "0.22"
+sha2 = "0.11"
+hmac = "0.13"
+pbkdf2 = { version = "0.13", features = ["hmac"] }
+base64 = "0.23"
 rand = "0.10"
 subtle = "2"
 regex = "1"
@@ -35,7 +35,6 @@ zeroize = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
-proptest = "1.10"
 criterion = { version = "0.8", features = ["html_reports"] }
 test-case = "3"
 tempfile = "3"

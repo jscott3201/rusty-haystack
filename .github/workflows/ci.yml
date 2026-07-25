@@ -2,9 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+    # `edited` is not in the default set, and retargeting a PR fires only that.
+    # Without it, a PR moved from dev to main keeps the ubuntu-only checks its
+    # dev-targeted run produced.
+    types: [opened, synchronize, reopened, edited]
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.94.0"
+          toolchain: "1.97.1"
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -29,23 +33,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.94.0"
+          toolchain: "1.97.1"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings
 
+  # Anything targeting main runs the full three-OS matrix. Everything else
+  # (dev PRs, dev pushes) tests on ubuntu alone. Jobs run in parallel, so the
+  # slowest one paces the workflow, and windows takes about twice what the
+  # others do — 3m00s against ubuntu's 1m30s on the 2026-07-25 baseline run.
+  # Dropping it takes the slowest test job to 42s.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON((github.base_ref == 'main' || github.ref == 'refs/heads/main') && '["ubuntu-latest", "macos-latest", "windows-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.94.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}

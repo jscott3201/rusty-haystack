@@ -2,6 +2,7 @@
 name = "rusty-haystack"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "rusty_haystack"
@@ -11,6 +12,6 @@ crate-type = ["cdylib"]
 haystack-core = { package = "rusty-haystack-core", version = "0.8.1", path = "../haystack-core" }
 haystack-client = { package = "rusty-haystack-client", version = "0.8.1", path = "../haystack-client" }
 haystack-server = { package = "rusty-haystack-server", version = "0.8.1", path = "../haystack-server" }
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread"] }

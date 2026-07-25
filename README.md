@@ -20,7 +20,7 @@ A high-performance Rust implementation of the [Project Haystack](https://project
 - **HTTP server** — Axum 0.8 with 25 API endpoints, Tower auth middleware, SCRAM SHA-256 authentication, WebSocket watches, role-based access control, and 2 MB body limit
 - **HTTP/WS client** — async client with SCRAM handshake, mTLS, token zeroization, and pluggable transport (HTTP + WebSocket)
 - **CLI** — import, export, serve, validate, info, libs, specs, client queries, and user management. Password via `HAYSTACK_PASSWORD` env var.
-- **Python bindings** — PyO3 0.28 module with types, codecs, graph, filter, ontology, Xeto, client, server, and auth (`import rusty_haystack`)
+- **Python bindings** — PyO3 0.29 module with types, codecs, graph, filter, ontology, Xeto, client, server, and auth (`import rusty_haystack`)
 - **Docker** — multi-stage Alpine image (~15 MB)
 
 ## Performance
@@ -42,7 +42,7 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 
 ### Prerequisites
 
-- Rust 1.93+ (edition 2024)
+- Rust 1.97+ (edition 2024)
 - cargo
 
 ### Build
@@ -92,7 +92,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | [`haystack-server`](haystack-server/) | Axum HTTP API server with 25 endpoints, Tower auth middleware, SCRAM auth, WebSocket watches |
 | [`haystack-client`](haystack-client/) | Async HTTP + WebSocket client with SCRAM handshake, mTLS, token zeroization |
 | [`haystack-cli`](haystack-cli/) | CLI binary (`haystack`): import, export, serve, validate, info, libs, specs, client, user management |
-| [`rusty-haystack`](rusty-haystack/) | PyO3 0.28 Python bindings with full API parity (requires maturin) |
+| [`rusty-haystack`](rusty-haystack/) | PyO3 0.29 Python bindings with full API parity (requires maturin) |
 
 ## Documentation
 
@@ -126,15 +126,15 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | Crate | Version | Purpose |
 |-------|---------|---------|
 | axum | 0.8 | HTTP server framework |
-| tower / tower-http | 0.5 / 0.6 | Middleware (auth, CORS, body limits) |
+| tower / tower-http | 0.5 / 0.7 | Middleware (auth, CORS, body limits) |
 | reqwest | 0.13 | HTTP client (rustls TLS) |
 | tokio | 1.x | Async runtime |
-| tokio-tungstenite | 0.28 | WebSocket client |
+| tokio-tungstenite | 0.30 | WebSocket client |
 | serde / serde_json | 1.0 | Serialization framework |
-| roaring | 0.10 | Compressed bitmap indexes (RoaringBitmap) |
+| roaring | 0.11 | Compressed bitmap indexes (RoaringBitmap) |
 | parking_lot | 0.12 | Fast synchronization primitives |
 | zeroize | 1.x | Secure memory zeroing for credentials |
-| pyo3 | 0.28 | Python bindings |
+| pyo3 | 0.29 | Python bindings |
 | criterion | 0.8 | Benchmarking |
 | rustc-hash | 2 | Fast non-cryptographic hashing (FxHasher) |
 
