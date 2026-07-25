@@ -469,8 +469,6 @@ impl DefNamespace {
         Ok((name, qnames))
     }
 
-    /// Unload a library by name. Removes all defs, specs, and taxonomy entries.
-    /// Returns Err if another loaded library depends on this one or if it's bundled.
     /// Rebuild all derived indexes (taxonomy, mandatory, conjuncts, tagOn,
     /// choice) from the current `defs` map. Needed after `unload_lib` removes a
     /// library's defs, because those indexes accumulate per-def entries that a
@@ -519,6 +517,8 @@ impl DefNamespace {
         }
     }
 
+    /// Unload a library by name. Removes all defs, specs, and taxonomy entries.
+    /// Returns Err if another loaded library depends on this one or if it's bundled.
     pub fn unload_lib(&mut self, lib_name: &str) -> Result<(), String> {
         // Check for dependents
         for (name, lib) in &self.libs {
