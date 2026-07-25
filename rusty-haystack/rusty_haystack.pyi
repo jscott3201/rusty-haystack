@@ -409,8 +409,13 @@ class Filter:
     def or_(self, other: Filter) -> Filter:
         """Combine with OR."""
         ...
-    def matches(self, entity: HDict) -> bool:
-        """Evaluate this filter against an entity dict."""
+    def matches(self, entity: HDict, namespace: DefNamespace | None = None) -> bool:
+        """Evaluate this filter against an entity dict.
+
+        `namespace` is required for spec-match terms such as `ph::Point`.
+        Evaluating one without a namespace raises FilterError rather than
+        reporting a non-match.
+        """
         ...
     @property
     def node_type(self) -> str:
@@ -441,8 +446,15 @@ def parse_filter(expr: str) -> str:
     """Parse a filter expression and return its AST as a debug string."""
     ...
 
-def matches_filter(filter_expr: str, entity: HDict) -> bool:
-    """Evaluate a filter expression against an entity dict."""
+def matches_filter(
+    filter_expr: str, entity: HDict, namespace: DefNamespace | None = None
+) -> bool:
+    """Evaluate a filter expression against an entity dict.
+
+    `namespace` is required for spec-match terms such as `ph::Point`.
+    Raises FilterError if the expression is invalid, or if it contains a
+    spec-match term and no namespace was given.
+    """
     ...
 
 # ── graph ──
@@ -462,11 +474,17 @@ class GraphDiff:
     ref_val: str
     @property
     def old(self) -> HDict | None:
-        """Entity state before the mutation (None for Add)."""
+        """Entity state before the mutation. Populated for Remove only.
+
+        An Update reports None here; read previous_tags instead.
+        """
         ...
     @property
     def new(self) -> HDict | None:
-        """Entity state after the mutation (None for Remove)."""
+        """Entity state after the mutation. Populated for Add only.
+
+        An Update reports None here; read changed_tags instead.
+        """
         ...
     @property
     def changed_tags(self) -> HDict | None:

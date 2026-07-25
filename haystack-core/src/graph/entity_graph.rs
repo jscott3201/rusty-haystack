@@ -570,9 +570,13 @@ impl EntityGraph {
             Some(expr) => {
                 let ast = crate::filter::parse_filter(expr)
                     .map_err(|e| GraphError::Filter(e.to_string()))?;
+                // Same resolver and namespace as query(), so spec matching and
+                // ref-path traversal behave identically here.
+                let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
+                let ns = self.namespace.as_ref();
                 Ok(points
                     .into_iter()
-                    .filter(|e| crate::filter::matches(&ast, e, None))
+                    .filter(|e| matches_with_ns(&ast, e, Some(&resolver), ns))
                     .collect())
             }
             None => Ok(points),
@@ -1827,6 +1831,39 @@ mod tests {
         // Only p1 and p2 have temp (the existing ones).
         assert_eq!(temp_points.len(), 2);
         assert!(temp_points.iter().all(|p| p.has("temp")));
+    }
+
+    #[test]
+    fn equip_points_resolves_spec_match_against_namespace() {
+        // equip_points used to evaluate its filter with no namespace, which made
+        // spec matching unconditionally false no matter what the namespace held.
+        let ns = DefNamespace::load_standard().expect("bundled defs load");
+        let mut g = EntityGraph::with_namespace(ns);
+        g.add(make_site("s1")).unwrap();
+        g.add(make_equip("e1", "s1")).unwrap();
+        g.add(make_point("p1", "e1")).unwrap();
+        g.add(make_point("p2", "e1")).unwrap();
+
+        // Spec-match syntax is a bare qualified name; there is no `fits` keyword.
+        let fitted = g.equip_points("e1", Some("ph::Point")).unwrap();
+        assert_eq!(fitted.len(), 2, "both points fit ph::Point");
+
+        // The negative case is what proves the namespace is consulted. An
+        // unregistered name has no mandatory tags, so `all()` over an empty set
+        // is vacuously true and every entity matches — meaning a positive
+        // assertion alone passes even with an empty namespace.
+        let mismatched = g.equip_points("e1", Some("ph::Ahu")).unwrap();
+        assert_eq!(mismatched.len(), 0, "points must not fit ph::Ahu");
+    }
+
+    #[test]
+    fn equip_points_follows_ref_paths() {
+        // The ref resolver has to be threaded as well as the namespace. Passing
+        // only the namespace leaves multi-segment paths unresolvable, so this
+        // filter would match nothing.
+        let g = build_hierarchy_graph();
+        let via_site = g.equip_points("e1", Some("equipRef->siteRef")).unwrap();
+        assert_eq!(via_site.len(), 2, "equipRef->siteRef must resolve to s1");
     }
 
     // ── Hierarchy tree tests ──

@@ -10,6 +10,9 @@ on:
     # dev-targeted run produced.
     types: [opened, synchronize, reopened, edited]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
@@ -59,6 +62,40 @@ jobs:
         with:
           key: ${{ matrix.os }}
       - run: cargo test --workspace --exclude rusty-haystack
+
+  # The PyO3 crate is excluded from `cargo test --workspace`, so nothing above
+  # covers it. Without this job the Python suite rots unnoticed — 11 of its tests
+  # spent four months failing against APIs removed in v0.8.0.
+  python:
+    name: Python Bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pyo3
+      # Exact version: setup-uv stopped publishing floating major tags after v7,
+      # so `@v9` does not resolve.
+      - uses: astral-sh/setup-uv@v9.0.0
+      # Pinned rather than inherited from the runner image, so the interpreter
+      # the extension is built against does not drift. pyo3 is configured
+      # without abi3, making every build interpreter-specific.
+      - run: uv venv --python 3.12
+      - run: uv pip install maturin pytest
+      # Activate rather than `uv run`, and reach the crate with -m. `uv run`
+      # inside rusty-haystack/ sees its pyproject.toml, builds a second .venv
+      # for that project, and then cannot find the maturin installed here.
+      - name: Build and install the extension
+        run: |
+          source .venv/bin/activate
+          maturin develop --release -m rusty-haystack/Cargo.toml
+      - name: Run Python tests
+        run: |
+          source .venv/bin/activate
+          pytest rusty-haystack/tests -q
 
   deny:
     name: Cargo Deny
