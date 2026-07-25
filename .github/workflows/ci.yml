@@ -77,9 +77,17 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv venv
       - run: uv pip install maturin pytest
-      - run: uv run maturin develop --release
-        working-directory: rusty-haystack
-      - run: uv run pytest rusty-haystack/tests -q
+      # Activate rather than `uv run`, and reach the crate with -m. `uv run`
+      # inside rusty-haystack/ sees its pyproject.toml, builds a second .venv
+      # for that project, and then cannot find the maturin installed here.
+      - name: Build and install the extension
+        run: |
+          source .venv/bin/activate
+          maturin develop --release -m rusty-haystack/Cargo.toml
+      - name: Run Python tests
+        run: |
+          source .venv/bin/activate
+          pytest rusty-haystack/tests -q
 
   deny:
     name: Cargo Deny
