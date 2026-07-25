@@ -168,7 +168,10 @@ The Zinc/JSON parsers enforce limits to prevent denial-of-service via malicious 
 The `DefNamespace` loads bundled Haystack 4 definitions (`ph`, `phScience`, `phIoT`, `phIct`) and optional Xeto specs. It provides:
 
 - **Taxonomy** -- `is_a(name, supertype)` for nominal subtype checking
-- **Fitting** -- `fits(entity, type_name)` for structural type matching
+- **Membership** -- `entity_is_a(entity, type_name)`: does the entity carry a marker
+  for that type or a subtype? This is what a `ph::X` filter term evaluates.
+- **Conformance** -- `fits(entity, type_name)`: does the entity carry all of the
+  type's mandatory markers? A well-formedness rule, not an identity.
 - **Validation** -- `validate_entity(entity)` for ontology conformance
 - **Xeto management** -- `load_xeto(source, lib)`, `unload_lib(name)`, `get_spec(qname)`
 

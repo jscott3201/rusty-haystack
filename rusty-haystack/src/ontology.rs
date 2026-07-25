@@ -363,11 +363,28 @@ impl PyDefNamespace {
     }
 
     /// Check nominal subtype relationship: is `name` a subtype of `supertype`?
+    ///
+    /// Compares two type names. To ask about an entity, use entity_is_a.
     fn is_a(&self, name: &str, supertype: &str) -> bool {
         self.inner.is_a(name, supertype)
     }
 
-    /// Check if an entity structurally fits a type (has all mandatory markers).
+    /// Membership: is `entity` a `type_name`?
+    ///
+    /// True when the entity carries a marker tag whose def is `type_name` or a
+    /// subtype of it, so an entity tagged `ahu` is an ahu, an equip and an
+    /// entity. This is what a `ph::X` filter term evaluates.
+    fn entity_is_a(&self, entity: &PyHDict, type_name: &str) -> bool {
+        self.inner.entity_is_a(&entity.inner, type_name)
+    }
+
+    /// Conformance: does `entity` carry all of `type_name`'s mandatory markers?
+    ///
+    /// This asks whether the entity is *well-formed* as that type, which is not
+    /// the same as whether it *is* one — use entity_is_a for that, and note
+    /// that filters (`ph::Sensor`) use entity_is_a. 579 of the 719 standard
+    /// defs have no mandatory markers, so fits() is True against them for any
+    /// entity at all, including an empty one.
     fn fits(&self, entity: &PyHDict, type_name: &str) -> bool {
         self.inner.fits(&entity.inner, type_name)
     }
