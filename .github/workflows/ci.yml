@@ -77,7 +77,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: pyo3
-      - uses: astral-sh/setup-uv@v9
+      # Exact version: setup-uv stopped publishing floating major tags after v7,
+      # so `@v9` does not resolve.
+      - uses: astral-sh/setup-uv@v9.0.0
       # Pinned rather than inherited from the runner image, so the interpreter
       # the extension is built against does not drift. pyo3 is configured
       # without abi3, making every build interpreter-specific.
