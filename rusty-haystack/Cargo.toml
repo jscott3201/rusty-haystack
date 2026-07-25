@@ -2,6 +2,7 @@
 name = "rusty-haystack"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "rusty_haystack"

@@ -63,7 +63,7 @@ impl Transport for HttpTransport {
                 .get(&url)
                 .header(
                     "Authorization",
-                    format!("BEARER authToken={}", &*self.auth_token),
+                    format!("BEARER authToken={}", *self.auth_token),
                 )
                 .header("Accept", &self.format)
                 .send()
@@ -83,7 +83,7 @@ impl Transport for HttpTransport {
                 .post(&url)
                 .header(
                     "Authorization",
-                    format!("BEARER authToken={}", &*self.auth_token),
+                    format!("BEARER authToken={}", *self.auth_token),
                 )
                 .header("Content-Type", content_type)
                 .header("Accept", &self.format)

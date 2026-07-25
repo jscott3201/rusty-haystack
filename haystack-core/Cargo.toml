@@ -25,7 +25,7 @@ tokio = { version = "1", features = ["sync"] }
 sha2 = "0.11"
 hmac = "0.13"
 pbkdf2 = { version = "0.13", features = ["hmac"] }
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.10"
 subtle = "2"
 regex = "1"
