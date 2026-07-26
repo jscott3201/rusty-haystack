@@ -83,7 +83,6 @@ impl ServeChild {
             .spawn()
             .expect("spawn haystack serve");
 
-<<<<<<< HEAD
         let stdout = child.stdout.take().expect("piped stdout");
         let mut line = String::new();
         BufReader::new(stdout)
@@ -95,32 +94,6 @@ impl ServeChild {
             .unwrap_or_else(|| panic!("could not parse a port from serve output: {line:?}"));
 
         Self { child, port }
-=======
-    /// True once the port accepts a connection. False if the child died first —
-    /// which is the lost-the-port case, and is retryable. Dropping `self` on that
-    /// path still reaps the process through the guard.
-    fn wait_until_ready(&mut self) -> bool {
-        // Generous on purpose. This is a poll loop, so it returns the moment the
-        // port answers and a high ceiling costs nothing on a fast machine — but
-        // under `cargo test --workspace` the serve binary starts while several
-        // other test binaries are still compiling and running, and a tight bound
-        // turns machine load into a spurious failure.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-                return true;
-            }
-            if self.child.try_wait().expect("poll serve process").is_some() {
-                return false;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "haystack serve did not become ready on port {} within 5 seconds",
-                self.port
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
->>>>>>> 249dd29 (fix(server): propagate a loaded lib into the graph's namespace)
     }
 
     fn read(&self, filter: &str) -> HttpResponse {
@@ -413,6 +386,46 @@ fn loading_a_lib_makes_its_specs_filterable() {
     assert!(
         !after.body.contains("does not define"),
         "the graph still rejects the loaded spec:\n{}",
+        after.body
+    );
+}
+
+/// Unloading a library must make its specs unfilterable again, including after the
+/// spec has already been queried once.
+///
+/// This is the direction the first version of the fix got wrong. The query cache is
+/// keyed on (filter, entity version), and swapping the namespace deliberately does
+/// not bump the version — no entity changed, so waking watchers would be noise. But
+/// the cache hit path returns before spec validation runs, so a successful
+/// `myLib::Widget` query cached before the unload was still served afterwards.
+#[test]
+fn unloading_a_lib_makes_its_specs_unfilterable_again() {
+    let server = ServeChild::spawn(&["--demo"]);
+
+    let loaded = server.post(
+        "/api/loadLib",
+        "ver:\"3.0\"\nname,source\n\"myLib\",\"Widget : Dict { widget: Marker }\"\n",
+    );
+    assert_eq!(loaded.status, 200, "loadLib failed:\n{}", loaded.body);
+
+    // Query it once so the result is cached. Without this the bug is invisible.
+    let cached = server.read("myLib::Widget");
+    assert_eq!(
+        cached.status, 200,
+        "the loaded spec must be filterable:\n{}",
+        cached.body
+    );
+
+    let unloaded = server.post("/api/unloadLib", "ver:\"3.0\"\nname\n\"myLib\"\n");
+    assert_eq!(unloaded.status, 200, "unloadLib failed:\n{}", unloaded.body);
+
+    // No entity changed across the unload, so the entity version is identical and a
+    // version-keyed cache would still hold the pre-unload answer.
+    let after = server.read("myLib::Widget");
+    assert_eq!(
+        after.status, 400,
+        "an unloaded spec must stop being filterable; a stale cached result was \
+         served instead:\n{}",
         after.body
     );
 }
