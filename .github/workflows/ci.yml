@@ -74,6 +74,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: pyo3
@@ -85,6 +86,13 @@ jobs:
       # without abi3, making every build interpreter-specific.
       - run: uv venv --python 3.12
       - run: uv pip install maturin pytest
+      # The Clippy job above excludes this crate because `cargo clippy --workspace`
+      # needs an interpreter to resolve the pyo3 build script. This job has one, so
+      # the exclusion is about where the lint runs, not whether it runs.
+      - name: Clippy
+        run: |
+          source .venv/bin/activate
+          cargo clippy -p rusty-haystack --all-targets -- -D warnings
       # Activate rather than `uv run`, and reach the crate with -m. `uv run`
       # inside rusty-haystack/ sees its pyproject.toml, builds a second .venv
       # for that project, and then cannot find the maturin installed here.

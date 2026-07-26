@@ -55,7 +55,7 @@ impl PyAuthManager {
     fn from_toml(path: &str) -> PyResult<Self> {
         AuthManager::from_toml(path)
             .map(|inner| Self { inner })
-            .map_err(|e| PyErr::new::<exceptions::AuthError, _>(e))
+            .map_err(PyErr::new::<exceptions::AuthError, _>)
     }
 
     /// Load auth configuration from a TOML string.
@@ -63,7 +63,7 @@ impl PyAuthManager {
     fn from_toml_str(content: &str) -> PyResult<Self> {
         AuthManager::from_toml_str(content)
             .map(|inner| Self { inner })
-            .map_err(|e| PyErr::new::<exceptions::AuthError, _>(e))
+            .map_err(PyErr::new::<exceptions::AuthError, _>)
     }
 
     /// Whether authentication is enabled (has users configured).
@@ -205,10 +205,10 @@ impl PyHaystackServer {
                     return;
                 }
             };
-            if let Err(e) = rt.block_on(server.run()) {
-                if let Ok(mut slot) = error_slot.lock() {
-                    *slot = Some(e.to_string());
-                }
+            if let Err(e) = rt.block_on(server.run())
+                && let Ok(mut slot) = error_slot.lock()
+            {
+                *slot = Some(e.to_string());
             }
         });
         Ok(())
