@@ -11,7 +11,8 @@
 //   path       := name ("->" name)*
 //   cmpOp      := "==" | "!=" | "<" | "<=" | ">" | ">="
 //   val        := <zinc scalar literal>
-//   specMatch  := qualified_name (contains "::")
+//   specMatch  := qualified_name "::" specName
+//   specName   := name ("-" name)*        -- hyphenated for conjunct defs
 //   name       := [a-zA-Z][a-zA-Z0-9_]*
 
 use super::ast::{CmpOp, FilterNode, Path};
@@ -158,14 +159,18 @@ impl<'a> FilterParser<'a> {
     /// because `-` is a subtraction operator elsewhere in the grammar, which made
     /// every one of them a parse error.
     ///
-    /// A hyphen is only taken when an alphanumeric follows it, so a trailing `-`
-    /// still ends the name and stays available to the expression grammar.
+    /// A hyphen is only taken when a letter follows it, so a trailing `-` still
+    /// ends the name and stays available to the expression grammar. The lookahead
+    /// deliberately matches what `read_name` will accept rather than merely what
+    /// looks name-ish: admitting a digit lets the hyphen be consumed and the name
+    /// read fail one character later, which reports `ph::Ahu-1` against the `::`
+    /// instead of against the `-1` that actually stopped it.
     fn read_spec_type_name(&mut self) -> Option<String> {
         let start = self.pos;
         self.read_name()?;
         while self.peek() == Some('-') {
             match self.src[self.pos + 1..].chars().next() {
-                Some(next) if next.is_ascii_alphanumeric() => {
+                Some(next) if next.is_ascii_alphabetic() => {
                     self.pos += 1;
                     self.read_name()?;
                 }
@@ -606,15 +611,22 @@ mod tests {
         // Both spellings are errors either way — what the lookahead buys is the
         // accurate one. Without it the parser consumes the `-`, fails to find a
         // name after it, and blames the `::`, which was never the problem.
-        let err = parse_filter("ph::Ahu->foo").unwrap_err().to_string();
-        assert!(
-            err.contains("->foo"),
-            "error should point at the trailing input, got: {err}"
-        );
-        assert!(
-            !err.contains("after '::'"),
-            "error should not blame the qualifier, got: {err}"
-        );
+        for src in [
+            "ph::Ahu->foo",
+            "ph::Ahu-1",
+            "ph::Ahu-  and site",
+            "ph::a-_b",
+        ] {
+            let err = parse_filter(src).unwrap_err().to_string();
+            assert!(
+                err.contains("trailing input"),
+                "{src}: error should point at the trailing input, got: {err}"
+            );
+            assert!(
+                !err.contains("after '::'"),
+                "{src}: error should not blame the qualifier, got: {err}"
+            );
+        }
     }
 
     #[test]

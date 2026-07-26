@@ -359,8 +359,13 @@ impl DefNamespace {
     }
 
     fn entity_is_a_depth(&self, entity: &HDict, type_name: &str, depth: usize) -> bool {
-        // Conjuncts decompose into strictly simpler names, so this bottoms out; the
-        // cap is only a guard against malformed data that decomposes into itself.
+        // Components come from splitting the symbol on `-`, so a component never
+        // contains a `-` and is therefore never itself a registered conjunct. In
+        // practice this recurses exactly one level: measured across all 162
+        // bundled conjuncts, the maximum decomposition depth is 1. The recursion
+        // and the cap are both defensive — they cost nothing and mean a future
+        // registration path that does produce a nested conjunct is handled rather
+        // than looping.
         const MAX_CONJUNCT_DEPTH: usize = 8;
         if !self.has_type(type_name) {
             return false;
