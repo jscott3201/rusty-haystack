@@ -53,9 +53,15 @@ crate is excluded from which command:
 ./.agents/gate.sh --full   # also cargo-deny
 ```
 
-It runs CI's commands in CI's exact form. If it passes and CI does not, the gate is wrong
-and that is a bug worth reporting — a gate that checks a different target set than CI is
-worse than no gate, because it reports green on what CI is about to reject.
+It runs CI's main commands in CI's exact form, but it is **not** a complete substitute for
+CI today. It does not run the two `chrono-tz` feature invocations or clippy on the PyO3
+crate, and it reports success after skipping the Python bindings entirely when no `.venv`
+is present. So a green gate means the common failures are ruled out, not that CI will pass.
+Closing that gap is tracked separately.
+
+If the gate passes and CI fails on something the gate *does* cover, the gate is wrong and
+that is worth reporting — a gate that checks a different target set than CI is worse than
+no gate, because it reports green on what CI is about to reject.
 
 ## What CI enforces
 
@@ -75,9 +81,11 @@ single green `Test (ubuntu-latest)` has not been checked on the other two; that 
 when the change reaches `main`. Platform-sensitive work (paths, line endings, timing)
 deserves a local check on your own OS before you rely on the matrix.
 
-The Clippy job excludes the PyO3 crate because `cargo clippy --workspace` needs an
-interpreter to resolve pyo3's build script. The Python job has one and lints the crate
-there. The exclusion is about *where* the lint runs, not *whether* it runs.
+The Clippy job excludes the PyO3 crate and the Python job lints it instead, so the
+exclusion is about *where* the lint runs, not *whether* it runs. Note that
+`cargo clippy --workspace` does lint that crate successfully on a normal developer machine
+— verified on macOS with no virtualenv active — so if you want a single lint command
+locally, drop the exclusion and use it.
 
 ## Python bindings
 
@@ -146,7 +154,10 @@ limit at all. Find them at their definitions:
 | SCRAM iteration ceiling | `haystack-core/src/auth.rs` |
 | Watches, watched IDs, encode cache | `haystack-server/src/ws.rs` |
 | History items and `hisWrite` rows | `haystack-server/src/his_store.rs`, `ops/his.rs` |
+| `/api/changes` response rows | `haystack-server/src/ops/changes.rs` |
 | Request body size | `haystack-server/src/app.rs` |
+| Graph changelog capacity | `haystack-core/src/graph/changelog.rs` |
+| Client in-flight requests, decompressed payload size | `haystack-client/src/transport/ws.rs` |
 
 If you change one, change it at the definition and let the test suite tell you who cared.
 
