@@ -4,6 +4,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 
+use std::sync::Arc;
+
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::kinds::Kind;
 
@@ -174,18 +176,24 @@ pub async fn handle_load_lib(
         _ => return Err(HaystackError::bad_request("source column required")),
     };
 
-    let mut ns = state.namespace.write();
-    let qnames = ns
-        .load_xeto_str(&source, &name)
-        .map_err(|e| HaystackError::bad_request(format!("load error: {e}")))?;
+    // Snapshot under the namespace lock, then release it BEFORE touching the graph.
+    // Holding both would establish a namespace-then-graph order here, and a custom
+    // router installed via with_router can legitimately take them graph-then-
+    // namespace — an AB/BA deadlock, and parking_lot has no deadlock detection in
+    // release builds. Nothing below needs the namespace lock held.
+    let (qnames, snapshot) = {
+        let mut ns = state.namespace.write();
+        let qnames = ns
+            .load_xeto_str(&source, &name)
+            .map_err(|e| HaystackError::bad_request(format!("load error: {e}")))?;
+        (qnames, Arc::new(ns.clone()))
+    };
 
     // Push the new ontology into the graph, or loadLib would succeed and the spec
     // would still be unfilterable: the server holds its own mutable namespace and
     // every graph holds an Arc snapshot, so without this the two disagree about
-    // whether the lib exists. Swapping the handle keeps each query on one coherent
-    // namespace rather than letting the ontology shift mid-query.
-    state.graph.set_namespace(ns.clone());
-    drop(ns);
+    // whether the lib exists.
+    state.graph.set_namespace(snapshot);
 
     let cols = vec![HCol::new("loaded"), HCol::new("specs")];
     let mut result = HDict::new();
@@ -222,13 +230,16 @@ pub async fn handle_unload_lib(
         _ => return Err(HaystackError::bad_request("name column required")),
     };
 
-    let mut ns = state.namespace.write();
-    ns.unload_lib(&name).map_err(HaystackError::bad_request)?;
+    // Same lock discipline as loadLib: snapshot, release, then update the graph.
+    let snapshot = {
+        let mut ns = state.namespace.write();
+        ns.unload_lib(&name).map_err(HaystackError::bad_request)?;
+        Arc::new(ns.clone())
+    };
 
-    // Same reason as loadLib: without this the graph keeps answering filters from
-    // a namespace that still defines the unloaded lib.
-    state.graph.set_namespace(ns.clone());
-    drop(ns);
+    // Without this the graph keeps answering filters from a namespace that still
+    // defines the unloaded lib.
+    state.graph.set_namespace(snapshot);
 
     let cols = vec![HCol::new("unloaded")];
     let mut result = HDict::new();

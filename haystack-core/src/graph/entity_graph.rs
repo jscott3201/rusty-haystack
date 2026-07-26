@@ -108,6 +108,10 @@ impl QueryCache {
     }
 
     /// Remove all entries whose version is older than `min_version`.
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     fn purge_stale(&mut self, min_version: u64) {
         self.entries
             .retain(|(_filter, version), _| *version >= min_version);
@@ -199,6 +203,13 @@ impl EntityGraph {
     /// own `namespace_arc()` handle instead.
     pub fn set_namespace(&mut self, ns: impl Into<Arc<DefNamespace>>) {
         self.namespace = Some(ns.into());
+        // The query cache is keyed on (filter, version), and this does not bump the
+        // version — no entity changed, so waking every watcher would be noise. But
+        // `version` has a second consumer: a spec-match result depends on the
+        // ontology as much as on the entities, and the cache hit path returns before
+        // spec validation runs. Without this, a cached `myLib::Widget` hit outlives
+        // the unload that should have invalidated it.
+        self.query_cache.lock().clear();
     }
 
     /// Refuse a filter whose spec-match terms this graph's namespace cannot
