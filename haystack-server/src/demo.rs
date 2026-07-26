@@ -109,6 +109,12 @@ fn make_vav(
     d.set("siteRef", Kind::Ref(HRef::from_val(site_id)));
     d.set("floorRef", Kind::Ref(HRef::from_val(floor_id)));
     d.set("equipRef", Kind::Ref(HRef::from_val(ahu_id)));
+    // `equipRef` is containment; it does not say air flows from the AHU. That is
+    // `airRef` — "Air flows from the referent to this entity" (defs.trio:207) — and
+    // it is what ph.equips::AhuVav queries via "airRef+". Without it the demo VAVs
+    // are not modelled as AHU-fed, which went unnoticed while that spec matched
+    // every entity regardless.
+    d.set("airRef", Kind::Ref(HRef::from_val(ahu_id)));
     d
 }
 
@@ -214,6 +220,45 @@ mod tests {
         let entities = demo_entities();
         // 1 site + 3 floors + 2 AHUs + 6 VAVs + 24 points = 36
         assert_eq!(entities.len(), 36);
+    }
+
+    /// The bundled `ph.equips::AhuVav` spec must answer correctly on the shipped
+    /// demo data — exactly the six VAVs, not every entity and not none.
+    ///
+    /// Both wrong answers have been live. Before query slots were evaluated at all
+    /// (#22) this matched all 36 entities, which is what hid the fact that the demo
+    /// VAVs carried no `airRef`; once evaluation was threaded through, the same
+    /// query matched nothing. A count assertion alone would have accepted zero as
+    /// progress, so this pins the identities.
+    #[test]
+    fn bundled_ahu_vav_spec_matches_exactly_the_demo_vavs() {
+        use haystack_core::graph::EntityGraph;
+        use haystack_core::ontology::DefNamespace;
+
+        let ns = DefNamespace::load_standard().expect("standard ontology");
+        let mut graph = EntityGraph::with_namespace(ns);
+        for entity in demo_entities() {
+            graph.add(entity).expect("demo entity is valid");
+        }
+
+        let matched: HashSet<String> = graph
+            .read_all("ph.equips::AhuVav", 0)
+            .expect("the bundled spec resolves")
+            .iter()
+            .filter_map(|e| e.id().map(|r| r.val.clone()))
+            .collect();
+
+        let expected: HashSet<String> = demo_entities()
+            .iter()
+            .filter(|e| e.has("vav"))
+            .filter_map(|e| e.id().map(|r| r.val.clone()))
+            .collect();
+
+        assert_eq!(expected.len(), 6, "the demo builds six VAVs");
+        assert_eq!(
+            matched, expected,
+            "AhuVav must match exactly the AHU-fed VAVs"
+        );
     }
 
     #[test]
