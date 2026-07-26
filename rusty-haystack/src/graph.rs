@@ -410,6 +410,7 @@ impl PyEntityGraph {
         ref_val: &str,
         ref_tags: Vec<String>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        self.check_live()?;
         let tags: Vec<&str> = ref_tags.iter().map(|s| s.as_str()).collect();
         self.inner
             .ref_chain(ref_val, &tags)
@@ -447,6 +448,7 @@ impl PyEntityGraph {
         equip_ref: &str,
         filter: Option<&str>,
     ) -> PyResult<Vec<Py<PyAny>>> {
+        self.check_live()?;
         self.inner
             .equip_points(equip_ref, filter)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
@@ -466,6 +468,7 @@ impl PyEntityGraph {
         root: &str,
         max_depth: usize,
     ) -> PyResult<Option<Py<PyAny>>> {
+        self.check_live()?;
         match self.inner.hierarchy_tree(root, max_depth) {
             Some(node) => Ok(Some(hierarchy_node_to_py(py, &node)?)),
             None => Ok(None),

@@ -191,11 +191,16 @@ impl PyHaystackServer {
     /// Every later call on it raises RuntimeError instead of silently doing nothing.
     fn with_auth(&mut self, auth: &mut PyAuthManager) -> PyResult<()> {
         auth.check_live()?;
+        // Claim the server BEFORE poisoning the manager. Taking it first would
+        // destroy a perfectly good AuthManager on an already-consumed server and
+        // still report success — trading one silent failure for another.
+        let server = self
+            .inner
+            .take()
+            .ok_or_else(|| PyErr::new::<exceptions::HaystackError, _>("Server already consumed"))?;
         let taken = std::mem::replace(&mut auth.inner, AuthManager::empty());
         auth.consumed = true;
-        if let Some(server) = self.inner.take() {
-            self.inner = Some(server.with_auth(taken));
-        }
+        self.inner = Some(server.with_auth(taken));
         Ok(())
     }
 
