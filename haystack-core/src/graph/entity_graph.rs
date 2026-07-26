@@ -499,6 +499,18 @@ impl EntityGraph {
 
         // Phase 2: full filter evaluation.
         let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
+        // The reverse half of query-slot evaluation. `sources_to` is the ref
+        // adjacency index the graph already maintains, so answering "who points
+        // at me through this tag" costs a lookup rather than a scan.
+        let inverse = |target: &HRef, tag: &str| -> Vec<&HDict> {
+            self.adjacency
+                .sources_to(&target.val, Some(tag))
+                .iter()
+                .filter_map(|eid| self.reverse_id.get(eid))
+                .filter_map(|id| self.entities.get(id))
+                .collect()
+        };
+        let ctx = crate::xeto::QueryContext::new(&resolver, &inverse);
 
         let mut results: Vec<&HDict>;
 
@@ -510,7 +522,7 @@ impl EntityGraph {
                 }
                 if let Some(ref_val) = self.reverse_id.get(&eid)
                     && let Some(entity) = self.entities.get(ref_val)
-                    && matches_with_ns(&ast, entity, Some(&resolver), ns)
+                    && matches_with_ns(&ast, entity, Some(ctx), ns)
                 {
                     results.push(entity);
                 }
@@ -521,7 +533,7 @@ impl EntityGraph {
                 if results.len() >= effective_limit {
                     break;
                 }
-                if matches_with_ns(&ast, entity, Some(&resolver), ns) {
+                if matches_with_ns(&ast, entity, Some(ctx), ns) {
                     results.push(entity);
                 }
             }
@@ -651,11 +663,23 @@ impl EntityGraph {
                 // Same resolver, namespace, and spec checking as query(), so
                 // spec matching and ref-path traversal behave identically here.
                 let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
+                // The reverse half of query-slot evaluation. `sources_to` is the ref
+                // adjacency index the graph already maintains, so answering "who points
+                // at me through this tag" costs a lookup rather than a scan.
+                let inverse = |target: &HRef, tag: &str| -> Vec<&HDict> {
+                    self.adjacency
+                        .sources_to(&target.val, Some(tag))
+                        .iter()
+                        .filter_map(|eid| self.reverse_id.get(eid))
+                        .filter_map(|id| self.entities.get(id))
+                        .collect()
+                };
+                let ctx = crate::xeto::QueryContext::new(&resolver, &inverse);
                 let ns = self.namespace();
                 self.reject_unresolved_specs(&ast, ns)?;
                 Ok(points
                     .into_iter()
-                    .filter(|e| matches_with_ns(&ast, e, Some(&resolver), ns))
+                    .filter(|e| matches_with_ns(&ast, e, Some(ctx), ns))
                     .collect())
             }
             None => Ok(points),
