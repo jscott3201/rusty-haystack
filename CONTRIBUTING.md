@@ -49,19 +49,29 @@ Before opening a PR, run the repo gate. It exists so you do not have to remember
 crate is excluded from which command:
 
 ```bash
-./.agents/gate.sh          # rustfmt, clippy, tests, Python bindings
-./.agents/gate.sh --full   # also cargo-deny
+./.agents/gate.sh          # everything except cargo-deny
+./.agents/gate.sh --full   # every CI check — this is the CI-equivalent run
 ```
 
-It runs CI's main commands in CI's exact form, but it is **not** a complete substitute for
-CI today. It does not run the two `chrono-tz` feature invocations or clippy on the PyO3
-crate, and it reports success after skipping the Python bindings entirely when no `.venv`
-is present. So a green gate means the common failures are ruled out, not that CI will pass.
-Closing that gap is tracked separately.
+It runs CI's commands in CI's exact form, including the two `chrono-tz` feature
+invocations and clippy on the PyO3 crate.
 
-If the gate passes and CI fails on something the gate *does* cover, the gate is wrong and
-that is worth reporting — a gate that checks a different target set than CI is worse than
-no gate, because it reports green on what CI is about to reject.
+**Read the exit status, not just the last line.** A check that could not run is never
+reported as one that passed:
+
+| Exit | Meaning |
+|---|---|
+| `0` | every CI check ran and passed — the only result that predicts CI |
+| `1` | something failed |
+| `2` | what ran was green, but the run was not CI-equivalent (something was skipped) |
+
+So `--full` with a `.venv` present is the run that can exit `0`. Without the venv the
+Python bindings and their clippy pass cannot run, and the gate says so rather than
+implying they were fine.
+
+If the gate passes and CI fails, the gate is wrong and that is worth reporting — a gate
+that checks a different target set than CI is worse than no gate, because it reports
+green on what CI is about to reject.
 
 ## What CI enforces
 
