@@ -50,7 +50,7 @@ impl PyTlsConfig {
     fn from_files(cert_path: &str, key_path: &str, ca_path: Option<&str>) -> PyResult<Self> {
         TlsConfig::from_files(cert_path, key_path, ca_path)
             .map(|inner| Self { inner })
-            .map_err(|e| PyErr::new::<exceptions::ClientError, _>(e))
+            .map_err(PyErr::new::<exceptions::ClientError, _>)
     }
 
     fn __repr__(&self) -> String {
