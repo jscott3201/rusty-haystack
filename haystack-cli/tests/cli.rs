@@ -7,11 +7,10 @@
 // wiring is invisible to `haystack-core`'s own tests because it lives entirely
 // in the command functions here.
 
-use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// A three-entity zinc grid: one site, one AHU, one point.
 const GRID: &str = "ver:\"3.0\"\n\
@@ -60,64 +59,41 @@ struct ServeChild {
 }
 
 impl ServeChild {
-    /// Spawn a server on a free port, retrying if the port is taken from under us.
+    /// Spawn a server on a kernel-assigned port and learn that port from the child.
     ///
-    /// The port has to be picked here rather than with `--port 0`, because the server
-    /// never reports the address it actually bound (see issue #35). That leaves a
-    /// window between releasing the reservation and the child binding it, in which
-    /// another process can claim the port — so a child that dies before binding is
-    /// retried on a fresh port instead of failing a test whose subject is fine.
+    /// The obvious approach — bind :0 in the test, read the port, drop the listener,
+    /// pass it to the child — has a race that cannot be closed from this side. The
+    /// port is unowned between the drop and the child's bind, so another process can
+    /// take it; the child then dies of address-in-use while the readiness check
+    /// still succeeds, because the port genuinely is listening. It just belongs to
+    /// someone else. Readiness could only ever prove that *someone* was listening.
+    ///
+    /// Passing `--port 0` and reading the address back from our own child's stdout
+    /// makes the bind atomic and proves ownership: the line cannot appear unless
+    /// this child bound that port. The server prints it after binding and before
+    /// accepting, so it is a readiness signal too.
     fn spawn(extra_args: &[&str]) -> Self {
-        const ATTEMPTS: usize = 5;
-        for attempt in 1..=ATTEMPTS {
-            if let Some(server) = Self::try_spawn(extra_args) {
-                return server;
-            }
-            assert!(
-                attempt < ATTEMPTS,
-                "haystack serve failed to bind a free port in {ATTEMPTS} attempts"
-            );
-        }
-        unreachable!()
-    }
-
-    fn try_spawn(extra_args: &[&str]) -> Option<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a test port");
-        let port = listener.local_addr().expect("reserved port address").port();
-        drop(listener);
-
-        let child = Command::new(env!("CARGO_BIN_EXE_haystack"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_haystack"))
             .arg("serve")
-            .args(["--host", "127.0.0.1", "--port", &port.to_string()])
+            .args(["--host", "127.0.0.1", "--port", "0"])
             .args(extra_args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn haystack serve");
-        let mut server = Self { child, port };
-        server.wait_until_ready().then_some(server)
-    }
 
-    /// True once the port accepts a connection. False if the child died first —
-    /// which is the lost-the-port case, and is retryable. Dropping `self` on that
-    /// path still reaps the process through the guard.
-    fn wait_until_ready(&mut self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-                return true;
-            }
-            if self.child.try_wait().expect("poll serve process").is_some() {
-                return false;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "haystack serve did not become ready on port {} within 5 seconds",
-                self.port
-            );
-            thread::sleep(Duration::from_millis(20));
-        }
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("read the listening banner");
+        let port = line
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.trim().parse::<u16>().ok())
+            .unwrap_or_else(|| panic!("could not parse a port from serve output: {line:?}"));
+
+        Self { child, port }
     }
 
     fn read(&self, filter: &str) -> HttpResponse {
