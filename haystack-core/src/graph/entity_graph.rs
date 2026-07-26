@@ -187,6 +187,20 @@ impl EntityGraph {
         self.namespace.as_ref()
     }
 
+    /// Replace the attached ontology with a newer one.
+    ///
+    /// The swap is atomic with respect to queries: a query holds the graph for its
+    /// whole duration, so it sees either the old namespace or the new one and never
+    /// a half-applied mix. That is the property the `Arc` snapshot exists to give,
+    /// and it is why loading a library replaces the handle rather than mutating the
+    /// namespace a graph is already reading.
+    ///
+    /// Callers that must not have the ontology shift under them should keep their
+    /// own `namespace_arc()` handle instead.
+    pub fn set_namespace(&mut self, ns: impl Into<Arc<DefNamespace>>) {
+        self.namespace = Some(ns.into());
+    }
+
     /// Refuse a filter whose spec-match terms this graph's namespace cannot
     /// resolve.
     ///

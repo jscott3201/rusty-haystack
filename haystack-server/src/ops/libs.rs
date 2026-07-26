@@ -179,6 +179,14 @@ pub async fn handle_load_lib(
         .load_xeto_str(&source, &name)
         .map_err(|e| HaystackError::bad_request(format!("load error: {e}")))?;
 
+    // Push the new ontology into the graph, or loadLib would succeed and the spec
+    // would still be unfilterable: the server holds its own mutable namespace and
+    // every graph holds an Arc snapshot, so without this the two disagree about
+    // whether the lib exists. Swapping the handle keeps each query on one coherent
+    // namespace rather than letting the ontology shift mid-query.
+    state.graph.set_namespace(ns.clone());
+    drop(ns);
+
     let cols = vec![HCol::new("loaded"), HCol::new("specs")];
     let mut result = HDict::new();
     result.set("loaded", Kind::Str(name));
@@ -216,6 +224,11 @@ pub async fn handle_unload_lib(
 
     let mut ns = state.namespace.write();
     ns.unload_lib(&name).map_err(HaystackError::bad_request)?;
+
+    // Same reason as loadLib: without this the graph keeps answering filters from
+    // a namespace that still defines the unloaded lib.
+    state.graph.set_namespace(ns.clone());
+    drop(ns);
 
     let cols = vec![HCol::new("unloaded")];
     let mut result = HDict::new();
