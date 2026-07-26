@@ -32,6 +32,7 @@ pub mod actions;
 pub mod app;
 pub mod auth;
 pub mod content;
+pub mod cors;
 pub mod demo;
 pub mod error;
 pub mod his_provider;

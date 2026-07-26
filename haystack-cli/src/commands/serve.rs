@@ -3,6 +3,7 @@ use haystack_core::ontology::DefNamespace;
 use haystack_server::HaystackServer;
 use haystack_server::auth::AuthManager;
 use haystack_server::auth::users::load_users_from_toml;
+use haystack_server::cors::CorsPolicy;
 
 pub struct ServeConfig<'a> {
     pub port: u16,
@@ -10,6 +11,7 @@ pub struct ServeConfig<'a> {
     pub users_file: Option<&'a str>,
     pub host: Option<&'a str>,
     pub demo: bool,
+    pub cors_origins: Vec<String>,
 }
 
 pub fn run(cfg: ServeConfig<'_>) {
@@ -91,11 +93,21 @@ pub fn run(cfg: ServeConfig<'_>) {
 
         let bind_host = cfg.host.unwrap_or("127.0.0.1");
 
+        // No --cors-origin means no CORS headers at all, not an empty
+        // allowlist: a server nobody asked to expose cross-origin should
+        // behave exactly as it did before the flag existed.
+        let cors = if cfg.cors_origins.is_empty() {
+            CorsPolicy::Disabled
+        } else {
+            CorsPolicy::Allow(cfg.cors_origins)
+        };
+
         HaystackServer::new(graph)
             // The server keeps its own mutable copy: the lib load/unload
             // endpoints mutate it, and the graphs must not see that shift.
             .with_namespace((*ns).clone())
             .with_auth(auth)
+            .with_cors(cors)
             .host(bind_host)
             .port(cfg.port)
             // Printed after the bind succeeds, so it is a readiness signal as well

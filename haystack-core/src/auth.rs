@@ -205,8 +205,7 @@ pub fn derive_credentials(password: &str, salt: &[u8], iterations: u32) -> Scram
 
 /// Generate a random nonce string (base64-encoded 18 random bytes).
 pub fn generate_nonce() -> String {
-    let mut bytes = [0u8; 18];
-    rand::rng().fill(&mut bytes);
+    let bytes: [u8; 18] = rand::rng().random();
     BASE64.encode(bytes)
 }
 

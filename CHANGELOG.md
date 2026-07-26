@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `haystack serve --cors-origin <ORIGIN>` (repeatable) and `HaystackServer::with_cors`,
+  for dashboards served from an origin other than the server's. Off by default: without
+  the flag no CORS headers are sent and browsers apply the same-origin policy unchanged.
+  The allowance covers `GET` and `POST` and the `Authorization` and `Content-Type`
+  request headers. `Access-Control-Allow-Credentials` is not set, because the server's
+  auth is header-based and it sets no cookies. There is no wildcard: `*` is refused with
+  a warning rather than forwarded, since `tower-http` panics if one reaches
+  `AllowOrigin::list` and an explicit list is the point of the policy.
+
+### Changed
+
+- Salts, nonces and the server secret are generated directly instead of by overwriting a
+  zeroed buffer. Behaviour is identical; the old shape tripped a CodeQL
+  `hard-coded-cryptographic-value` alert on the salt in `hash_password`, which was a false
+  positive — the buffer was overwritten on the next line. (#55)
+
 ## 0.9.0
 
 Spec-match filters (`ph::Ahu`) did not work. `DefNamespace::fits` returned `true` for any

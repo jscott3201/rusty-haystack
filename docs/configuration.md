@@ -11,10 +11,41 @@ The server is configured entirely via CLI flags when using `haystack serve`:
 | `--file` | `-f` | Load entities from a Zinc/Trio/JSON file at startup | Empty graph |
 | `--users` | `-u` | TOML file with user credentials for SCRAM auth | Auth disabled |
 | `--demo` | | Load a built-in demo building automation dataset | |
+| `--cors-origin` | | Allow cross-origin browser requests from this origin (repeatable) | No CORS headers |
 
 When no `--users` file is provided, authentication is disabled and all endpoints are accessible without credentials.
 
 The server password can also be provided via the `HAYSTACK_PASSWORD` environment variable.
+
+## Cross-Origin Requests
+
+A browser dashboard served from somewhere other than the Haystack server needs
+CORS. It is off by default — without `--cors-origin` the server sends no CORS
+headers at all and browsers apply the same-origin policy unchanged.
+
+Pass the flag once per permitted origin:
+
+```bash
+haystack serve --demo \
+    --cors-origin https://ops.example.com \
+    --cors-origin http://localhost:5173
+```
+
+Origins are matched verbatim, scheme and port included, so
+`https://ops.example.com` does not permit `http://ops.example.com` or
+`https://ops.example.com:8443`. An origin the server cannot honour is ignored
+with a warning rather than stopping the server; it is simply not allowed.
+
+There is no wildcard. `--cors-origin '*'` is refused with a warning and grants
+nothing — name each origin instead. `null` *is* honoured if you list it
+explicitly, but it stands for any opaque origin (sandboxed iframes, `file://`
+documents, some redirects), so list it only deliberately.
+
+The allowance is deliberately narrow: `GET` and `POST` (the only verbs the API
+answers) and the `Authorization` and `Content-Type` request headers.
+`Access-Control-Allow-Credentials` is not set, because the server's auth is
+header-based and it sets no cookies. Preflight responses are cacheable for ten
+minutes.
 
 ## Users TOML Format
 
@@ -156,6 +187,7 @@ When embedding the server in Rust code, use the builder API:
 
 ```rust
 use haystack_server::HaystackServer;
+use haystack_server::cors::CorsPolicy;
 use haystack_core::graph::{EntityGraph, SharedGraph};
 
 let graph = SharedGraph::new(EntityGraph::new());
@@ -164,8 +196,11 @@ HaystackServer::new(graph)
     .with_namespace(ns)       // DefNamespace
     .with_auth(auth_manager)  // AuthManager
     .with_actions(actions)    // ActionRegistry
+    .with_cors(CorsPolicy::Allow(vec!["https://ops.example.com".into()]))
     .host("127.0.0.1")
     .port(8080)
     .run()
     .await?;
 ```
+
+`with_cors` defaults to `CorsPolicy::Disabled`.
