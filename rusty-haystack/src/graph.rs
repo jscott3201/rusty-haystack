@@ -98,8 +98,10 @@ impl PyGraphDiff {
     }
 
     /// Entity state after the mutation (Some for Add; None for Remove/Update).
-    #[getter]
-    fn new(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+    // `#[getter(new)]` names the Python attribute independently of the Rust fn, so
+    // `diff.new` is unchanged while clippy stops reading this as a constructor.
+    #[getter(new)]
+    fn new_value(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.new {
             Some(d) => Ok(Some(
                 PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
