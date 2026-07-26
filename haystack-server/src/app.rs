@@ -116,6 +116,19 @@ impl HaystackServer {
 
     /// Start the HTTP server. This blocks until the server is stopped.
     pub async fn run(self) -> std::io::Result<()> {
+        self.run_reporting_addr(|_| {}).await
+    }
+
+    /// Run, invoking `on_bound` with the address actually bound.
+    ///
+    /// The callback fires after a successful bind and before the first connection
+    /// is accepted, so a caller that prints or publishes the address cannot race a
+    /// client that reads it. This is what makes `--port 0` usable: the kernel picks
+    /// the port and this is the only place it can be observed.
+    pub async fn run_reporting_addr<F>(self, on_bound: F) -> std::io::Result<()>
+    where
+        F: FnOnce(std::net::SocketAddr),
+    {
         let his: Box<dyn crate::his_provider::HistoryProvider> = self
             .history_provider
             .unwrap_or_else(|| Box::new(HisStore::new()));
@@ -181,6 +194,14 @@ impl HaystackServer {
 
         let listener =
             tokio::net::TcpListener::bind(format!("{}:{}", self.host, self.port)).await?;
+
+        // Report the address actually bound, not the one requested. With `--port 0`
+        // the kernel picks the port, and nothing outside the process could discover
+        // it — so callers had to guess a free port and race the bind (issue #35).
+        let bound = listener.local_addr()?;
+        log::info!("haystack-server listening on {bound}");
+        on_bound(bound);
+
         axum::serve(listener, app).await
     }
 }
