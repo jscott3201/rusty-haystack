@@ -795,3 +795,97 @@ fn an_of_type_still_resolves_to_a_def_when_no_local_spec_exists() {
         "of:Ahu resolves to the def `ahu` when no deft::Ahu spec exists"
     );
 }
+
+/// A spec declaring a required marker must not fit an entity that lacks it,
+/// whichever of the two Xeto spellings it uses (issue #48).
+///
+/// `ahu: Marker` used to leave `is_marker` false and `type_ref = Some("Marker")`.
+/// That slot never reached `mandatory_markers()`, and `check_slot_types` has
+/// nothing to check when the tag is simply absent — so the spec fitted every
+/// entity in the graph, including one with no tags at all.
+#[test]
+fn a_required_marker_is_enforced_in_both_spellings() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Bare: Dict {\n  ahu\n}\n\
+         Typed: Dict {\n  ahu: Marker\n}\n\
+         OptBare: Dict {\n  ahu?\n}\n\
+         OptTyped: Dict {\n  ahu: Marker?\n}\n",
+        "mk",
+    )
+    .expect("load test lib");
+
+    let empty = HDict::new();
+    let mut carries = HDict::new();
+    carries.set("ahu", Kind::Marker);
+
+    for spec in ["mk::Bare", "mk::Typed"] {
+        assert!(
+            !ns.fits_spec_term(&empty, spec),
+            "{spec} must not fit an entity with no tags"
+        );
+        assert!(
+            ns.fits_spec_term(&carries, spec),
+            "{spec} must fit an entity carrying the marker"
+        );
+    }
+
+    // The optional spellings must stay optional — the fix must not turn `?` into
+    // a requirement on the way past.
+    for spec in ["mk::OptBare", "mk::OptTyped"] {
+        assert!(
+            ns.fits_spec_term(&empty, spec),
+            "{spec} is optional and must still fit"
+        );
+        assert!(
+            ns.fits_spec_term(&carries, spec),
+            "{spec} must fit either way"
+        );
+    }
+}
+
+/// Only the built-in `Marker` collapses to a marker slot. A library defining its
+/// own type of that name keeps its constraint.
+///
+/// Found by adversarial review: matching any name ending in `::Marker` reduced
+/// `x: mylib::Marker` to presence-only, so an entity carrying `x: "value"` fitted
+/// a slot declaring a Str-derived type. That destroyed a constraint the code had
+/// been enforcing — a worse defect than the one being fixed.
+#[test]
+fn a_librarys_own_marker_type_is_not_collapsed_to_a_marker_slot() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Marker: Str\nUsesOwnMarker: Dict {\n  x: collision::Marker\n}\n",
+        "collision",
+    )
+    .expect("load test lib");
+
+    let spec = ns
+        .specs_map()
+        .get("collision::UsesOwnMarker")
+        .expect("spec loaded");
+    let slot = &spec.slots[0];
+    assert!(
+        !slot.is_marker,
+        "a qualified name pointing at another library's type is not the built-in"
+    );
+    assert_eq!(slot.type_ref.as_deref(), Some("collision::Marker"));
+}
+
+/// The canonical qualified spelling of the built-in still collapses. `sys.xeto`
+/// defines `Marker`, so `sys::Marker` and bare `Marker` are the same type.
+#[test]
+fn the_qualified_builtin_marker_is_still_a_marker_slot() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str("Q: Dict {\n  ahu: sys::Marker\n}\n", "qm")
+        .expect("load test lib");
+
+    let empty = HDict::new();
+    let mut carries = HDict::new();
+    carries.set("ahu", Kind::Marker);
+    assert!(
+        !ns.fits_spec_term(&empty, "qm::Q"),
+        "sys::Marker is required"
+    );
+    assert!(ns.fits_spec_term(&carries, "qm::Q"));
+}

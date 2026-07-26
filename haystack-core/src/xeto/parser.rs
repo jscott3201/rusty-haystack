@@ -316,6 +316,28 @@ impl Parser {
                     }
                     slot.meta = query_meta;
                 }
+            } else if type_ref == "Marker" || type_ref == "sys::Marker" {
+                // `ahu: Marker` and bare `ahu` mean the same thing. Converging
+                // here is what makes them behave the same: a slot carrying
+                // `type_ref = "Marker"` was not a marker slot, so it never
+                // reached `mandatory_markers()` and was never required — and
+                // `check_slot_types` finds nothing to check when the tag is
+                // absent, so the spec fitted an entity that had none of it.
+                //
+                // Only the two spellings of the built-in are accepted. Matching
+                // any name ending in `::Marker` looked equivalent and was not: a
+                // library defining its own `Marker: Str` had `x: mylib::Marker`
+                // silently reduced to presence-only, so `{x: "value"}` fitted a
+                // slot that declared a Str-derived type. That destroys a
+                // constraint the old code kept, which is worse than the bug being
+                // fixed here.
+                //
+                // A library that shadows the *bare* name with its own `Marker` is
+                // still read as the built-in. The parser is purely syntactic and
+                // has no library scope to resolve that against; it was equally
+                // unresolved before this change, so it is left alone rather than
+                // half-handled.
+                slot.is_marker = true;
             } else {
                 slot.type_ref = Some(type_ref);
             }
@@ -878,5 +900,50 @@ Foo : Bar
         let file2 = parse_xeto("Foo : Bar {\n  link : Ref <of: Equip>?\n}").unwrap();
         let slot2 = &file2.specs[0].slots[0];
         assert!(slot2.is_maybe);
+    }
+    #[test]
+    fn an_explicit_marker_type_is_the_same_slot_as_a_bare_name() {
+        // Xeto allows both spellings. Only the bare one used to become a marker
+        // slot, so `ahu: Marker` was required by nothing and the spec fitted an
+        // entity carrying none of it.
+        let file = parse_xeto("Bare: Dict {\n  ahu\n}\nTyped: Dict {\n  ahu: Marker\n}\n")
+            .expect("parses");
+        for spec in &file.specs {
+            let slot = &spec.slots[0];
+            assert!(
+                slot.is_marker,
+                "{}.{} should be a marker slot",
+                spec.name, slot.name
+            );
+            assert_eq!(
+                slot.type_ref, None,
+                "{}.{} should not keep Marker as a type_ref",
+                spec.name, slot.name
+            );
+            assert!(
+                !slot.is_maybe,
+                "{}.{} should be required",
+                spec.name, slot.name
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_maybe_marker_stays_optional() {
+        let file = parse_xeto("Opt: Dict {\n  ahu: Marker?\n}\nOptBare: Dict {\n  ahu?\n}\n")
+            .expect("parses");
+        for spec in &file.specs {
+            let slot = &spec.slots[0];
+            assert!(
+                slot.is_marker,
+                "{}.{} should be a marker",
+                spec.name, slot.name
+            );
+            assert!(
+                slot.is_maybe,
+                "{}.{} should stay optional",
+                spec.name, slot.name
+            );
+        }
     }
 }
