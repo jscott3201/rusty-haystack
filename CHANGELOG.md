@@ -9,7 +9,9 @@
   the flag no CORS headers are sent and browsers apply the same-origin policy unchanged.
   The allowance covers `GET` and `POST` and the `Authorization` and `Content-Type`
   request headers. `Access-Control-Allow-Credentials` is not set, because the server's
-  auth is header-based and it sets no cookies.
+  auth is header-based and it sets no cookies. There is no wildcard: `*` is refused with
+  a warning rather than forwarded, since `tower-http` panics if one reaches
+  `AllowOrigin::list` and an explicit list is the point of the policy.
 
 ### Changed
 

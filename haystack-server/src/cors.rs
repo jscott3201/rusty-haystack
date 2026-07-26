@@ -38,35 +38,55 @@ impl CorsPolicy {
     /// caller can skip wrapping the router entirely rather than installing a
     /// layer that does nothing.
     ///
-    /// An origin that is not a valid HTTP header value is dropped with a
-    /// warning rather than aborting startup: a typo in one dashboard origin
-    /// should not take the whole server down, and the dropped origin fails
-    /// closed (it simply is not allowed).
+    /// An origin this server cannot honour is dropped with a warning rather
+    /// than aborting startup: a typo in one dashboard origin should not take
+    /// the whole server down, and a dropped origin fails closed — it simply is
+    /// not allowed.
+    ///
+    /// `null` is honoured if it is listed explicitly. It is a real `Origin`
+    /// value, sent by sandboxed iframes, `file://` documents and some
+    /// redirects, and it stands for *any* opaque origin — so list it only
+    /// deliberately.
     pub fn layer(&self) -> Option<CorsLayer> {
         match self {
             CorsPolicy::Disabled => None,
-            CorsPolicy::Allow(origins) => {
-                let allowed: Vec<HeaderValue> = origins
+            CorsPolicy::Allow(origins) => Some(build_allow_layer(
+                origins
                     .iter()
-                    .filter_map(|o| match HeaderValue::from_str(o) {
-                        Ok(v) => Some(v),
-                        Err(_) => {
-                            log::warn!("ignoring invalid CORS origin {o:?}");
-                            None
-                        }
-                    })
-                    .collect();
-
-                Some(build_allow_layer(allowed))
-            }
+                    .map(String::as_str)
+                    .filter_map(usable)
+                    .collect(),
+            )),
         }
     }
+}
+
+/// Convert one configured origin into a header value, or drop it.
+///
+/// `*` is refused rather than honoured, for two reasons. tower-http panics
+/// outright if a wildcard reaches `AllowOrigin::list`, so passing it through
+/// would crash the server after it had already loaded its data. And this
+/// server's policy is an explicit list by design — silently widening it to
+/// every origin is not a reasonable reading of a one-character flag value.
+fn usable(origin: &str) -> Option<HeaderValue> {
+    if origin == "*" {
+        log::warn!(
+            "ignoring CORS origin \"*\": this server allows only an explicit list; \
+             name each origin in full, scheme and port included"
+        );
+        return None;
+    }
+
+    HeaderValue::from_str(origin)
+        .inspect_err(|_| log::warn!("ignoring invalid CORS origin {origin:?}"))
+        .ok()
 }
 
 /// Construct the layer for an explicit origin allowlist.
 ///
 /// The allowance is deliberately narrower than the request: `GET` and `POST`
-/// are the only verbs the API answers (`app.rs:149-174`), and `Authorization`
+/// are the only verbs the API answers (see the route table in
+/// `HaystackServer::build_router`), and `Authorization`
 /// and `Content-Type` the only request headers it reads — the first carries
 /// SCRAM, Basic or Bearer credentials, the second drives codec negotiation.
 /// Adding a route that needs more than this means revisiting here, which is
@@ -105,20 +125,37 @@ mod tests {
         assert!(policy.layer().is_some());
     }
 
+    // `CorsLayer` is opaque, so a test that only asks whether a layer exists
+    // cannot tell "kept the origin" from "dropped everything". These assert on
+    // `usable` instead, which is where the decision is actually made; the
+    // granted-header behaviour is covered end to end by
+    // `app::tests::cors_layering`.
+
     #[test]
-    fn an_invalid_origin_is_dropped_rather_than_fatal() {
-        // A newline cannot appear in a header value. The server should still
-        // start, with that origin simply not allowed.
-        let policy = CorsPolicy::Allow(vec![
-            "https://ok.example.com".to_string(),
-            "bad\norigin".to_string(),
-        ]);
-        assert!(policy.layer().is_some());
+    fn a_well_formed_origin_is_kept() {
+        assert_eq!(
+            usable("https://ops.example.com").unwrap(),
+            "https://ops.example.com"
+        );
     }
 
     #[test]
-    fn an_allowlist_of_only_invalid_origins_still_yields_a_layer() {
-        // Fails closed: a layer that allows nothing, rather than no layer at
+    fn a_value_that_cannot_be_a_header_is_dropped() {
+        // A newline cannot appear in a header value. The server should still
+        // start, with that origin simply not allowed.
+        assert!(usable("bad\norigin").is_none());
+    }
+
+    #[test]
+    fn a_wildcard_is_dropped_rather_than_forwarded() {
+        // tower-http's AllowOrigin::list panics on `*`, so forwarding one would
+        // take the server down at startup rather than fail closed.
+        assert!(usable("*").is_none());
+    }
+
+    #[test]
+    fn an_allowlist_of_only_unusable_origins_still_yields_a_layer() {
+        // Fails closed: a layer that grants nothing, rather than no layer at
         // all (which would read as "CORS disabled" and mask the typo).
         let policy = CorsPolicy::Allow(vec!["bad\norigin".to_string()]);
         assert!(policy.layer().is_some());

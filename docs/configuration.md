@@ -33,9 +33,13 @@ haystack serve --demo \
 
 Origins are matched verbatim, scheme and port included, so
 `https://ops.example.com` does not permit `http://ops.example.com` or
-`https://ops.example.com:8443`. An origin that is not a valid header value is
-ignored with a warning rather than stopping the server; it is simply not
-allowed.
+`https://ops.example.com:8443`. An origin the server cannot honour is ignored
+with a warning rather than stopping the server; it is simply not allowed.
+
+There is no wildcard. `--cors-origin '*'` is refused with a warning and grants
+nothing — name each origin instead. `null` *is* honoured if you list it
+explicitly, but it stands for any opaque origin (sandboxed iframes, `file://`
+documents, some redirects), so list it only deliberately.
 
 The allowance is deliberately narrow: `GET` and `POST` (the only verbs the API
 answers) and the `Authorization` and `Content-Type` request headers.

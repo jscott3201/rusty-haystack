@@ -225,15 +225,20 @@ impl HaystackServer {
         }
 
         // Outermost, and after the custom-router merge so those routes are
-        // covered too. Preflight is what fixes the position: a browser sends
-        // OPTIONS with no Authorization header, and CorsLayer must be the thing
-        // that answers it. As written, `route_layer` above would skip an
-        // OPTIONS anyway — it does not run for a request matching no route, and
-        // every API route is registered `get` or `post` — but that is a
-        // property of axum's routing rather than a guarantee this server makes.
-        // Nesting CORS inside auth applied as a plain `.layer()` 401s every
-        // preflight; `cors_layering::preflight_is_answered_without_authentication`
-        // is what catches that.
+        // covered too. The position is load-bearing, not stylistic. A browser
+        // sends preflight as OPTIONS with no Authorization header, and
+        // `route_layer` above *does* run for it: `/api/read` matches as a path,
+        // the method router is what rejects OPTIONS, and that is late enough
+        // that auth has already seen the request. So with auth enabled and
+        // CorsLayer any deeper, every preflight to an authenticated route is a
+        // 401 and no cross-origin call ever reaches its handler.
+        //
+        // Measured, not assumed: with `CorsPolicy::Disabled` an OPTIONS to
+        // `/api/read` on an auth-enabled server returns 401, which is exactly
+        // what `cors_layering::disabled_grants_nothing` pins down. (`/api/about`
+        // is bypassed by the middleware regardless of method, and an
+        // auth-disabled server passes everything, so the 401 needs both an
+        // authenticated route and live auth to show up.)
         if let Some(cors) = self.cors.layer() {
             app = app.layer(cors);
         }
@@ -478,6 +483,10 @@ mod tests {
 
         /// Auth is header-based and no cookie is ever set, so granting
         /// credentials would widen the policy for nothing.
+        ///
+        /// The success and allow-origin assertions are load-bearing: without
+        /// them this passes when preflight is refused outright, since a 401
+        /// carries no `Allow-Credentials` header either.
         #[tokio::test]
         async fn preflight_does_not_allow_credentials() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
@@ -485,10 +494,57 @@ mod tests {
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
+            assert!(res.status().is_success(), "status was {}", res.status());
+            assert!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_some(),
+                "CORS did not answer, so the absence below proves nothing"
+            );
             assert!(
                 res.headers()
                     .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
                     .is_none()
+            );
+        }
+
+        /// One bad entry must not cost the good ones their access. Asserting
+        /// the grant rather than "a layer exists" is what makes this fail if
+        /// the valid origins are dropped alongside the invalid one.
+        #[tokio::test]
+        async fn a_valid_origin_survives_an_allowlist_holding_an_invalid_one() {
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![
+                ORIGIN.to_string(),
+                "bad\norigin".to_string(),
+            ]))
+            .build_router();
+
+            let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
+
+            assert!(res.status().is_success(), "status was {}", res.status());
+            assert_eq!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .map(|v| v.to_str().unwrap()),
+                Some(ORIGIN)
+            );
+        }
+
+        /// `*` reaches `AllowOrigin::list` only if nothing filters it, and
+        /// tower-http panics there rather than returning an error — so this
+        /// would take the server down after it had already loaded its data.
+        #[tokio::test]
+        async fn a_wildcard_origin_is_refused_rather_than_panicking() {
+            let app =
+                server_with_auth_and_cors(CorsPolicy::Allow(vec!["*".to_string()])).build_router();
+
+            let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
+
+            assert!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "a wildcard must not grant a concrete origin"
             );
         }
 
@@ -511,13 +567,19 @@ mod tests {
         }
 
         /// The default must behave exactly as the server did before CORS
-        /// existed: no headers, and the route's own 405 for a bare OPTIONS.
+        /// existed. The 401 is the interesting half: it shows the preflight ran
+        /// all the way into the auth middleware because no CORS layer was there
+        /// to answer it first, which is simultaneously the evidence that the
+        /// layer's outermost position in `build_router` is load-bearing. An
+        /// assertion on the missing header alone would also pass if a layer
+        /// were installed that merely granted nothing.
         #[tokio::test]
-        async fn disabled_grants_nothing() {
+        async fn disabled_grants_nothing_and_preflight_falls_through_to_auth() {
             let app = server_with_auth_and_cors(CorsPolicy::Disabled).build_router();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
             assert!(
                 res.headers()
                     .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
