@@ -51,6 +51,10 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 cargo build --workspace --exclude rusty-haystack
 ```
 
+`--exclude rusty-haystack` skips the PyO3 extension module, which cannot be linked without
+a Python interpreter. [CONTRIBUTING.md](CONTRIBUTING.md) explains what fails without the
+flag and how the crate is built and tested instead.
+
 ### Cargo Features
 
 `rusty-haystack-core` keeps timezone rule data optional. Enable its default-off
@@ -115,6 +119,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | [CLI Reference](docs/cli.md) | All commands, flags, and examples |
 | [Python Bindings](docs/python.md) | Core types, codecs, graph, filter, client, server, auth |
 | [Configuration](docs/configuration.md) | Server config, users TOML, permissions, Docker |
+| [Contributing](CONTRIBUTING.md) | Build flags and why, the gate, CI jobs, conventions |
 
 ## Security
 
