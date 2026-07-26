@@ -51,6 +51,16 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 cargo build --workspace --exclude rusty-haystack
 ```
 
+### Cargo Features
+
+`rusty-haystack-core` keeps timezone rule data optional. Enable its default-off
+`chrono-tz` feature to resolve a Haystack timezone name and naive local date/time
+to DST-aware UTC offsets:
+
+```sh
+cargo build -p rusty-haystack-core --features chrono-tz
+```
+
 ### Run Tests
 
 ```sh

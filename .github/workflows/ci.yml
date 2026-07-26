@@ -40,6 +40,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings
+      - run: cargo clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
 
   # Anything targeting main runs the full three-OS matrix. Everything else
   # (dev PRs, dev pushes) tests on ubuntu alone. Jobs run in parallel, so the
@@ -62,6 +63,7 @@ jobs:
         with:
           key: ${{ matrix.os }}
       - run: cargo test --workspace --exclude rusty-haystack
+      - run: cargo test -p rusty-haystack-core --features chrono-tz
 
   # The PyO3 crate is excluded from `cargo test --workspace`, so nothing above
   # covers it. Without this job the Python suite rots unnoticed — 11 of its tests
