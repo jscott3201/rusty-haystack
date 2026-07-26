@@ -42,6 +42,12 @@ impl HttpTransport {
     }
 
     /// HTTP Basic auth on every request (Niagara nHaystack).
+    ///
+    /// Basic sends the password on **every** request, base64-encoded, which is
+    /// encoding rather than encryption. Over plain HTTP that is the password in
+    /// cleartext on the wire — a different exposure from SCRAM, which never
+    /// transmits it at all — so an insecure scheme is warned about here rather
+    /// than only where TLS verification is turned off.
     pub fn with_basic(
         base_url: &str,
         username: &str,
@@ -49,6 +55,13 @@ impl HttpTransport {
         client: Client,
         format: &str,
     ) -> Self {
+        if !base_url.starts_with("https://") {
+            log::warn!(
+                "HTTP Basic auth over a non-HTTPS URL ({}): the password is sent \
+                 base64-encoded, not encrypted, on every request",
+                base_url
+            );
+        }
         Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -165,5 +178,66 @@ impl Transport for HttpTransport {
 
     async fn close(&self) -> Result<(), ClientError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// reqwest builds a TLS-capable client even for these header-only checks, and
+    /// this crate installs the rustls provider explicitly rather than relying on a
+    /// default feature. Without it `Client::new()` panics.
+    fn client() -> Client {
+        crate::ensure_crypto_provider();
+        Client::new()
+    }
+
+    fn header_of(t: &HttpTransport) -> String {
+        let req = t
+            .apply_auth(t.client.get("https://example.test/api/about"))
+            .build()
+            .expect("request builds");
+        req.headers()
+            .get("authorization")
+            .expect("an Authorization header")
+            .to_str()
+            .expect("header is valid ascii")
+            .to_string()
+    }
+
+    #[test]
+    fn basic_auth_sends_rfc7617_credentials() {
+        // base64("user:secret") == "dXNlcjpzZWNyZXQ="
+        let t = HttpTransport::with_basic(
+            "https://station.test/api",
+            "user",
+            "secret",
+            client(),
+            "text/zinc",
+        );
+        assert_eq!(header_of(&t), "Basic dXNlcjpzZWNyZXQ=");
+    }
+
+    /// The bearer header is byte-for-byte what it was before `apply_auth`
+    /// existed. Both call sites used to build this string inline; routing them
+    /// through one helper is only safe if the output did not move, and a
+    /// Haystack server rejects anything but this exact shape.
+    #[test]
+    fn bearer_auth_keeps_the_haystack_header_shape() {
+        let t = HttpTransport::with_bearer(
+            "https://station.test/api",
+            "abc123".to_string(),
+            client(),
+            "text/zinc",
+        );
+        assert_eq!(header_of(&t), "BEARER authToken=abc123");
+    }
+
+    #[test]
+    fn trailing_slashes_are_trimmed_from_the_base_url() {
+        let t =
+            HttpTransport::with_basic("https://station.test/api/", "u", "p", client(), "text/zinc");
+        assert_eq!(t.base_url, "https://station.test/api");
     }
 }
