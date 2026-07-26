@@ -176,6 +176,11 @@ pub async fn handle_load_lib(
         _ => return Err(HaystackError::bad_request("source column required")),
     };
 
+    // Serialize lib mutations end to end. Without this, two concurrent loads can
+    // snapshot {A} and {A,B} and publish them to the graph in either order, leaving
+    // the graph permanently behind the namespace until the next mutation.
+    let _serialized = state.lib_mutations.lock();
+
     // Snapshot under the namespace lock, then release it BEFORE touching the graph.
     // Holding both would establish a namespace-then-graph order here, and a custom
     // router installed via with_router can legitimately take them graph-then-
@@ -230,7 +235,11 @@ pub async fn handle_unload_lib(
         _ => return Err(HaystackError::bad_request("name column required")),
     };
 
-    // Same lock discipline as loadLib: snapshot, release, then update the graph.
+    // Same discipline as loadLib: serialize the mutation, then snapshot, release,
+    // and only then update the graph.
+    let _serialized = state.lib_mutations.lock();
+
+    // Snapshot under the namespace lock, then release it before touching the graph.
     let snapshot = {
         let mut ns = state.namespace.write();
         ns.unload_lib(&name).map_err(HaystackError::bad_request)?;

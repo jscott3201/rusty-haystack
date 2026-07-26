@@ -428,4 +428,70 @@ fn unloading_a_lib_makes_its_specs_unfilterable_again() {
          served instead:\n{}",
         after.body
     );
+    // Pin the cause, not just the status. Asserting 400 alone would be satisfied by
+    // any unrelated bad request, so this test could keep passing while the stale
+    // cache came back.
+    assert!(
+        after.body.contains("does not define"),
+        "the 400 must be because the spec is undefined, not for some other reason:\n{}",
+        after.body
+    );
+}
+
+/// Successive lib mutations must leave the graph agreeing with the server, not
+/// holding whichever snapshot happened to be published last.
+///
+/// Each mutation snapshots the namespace and then publishes it to the graph as a
+/// separate step, because holding the namespace lock across the graph update fixes
+/// a lock order a custom router could invert. That makes the ORDER of publishes
+/// load-bearing, so this walks a sequence where a stale publish would be visible:
+/// after unloading only `libA`, `libB` must survive and `libA` must not.
+#[test]
+fn successive_lib_mutations_leave_the_graph_in_step() {
+    let server = ServeChild::spawn(&["--demo"]);
+
+    for (name, spec) in [("libA", "Alpha"), ("libB", "Beta")] {
+        let loaded = server.post(
+            "/api/loadLib",
+            &format!(
+                "ver:\"3.0\"\nname,source\n\"{name}\",\"{spec} : Dict {{ {} : Marker }}\"\n",
+                spec.to_lowercase()
+            ),
+        );
+        assert_eq!(
+            loaded.status, 200,
+            "loading {name} failed:\n{}",
+            loaded.body
+        );
+    }
+
+    assert_eq!(
+        server.read("libA::Alpha").status,
+        200,
+        "libA must be filterable"
+    );
+    assert_eq!(
+        server.read("libB::Beta").status,
+        200,
+        "libB must be filterable"
+    );
+
+    let unloaded = server.post("/api/unloadLib", "ver:\"3.0\"\nname\n\"libA\"\n");
+    assert_eq!(unloaded.status, 200, "unloadLib failed:\n{}", unloaded.body);
+
+    let a = server.read("libA::Alpha");
+    assert_eq!(
+        a.status, 400,
+        "libA was unloaded and must be gone:\n{}",
+        a.body
+    );
+
+    // The one that would fail on a stale publish: unloading A must not roll the
+    // graph back to a snapshot that predates B.
+    let b = server.read("libB::Beta");
+    assert_eq!(
+        b.status, 200,
+        "libB must survive unloading libA; the graph was rolled back:\n{}",
+        b.body
+    );
 }
