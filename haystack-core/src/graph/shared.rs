@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::data::{HDict, HGrid};
-use crate::ontology::ValidationIssue;
+use crate::ontology::{DefNamespace, ValidationIssue};
 
 use super::entity_graph::{EntityGraph, GraphError, HierarchyNode};
 
@@ -105,6 +105,15 @@ impl SharedGraph {
     }
 
     // ── Convenience methods ──
+
+    /// Swap in a newer ontology. See [`EntityGraph::set_namespace`].
+    ///
+    /// Deliberately does not bump the version or notify watchers: no entity
+    /// changed. A watcher that woke on this would see an identical entity set and
+    /// have nothing to do.
+    pub fn set_namespace(&self, ns: impl Into<Arc<DefNamespace>>) {
+        self.write(|g| g.set_namespace(ns));
+    }
 
     /// Add an entity. See [`EntityGraph::add`].
     pub fn add(&self, entity: HDict) -> Result<String, GraphError> {

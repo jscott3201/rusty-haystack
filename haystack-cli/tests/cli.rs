@@ -97,9 +97,12 @@ impl ServeChild {
     }
 
     fn read(&self, filter: &str) -> HttpResponse {
-        let body = format!("ver:\"3.0\"\nfilter\n\"{filter}\"\n");
+        self.post("/api/read", &format!("ver:\"3.0\"\nfilter\n\"{filter}\"\n"))
+    }
+
+    fn post(&self, path: &str, body: &str) -> HttpResponse {
         let request = format!(
-            "POST /api/read HTTP/1.1\r\n\
+            "POST {path} HTTP/1.1\r\n\
              Host: 127.0.0.1:{}\r\n\
              Content-Type: text/zinc\r\n\
              Accept: text/zinc\r\n\
@@ -327,5 +330,168 @@ fn serve_empty_graph_accepts_a_spec_match_filter() {
         !response.body.contains("@"),
         "an empty graph must not return entities:\n{}",
         response.body
+    );
+}
+
+/// Loading a library must make its specs filterable, not just visible to the
+/// schema endpoints (issue #23).
+///
+/// The server holds its own mutable namespace while every graph holds an `Arc`
+/// snapshot, so before the fix `loadLib` mutated one and left the other alone:
+/// `/api/specs` listed `myLib::Widget` and `/api/read` rejected it as undefined,
+/// one minute apart on the same server. This is an end-to-end test because that is
+/// the only level at which the disagreement is visible — each endpoint was
+/// individually correct about the namespace it could see.
+#[test]
+fn loading_a_lib_makes_its_specs_filterable() {
+    let server = ServeChild::spawn(&["--demo"]);
+
+    // Before: the spec does not exist anywhere, so a filter naming it is refused.
+    let before = server.read("myLib::Widget");
+    assert_eq!(
+        before.status, 400,
+        "an unknown spec must be refused before the lib is loaded:\n{}",
+        before.body
+    );
+
+    let loaded = server.post(
+        "/api/loadLib",
+        "ver:\"3.0\"\nname,source\n\"myLib\",\"Widget : Dict { widget: Marker }\"\n",
+    );
+    assert_eq!(loaded.status, 200, "loadLib failed:\n{}", loaded.body);
+    assert!(
+        loaded.body.contains("myLib::Widget"),
+        "loadLib must report the spec it created:\n{}",
+        loaded.body
+    );
+
+    // The schema side has always agreed. Assert it so a regression that breaks
+    // this instead of the read side is still caught.
+    let specs = server.post("/api/specs", "ver:\"3.0\"\nlib\n\"myLib\"\n");
+    assert_eq!(specs.status, 200, "specs failed:\n{}", specs.body);
+    assert!(
+        specs.body.contains("myLib::Widget"),
+        "specs must list the loaded spec:\n{}",
+        specs.body
+    );
+
+    // The bug: this returned 400 "filter names a spec that this graph's namespace
+    // does not define", contradicting the two calls above.
+    let after = server.read("myLib::Widget");
+    assert_eq!(
+        after.status, 200,
+        "a loaded spec must be filterable; the graph's namespace did not get it:\n{}",
+        after.body
+    );
+    assert!(
+        !after.body.contains("does not define"),
+        "the graph still rejects the loaded spec:\n{}",
+        after.body
+    );
+}
+
+/// Unloading a library must make its specs unfilterable again, including after the
+/// spec has already been queried once.
+///
+/// This is the direction the first version of the fix got wrong. The query cache is
+/// keyed on (filter, entity version), and swapping the namespace deliberately does
+/// not bump the version — no entity changed, so waking watchers would be noise. But
+/// the cache hit path returns before spec validation runs, so a successful
+/// `myLib::Widget` query cached before the unload was still served afterwards.
+#[test]
+fn unloading_a_lib_makes_its_specs_unfilterable_again() {
+    let server = ServeChild::spawn(&["--demo"]);
+
+    let loaded = server.post(
+        "/api/loadLib",
+        "ver:\"3.0\"\nname,source\n\"myLib\",\"Widget : Dict { widget: Marker }\"\n",
+    );
+    assert_eq!(loaded.status, 200, "loadLib failed:\n{}", loaded.body);
+
+    // Query it once so the result is cached. Without this the bug is invisible.
+    let cached = server.read("myLib::Widget");
+    assert_eq!(
+        cached.status, 200,
+        "the loaded spec must be filterable:\n{}",
+        cached.body
+    );
+
+    let unloaded = server.post("/api/unloadLib", "ver:\"3.0\"\nname\n\"myLib\"\n");
+    assert_eq!(unloaded.status, 200, "unloadLib failed:\n{}", unloaded.body);
+
+    // No entity changed across the unload, so the entity version is identical and a
+    // version-keyed cache would still hold the pre-unload answer.
+    let after = server.read("myLib::Widget");
+    assert_eq!(
+        after.status, 400,
+        "an unloaded spec must stop being filterable; a stale cached result was \
+         served instead:\n{}",
+        after.body
+    );
+    // Pin the cause, not just the status. Asserting 400 alone would be satisfied by
+    // any unrelated bad request, so this test could keep passing while the stale
+    // cache came back.
+    assert!(
+        after.body.contains("does not define"),
+        "the 400 must be because the spec is undefined, not for some other reason:\n{}",
+        after.body
+    );
+}
+
+/// Successive lib mutations must leave the graph agreeing with the server, not
+/// holding whichever snapshot happened to be published last.
+///
+/// Each mutation snapshots the namespace and then publishes it to the graph as a
+/// separate step, because holding the namespace lock across the graph update fixes
+/// a lock order a custom router could invert. That makes the ORDER of publishes
+/// load-bearing, so this walks a sequence where a stale publish would be visible:
+/// after unloading only `libA`, `libB` must survive and `libA` must not.
+#[test]
+fn successive_lib_mutations_leave_the_graph_in_step() {
+    let server = ServeChild::spawn(&["--demo"]);
+
+    for (name, spec) in [("libA", "Alpha"), ("libB", "Beta")] {
+        let loaded = server.post(
+            "/api/loadLib",
+            &format!(
+                "ver:\"3.0\"\nname,source\n\"{name}\",\"{spec} : Dict {{ {} : Marker }}\"\n",
+                spec.to_lowercase()
+            ),
+        );
+        assert_eq!(
+            loaded.status, 200,
+            "loading {name} failed:\n{}",
+            loaded.body
+        );
+    }
+
+    assert_eq!(
+        server.read("libA::Alpha").status,
+        200,
+        "libA must be filterable"
+    );
+    assert_eq!(
+        server.read("libB::Beta").status,
+        200,
+        "libB must be filterable"
+    );
+
+    let unloaded = server.post("/api/unloadLib", "ver:\"3.0\"\nname\n\"libA\"\n");
+    assert_eq!(unloaded.status, 200, "unloadLib failed:\n{}", unloaded.body);
+
+    let a = server.read("libA::Alpha");
+    assert_eq!(
+        a.status, 400,
+        "libA was unloaded and must be gone:\n{}",
+        a.body
+    );
+
+    // The one that would fail on a stale publish: unloading A must not roll the
+    // graph back to a snapshot that predates B.
+    let b = server.read("libB::Beta");
+    assert_eq!(
+        b.status, 200,
+        "libB must survive unloading libA; the graph was rolled back:\n{}",
+        b.body
     );
 }

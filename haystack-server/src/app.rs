@@ -136,6 +136,7 @@ impl HaystackServer {
         let state: SharedState = Arc::new(AppState {
             graph: self.graph,
             namespace: parking_lot::RwLock::new(self.namespace),
+            lib_mutations: parking_lot::Mutex::new(()),
             auth: self.auth_manager,
             watches: WatchManager::new(),
             actions: self.actions,
