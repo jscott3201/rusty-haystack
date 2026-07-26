@@ -1263,7 +1263,7 @@ dependencies = [
 name = "niagara-read"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "clap",
  "rusty-haystack-client",
  "rusty-haystack-core",

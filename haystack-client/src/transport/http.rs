@@ -89,7 +89,7 @@ impl HttpTransport {
     fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             AuthCredential::Bearer(token) => {
-                builder.header("Authorization", format!("BEARER authToken={}", &**token))
+                builder.header("Authorization", format!("BEARER authToken={}", **token))
             }
             AuthCredential::Basic { username, password } => {
                 builder.basic_auth(username, Some(password.as_str()))

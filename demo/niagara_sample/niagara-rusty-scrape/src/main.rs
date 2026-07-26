@@ -181,12 +181,9 @@ async fn probe_scram_hello(args: &Args, tls_verify: bool) {
 
 fn tcp_endpoint(base: &str) -> Option<(String, u16)> {
     let rest = base.trim_end_matches('/');
-    let (scheme_host, default_port) = if let Some(s) = rest.strip_prefix("https://") {
-        (s, 443u16)
-    } else if let Some(s) = rest.strip_prefix("http://") {
-        (s, 80u16)
-    } else {
-        return None;
+    let (scheme_host, default_port) = match rest.strip_prefix("https://") {
+        Some(s) => (s, 443u16),
+        None => (rest.strip_prefix("http://")?, 80u16),
     };
     let host_port = scheme_host.split('/').next()?;
     if let Some((host, port)) = host_port.split_once(':') {
