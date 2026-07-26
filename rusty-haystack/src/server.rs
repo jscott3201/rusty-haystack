@@ -38,6 +38,26 @@ fn get_runtime() -> PyResult<&'static tokio::runtime::Runtime> {
 #[pyclass(name = "AuthManager")]
 pub struct PyAuthManager {
     pub(crate) inner: AuthManager,
+    /// Set once the manager has been handed to a server.
+    ///
+    /// `with_auth` moves the live SCRAM state out and leaves `AuthManager::empty()`
+    /// behind. That empty manager authenticates nobody, so the old behaviour failed
+    /// closed — but it stayed callable, and `add_user` on it went somewhere the
+    /// server could never see. The object is poisoned instead, so the mistake is
+    /// reported where it is made rather than as "my users mysteriously do not work".
+    pub(crate) consumed: bool,
+}
+
+impl PyAuthManager {
+    fn check_live(&self) -> PyResult<()> {
+        if self.consumed {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "this AuthManager was given to a HaystackServer and is no longer \
+                 usable; configure it fully before calling with_auth",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
@@ -47,6 +67,7 @@ impl PyAuthManager {
     fn empty() -> Self {
         Self {
             inner: AuthManager::empty(),
+            consumed: false,
         }
     }
 
@@ -54,7 +75,10 @@ impl PyAuthManager {
     #[staticmethod]
     fn from_toml(path: &str) -> PyResult<Self> {
         AuthManager::from_toml(path)
-            .map(|inner| Self { inner })
+            .map(|inner| Self {
+                inner,
+                consumed: false,
+            })
             .map_err(PyErr::new::<exceptions::AuthError, _>)
     }
 
@@ -62,17 +86,27 @@ impl PyAuthManager {
     #[staticmethod]
     fn from_toml_str(content: &str) -> PyResult<Self> {
         AuthManager::from_toml_str(content)
-            .map(|inner| Self { inner })
+            .map(|inner| Self {
+                inner,
+                consumed: false,
+            })
             .map_err(PyErr::new::<exceptions::AuthError, _>)
     }
 
     /// Whether authentication is enabled (has users configured).
-    fn is_enabled(&self) -> bool {
-        self.inner.is_enabled()
+    fn is_enabled(&self) -> PyResult<bool> {
+        self.check_live()?;
+        Ok(self.inner.is_enabled())
     }
 
+    // Deliberately does not raise. A repr that throws breaks debuggers and
+    // tracebacks, which is exactly where you look when you hit the poison.
     fn __repr__(&self) -> String {
-        format!("AuthManager(enabled={})", self.inner.is_enabled())
+        if self.consumed {
+            "AuthManager(consumed)".to_string()
+        } else {
+            format!("AuthManager(enabled={})", self.inner.is_enabled())
+        }
     }
 }
 
@@ -149,13 +183,20 @@ impl PyHaystackServer {
         Ok(())
     }
 
-    /// Set the auth manager.
-    /// Warning: consumes the auth manager — the original object becomes empty.
-    fn with_auth(&mut self, auth: &mut PyAuthManager) {
+    /// Set the auth manager, consuming it.
+    ///
+    /// `auth` is unusable afterwards: an AuthManager holds live SCRAM state — the
+    /// in-flight handshakes, the issued tokens, and the server secret used to derive
+    /// anti-enumeration challenges — so it moves rather than being shared or copied.
+    /// Every later call on it raises RuntimeError instead of silently doing nothing.
+    fn with_auth(&mut self, auth: &mut PyAuthManager) -> PyResult<()> {
+        auth.check_live()?;
         let taken = std::mem::replace(&mut auth.inner, AuthManager::empty());
+        auth.consumed = true;
         if let Some(server) = self.inner.take() {
             self.inner = Some(server.with_auth(taken));
         }
+        Ok(())
     }
 
     /// Set the listen port (default 8080).

@@ -172,6 +172,25 @@ impl PyGraphDiff {
 #[pyclass(name = "EntityGraph")]
 pub struct PyEntityGraph {
     pub(crate) inner: EntityGraph,
+    /// Set once the graph has been handed to a SharedGraph.
+    ///
+    /// A SharedGraph takes ownership of the entities, so the constructor moves them
+    /// out and leaves an empty graph behind. That empty graph stayed callable and
+    /// silently wrong: `add` on it succeeded and went nowhere the SharedGraph could
+    /// see. It is poisoned instead, so the mistake surfaces where it is made.
+    pub(crate) consumed: bool,
+}
+
+impl PyEntityGraph {
+    fn check_live(&self) -> PyResult<()> {
+        if self.consumed {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "this EntityGraph was given to a SharedGraph and is no longer usable; \
+                 operate on the SharedGraph instead",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
@@ -180,6 +199,7 @@ impl PyEntityGraph {
     fn new() -> Self {
         Self {
             inner: EntityGraph::new(),
+            consumed: false,
         }
     }
 
@@ -190,6 +210,7 @@ impl PyEntityGraph {
     fn with_namespace(ns: &PyDefNamespace) -> Self {
         Self {
             inner: EntityGraph::with_namespace(Arc::clone(&ns.inner)),
+            consumed: false,
         }
     }
 
@@ -201,12 +222,16 @@ impl PyEntityGraph {
     fn from_grid(grid: &PyHGrid, ns: Option<&PyDefNamespace>) -> PyResult<Self> {
         let namespace = ns.map(|n| Arc::clone(&n.inner));
         EntityGraph::from_grid(&grid.inner, namespace)
-            .map(|g| Self { inner: g })
+            .map(|g| Self {
+                inner: g,
+                consumed: false,
+            })
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))
     }
 
     /// Add an entity (must have an 'id' Ref tag). Returns the ref value string.
     fn add(&mut self, entity: &PyHDict) -> PyResult<String> {
+        self.check_live()?;
         self.inner
             .add(entity.inner.clone())
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))
@@ -214,6 +239,7 @@ impl PyEntityGraph {
 
     /// Add multiple entities from an HGrid. Returns number of entities added.
     fn add_grid(&mut self, grid: &PyHGrid) -> PyResult<usize> {
+        self.check_live()?;
         let mut count = 0;
         for row in &grid.inner.rows {
             self.inner
@@ -226,6 +252,7 @@ impl PyEntityGraph {
 
     /// Get an entity by ref value. Returns HDict or None.
     fn get(&self, py: Python<'_>, ref_val: &str) -> PyResult<Option<Py<PyAny>>> {
+        self.check_live()?;
         match self.inner.get(ref_val) {
             Some(entity) => Ok(Some(
                 PyHDict::from_core(entity)
@@ -239,6 +266,7 @@ impl PyEntityGraph {
 
     /// Update an entity by merging changes.
     fn update(&mut self, ref_val: &str, changes: &PyHDict) -> PyResult<()> {
+        self.check_live()?;
         self.inner
             .update(ref_val, changes.inner.clone())
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))
@@ -246,6 +274,7 @@ impl PyEntityGraph {
 
     /// Remove an entity by ref value. Returns the removed entity as HDict.
     fn remove(&mut self, py: Python<'_>, ref_val: &str) -> PyResult<Py<PyAny>> {
+        self.check_live()?;
         let entity = self
             .inner
             .remove(ref_val)
@@ -259,6 +288,7 @@ impl PyEntityGraph {
     /// Run a filter expression and return matching entities as a grid.
     #[pyo3(signature = (filter_expr, limit = 0))]
     fn read(&self, filter_expr: &str, limit: usize) -> PyResult<PyHGrid> {
+        self.check_live()?;
         let grid = self
             .inner
             .read(filter_expr, limit)
@@ -268,6 +298,7 @@ impl PyEntityGraph {
 
     /// Return all entities as a list of HDict.
     fn all(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.check_live()?;
         self.inner
             .all()
             .into_iter()
@@ -275,23 +306,27 @@ impl PyEntityGraph {
             .collect()
     }
 
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+    fn is_empty(&self) -> PyResult<bool> {
+        self.check_live()?;
+        Ok(self.inner.is_empty())
     }
 
     /// Validate all entities against the attached namespace.
-    fn validate(&self) -> Vec<String> {
-        self.inner
+    fn validate(&self) -> PyResult<Vec<String>> {
+        self.check_live()?;
+        Ok(self
+            .inner
             .validate()
             .iter()
             .map(|issue| issue.to_string())
-            .collect()
+            .collect())
     }
 
     /// Return changelog entries since a given graph version.
     ///
     /// Raises RuntimeError if the subscriber has fallen behind (changelog gap).
     fn changes_since(&self, version: u64) -> PyResult<Vec<PyGraphDiff>> {
+        self.check_live()?;
         self.inner
             .changes_since(version)
             .map(|refs| refs.iter().map(|d| PyGraphDiff::from_core(d)).collect())
@@ -304,25 +339,30 @@ impl PyEntityGraph {
     }
 
     /// Enable a B-tree value index on a tag for faster range queries.
-    fn index_field(&mut self, field: &str) {
+    fn index_field(&mut self, field: &str) -> PyResult<()> {
+        self.check_live()?;
         self.inner.index_field(field);
+        Ok(())
     }
 
     /// Get ref values that the given entity points to.
     #[pyo3(signature = (ref_val, ref_type = None))]
-    fn refs_from(&self, ref_val: &str, ref_type: Option<&str>) -> Vec<String> {
-        self.inner.refs_from(ref_val, ref_type)
+    fn refs_from(&self, ref_val: &str, ref_type: Option<&str>) -> PyResult<Vec<String>> {
+        self.check_live()?;
+        Ok(self.inner.refs_from(ref_val, ref_type))
     }
 
     /// Get ref values of entities that point to the given entity.
     #[pyo3(signature = (ref_val, ref_type = None))]
-    fn refs_to(&self, ref_val: &str, ref_type: Option<&str>) -> Vec<String> {
-        self.inner.refs_to(ref_val, ref_type)
+    fn refs_to(&self, ref_val: &str, ref_type: Option<&str>) -> PyResult<Vec<String>> {
+        self.check_live()?;
+        Ok(self.inner.refs_to(ref_val, ref_type))
     }
 
     /// Export matching entities to a grid. Empty filter exports all entities.
     #[pyo3(signature = (filter_expr = ""))]
     fn to_grid(&self, filter_expr: &str) -> PyResult<PyHGrid> {
+        self.check_live()?;
         let grid = self
             .inner
             .to_grid(filter_expr)
@@ -330,20 +370,28 @@ impl PyEntityGraph {
         Ok(PyHGrid::from_core(&grid))
     }
 
-    fn __len__(&self) -> usize {
-        self.inner.len()
+    fn __len__(&self) -> PyResult<usize> {
+        self.check_live()?;
+        Ok(self.inner.len())
     }
 
-    fn __contains__(&self, ref_val: &str) -> bool {
-        self.inner.contains(ref_val)
+    fn __contains__(&self, ref_val: &str) -> PyResult<bool> {
+        self.check_live()?;
+        Ok(self.inner.contains(ref_val))
     }
 
     #[getter]
-    fn version(&self) -> u64 {
-        self.inner.version()
+    fn version(&self) -> PyResult<u64> {
+        self.check_live()?;
+        Ok(self.inner.version())
     }
 
+    // Deliberately does not raise. A repr that throws breaks debuggers and
+    // tracebacks, which is exactly where you look when you hit the poison.
     fn __repr__(&self) -> String {
+        if self.consumed {
+            return "EntityGraph(consumed)".to_string();
+        }
         format!(
             "EntityGraph(len={}, version={})",
             self.inner.len(),
@@ -372,6 +420,7 @@ impl PyEntityGraph {
 
     /// Find the site entity for any entity by walking up the ref chain.
     fn site_for(&self, py: Python<'_>, ref_val: &str) -> PyResult<Option<Py<PyAny>>> {
+        self.check_live()?;
         match self.inner.site_for(ref_val) {
             Some(d) => Ok(Some(
                 PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
@@ -382,6 +431,7 @@ impl PyEntityGraph {
 
     /// Get all direct children of an entity (entities whose xxxRef points to it).
     fn children_of(&self, py: Python<'_>, ref_val: &str) -> PyResult<Vec<Py<PyAny>>> {
+        self.check_live()?;
         self.inner
             .children(ref_val)
             .into_iter()
@@ -423,8 +473,9 @@ impl PyEntityGraph {
     }
 
     /// Classify an entity by its most specific type tag.
-    fn classify(&self, ref_val: &str) -> Option<String> {
-        self.inner.classify(ref_val)
+    fn classify(&self, ref_val: &str) -> PyResult<Option<String>> {
+        self.check_live()?;
+        Ok(self.inner.classify(ref_val))
     }
 }
 
@@ -456,14 +507,19 @@ impl PySharedGraph {
     /// you want both: it is shared, and the SharedGraph inherits it.
     #[new]
     #[pyo3(signature = (graph = None))]
-    fn new(graph: Option<&mut PyEntityGraph>) -> Self {
+    fn new(graph: Option<&mut PyEntityGraph>) -> PyResult<Self> {
         let eg = match graph {
-            Some(g) => std::mem::replace(&mut g.inner, EntityGraph::new()),
+            Some(g) => {
+                g.check_live()?;
+                let taken = std::mem::replace(&mut g.inner, EntityGraph::new());
+                g.consumed = true;
+                taken
+            }
             None => EntityGraph::new(),
         };
-        Self {
+        Ok(Self {
             inner: SharedGraph::new(eg),
-        }
+        })
     }
 
     /// Create a SharedGraph from an HGrid.
