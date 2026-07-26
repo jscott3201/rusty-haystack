@@ -795,3 +795,51 @@ fn an_of_type_still_resolves_to_a_def_when_no_local_spec_exists() {
         "of:Ahu resolves to the def `ahu` when no deft::Ahu spec exists"
     );
 }
+
+/// A spec declaring a required marker must not fit an entity that lacks it,
+/// whichever of the two Xeto spellings it uses (issue #48).
+///
+/// `ahu: Marker` used to leave `is_marker` false and `type_ref = Some("Marker")`.
+/// That slot never reached `mandatory_markers()`, and `check_slot_types` has
+/// nothing to check when the tag is simply absent — so the spec fitted every
+/// entity in the graph, including one with no tags at all.
+#[test]
+fn a_required_marker_is_enforced_in_both_spellings() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Bare: Dict {\n  ahu\n}\n\
+         Typed: Dict {\n  ahu: Marker\n}\n\
+         OptBare: Dict {\n  ahu?\n}\n\
+         OptTyped: Dict {\n  ahu: Marker?\n}\n",
+        "mk",
+    )
+    .expect("load test lib");
+
+    let empty = HDict::new();
+    let mut carries = HDict::new();
+    carries.set("ahu", Kind::Marker);
+
+    for spec in ["mk::Bare", "mk::Typed"] {
+        assert!(
+            !ns.fits_spec_term(&empty, spec),
+            "{spec} must not fit an entity with no tags"
+        );
+        assert!(
+            ns.fits_spec_term(&carries, spec),
+            "{spec} must fit an entity carrying the marker"
+        );
+    }
+
+    // The optional spellings must stay optional — the fix must not turn `?` into
+    // a requirement on the way past.
+    for spec in ["mk::OptBare", "mk::OptTyped"] {
+        assert!(
+            ns.fits_spec_term(&empty, spec),
+            "{spec} is optional and must still fit"
+        );
+        assert!(
+            ns.fits_spec_term(&carries, spec),
+            "{spec} must fit either way"
+        );
+    }
+}
