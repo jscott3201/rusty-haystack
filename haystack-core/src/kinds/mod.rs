@@ -54,9 +54,11 @@ pub use kind::Kind;
 
 mod units;
 pub use units::{
-    ConversionFactor, Unit, UnitError, base_unit, compatible, convert, quantity, unit_for,
-    units_by_name, units_by_symbol,
+    ConversionFactor, Unit, UnitError, base_unit, compatible, convert, convertible_quantities,
+    has_conversion_factor, quantity, unit_for, units_by_name, units_by_symbol,
 };
 
 mod tz;
+#[cfg(feature = "chrono-tz")]
+pub use tz::resolve_local_offset;
 pub use tz::{tz_for, tz_map};

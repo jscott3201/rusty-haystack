@@ -108,6 +108,10 @@ impl QueryCache {
     }
 
     /// Remove all entries whose version is older than `min_version`.
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     fn purge_stale(&mut self, min_version: u64) {
         self.entries
             .retain(|(_filter, version), _| *version >= min_version);
@@ -185,6 +189,27 @@ impl EntityGraph {
     /// ontology to another graph.
     pub fn namespace_arc(&self) -> Option<&Arc<DefNamespace>> {
         self.namespace.as_ref()
+    }
+
+    /// Replace the attached ontology with a newer one.
+    ///
+    /// The swap is atomic with respect to queries: a query holds the graph for its
+    /// whole duration, so it sees either the old namespace or the new one and never
+    /// a half-applied mix. That is the property the `Arc` snapshot exists to give,
+    /// and it is why loading a library replaces the handle rather than mutating the
+    /// namespace a graph is already reading.
+    ///
+    /// Callers that must not have the ontology shift under them should keep their
+    /// own `namespace_arc()` handle instead.
+    pub fn set_namespace(&mut self, ns: impl Into<Arc<DefNamespace>>) {
+        self.namespace = Some(ns.into());
+        // The query cache is keyed on (filter, version), and this does not bump the
+        // version — no entity changed, so waking every watcher would be noise. But
+        // `version` has a second consumer: a spec-match result depends on the
+        // ontology as much as on the entities, and the cache hit path returns before
+        // spec validation runs. Without this, a cached `myLib::Widget` hit outlives
+        // the unload that should have invalidated it.
+        self.query_cache.lock().clear();
     }
 
     /// Refuse a filter whose spec-match terms this graph's namespace cannot
@@ -474,6 +499,18 @@ impl EntityGraph {
 
         // Phase 2: full filter evaluation.
         let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
+        // The reverse half of query-slot evaluation. `sources_to` is the ref
+        // adjacency index the graph already maintains, so answering "who points
+        // at me through this tag" costs a lookup rather than a scan.
+        let inverse = |target: &HRef, tag: &str| -> Vec<&HDict> {
+            self.adjacency
+                .sources_to(&target.val, Some(tag))
+                .iter()
+                .filter_map(|eid| self.reverse_id.get(eid))
+                .filter_map(|id| self.entities.get(id))
+                .collect()
+        };
+        let ctx = crate::xeto::QueryContext::new(&resolver, &inverse);
 
         let mut results: Vec<&HDict>;
 
@@ -485,7 +522,7 @@ impl EntityGraph {
                 }
                 if let Some(ref_val) = self.reverse_id.get(&eid)
                     && let Some(entity) = self.entities.get(ref_val)
-                    && matches_with_ns(&ast, entity, Some(&resolver), ns)
+                    && matches_with_ns(&ast, entity, Some(ctx), ns)
                 {
                     results.push(entity);
                 }
@@ -496,7 +533,7 @@ impl EntityGraph {
                 if results.len() >= effective_limit {
                     break;
                 }
-                if matches_with_ns(&ast, entity, Some(&resolver), ns) {
+                if matches_with_ns(&ast, entity, Some(ctx), ns) {
                     results.push(entity);
                 }
             }
@@ -626,11 +663,23 @@ impl EntityGraph {
                 // Same resolver, namespace, and spec checking as query(), so
                 // spec matching and ref-path traversal behave identically here.
                 let resolver = |r: &HRef| -> Option<&HDict> { self.entities.get(&r.val) };
+                // The reverse half of query-slot evaluation. `sources_to` is the ref
+                // adjacency index the graph already maintains, so answering "who points
+                // at me through this tag" costs a lookup rather than a scan.
+                let inverse = |target: &HRef, tag: &str| -> Vec<&HDict> {
+                    self.adjacency
+                        .sources_to(&target.val, Some(tag))
+                        .iter()
+                        .filter_map(|eid| self.reverse_id.get(eid))
+                        .filter_map(|id| self.entities.get(id))
+                        .collect()
+                };
+                let ctx = crate::xeto::QueryContext::new(&resolver, &inverse);
                 let ns = self.namespace();
                 self.reject_unresolved_specs(&ast, ns)?;
                 Ok(points
                     .into_iter()
-                    .filter(|e| matches_with_ns(&ast, e, Some(&resolver), ns))
+                    .filter(|e| matches_with_ns(&ast, e, Some(ctx), ns))
                     .collect())
             }
             None => Ok(points),

@@ -51,6 +51,20 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 cargo build --workspace --exclude rusty-haystack
 ```
 
+`--exclude rusty-haystack` skips the PyO3 extension module, which cannot be linked without
+a Python interpreter. [CONTRIBUTING.md](CONTRIBUTING.md) explains what fails without the
+flag and how the crate is built and tested instead.
+
+### Cargo Features
+
+`rusty-haystack-core` keeps timezone rule data optional. Enable its default-off
+`chrono-tz` feature to resolve a Haystack timezone name and naive local date/time
+to DST-aware UTC offsets:
+
+```sh
+cargo build -p rusty-haystack-core --features chrono-tz
+```
+
 ### Run Tests
 
 ```sh
@@ -105,15 +119,16 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | [CLI Reference](docs/cli.md) | All commands, flags, and examples |
 | [Python Bindings](docs/python.md) | Core types, codecs, graph, filter, client, server, auth |
 | [Configuration](docs/configuration.md) | Server config, users TOML, permissions, Docker |
+| [Contributing](CONTRIBUTING.md) | Build flags and why, the gate, CI jobs, conventions |
 
 ## Security
 
-- **No `unsafe` code** — entire codebase is safe Rust
+- **No `unsafe` code** — entire codebase is safe Rust (by convention; not enforced by a `forbid` lint)
 - **SCRAM SHA-256** authentication with PBKDF2 (100k iterations) credential storage
 - **Credential zeroization** — `zeroize` crate clears salted passwords, client keys, and SCRAM state from memory on drop (both server and client)
 - **Username enumeration prevention** — fake SCRAM challenges for unknown users
 - **Constant-time comparison** — prevents timing side-channels during auth
-- **Request limits** — 2 MB body size, 100 concurrent watches, 10k IDs per watch, 1M history items
+- **Request limits** — 2 MB body size, 100 concurrent watches, 1,000 IDs per watch, 1M history items
 - **Filter recursion depth limit** — max depth 100 to prevent stack overflow
 - **Parser DoS protection** — depth limits and size limits on all parsers
 - **Xeto loader safety** — symlink traversal protection, file size limits, and directory depth guards

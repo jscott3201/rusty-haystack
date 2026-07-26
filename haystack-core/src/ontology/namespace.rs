@@ -350,13 +350,35 @@ impl DefNamespace {
     /// conform to its own type. Neither answer is what `ph::Sensor` or
     /// `ph::Floor` means to someone writing a query.
     ///
-    /// Conjunct defs (`hot-water`, `elec-meter`) are out of scope: an entity
-    /// expresses those through their component markers rather than a literal
-    /// conjunct marker, and this does not decompose them. They are unreachable
-    /// from a filter anyway — the grammar reads the `-` as an operator.
+    /// Conjunct defs (`hot-water`, `elec-meter`) are decomposed. An entity
+    /// expresses one by carrying its component markers rather than a literal
+    /// conjunct marker, so membership asks whether the entity is each component —
+    /// recursively, since a component may itself be a conjunct.
     pub fn entity_is_a(&self, entity: &HDict, type_name: &str) -> bool {
+        self.entity_is_a_depth(entity, type_name, 0)
+    }
+
+    fn entity_is_a_depth(&self, entity: &HDict, type_name: &str, depth: usize) -> bool {
+        // Components come from splitting the symbol on `-`, so a component never
+        // contains a `-` and is therefore never itself a registered conjunct. In
+        // practice this recurses exactly one level: measured across all 162
+        // bundled conjuncts, the maximum decomposition depth is 1. The recursion
+        // and the cap are both defensive — they cost nothing and mean a future
+        // registration path that does produce a nested conjunct is handled rather
+        // than looping.
+        const MAX_CONJUNCT_DEPTH: usize = 8;
         if !self.has_type(type_name) {
             return false;
+        }
+        if depth < MAX_CONJUNCT_DEPTH
+            && let Some(parts) = self.conjunct_parts(type_name)
+        {
+            // `all` over an empty slice is true, which would match everything —
+            // treat a conjunct that decomposes to nothing as unsatisfiable instead.
+            return !parts.is_empty()
+                && parts
+                    .iter()
+                    .all(|part| self.entity_is_a_depth(entity, part, depth + 1));
         }
         self.taxonomy.any_is_subtype(
             entity
@@ -381,8 +403,11 @@ impl DefNamespace {
     ///    destroys.
     /// 3. A def whose symbol is the lowercased bare name. This is the Haystack
     ///    convention that writes `ph::Ahu` for the def `ahu`.
+    /// 4. A conjunct def, matched ignoring case and hyphens, which is the
+    ///    convention that writes `ph::ElecMeter` for the def `elec-meter`.
+    ///    Last, so a def whose symbol genuinely is camelCase always wins.
     ///
-    /// Only rung 1 looks at the library qualifier. Rungs 2 and 3 match on the
+    /// Only rung 1 looks at the library qualifier. Rungs 2 to 4 match on the
     /// bare name alone, so `totallyMadeUp::Ahu` resolves to the def `ahu` just
     /// as `ph::Ahu` does. That mirrors how the term was reduced before specs
     /// were consulted at all, and Haystack def symbols are globally unique.
@@ -401,6 +426,13 @@ impl DefNamespace {
         if self.has_type(&lowered) {
             return Some(SpecTerm::Def(lowered));
         }
+        // 4. A conjunct def written CamelCase: `ph::ElecMeter` for `elec-meter`.
+        //    Last, so it never shadows a def whose symbol genuinely is camelCase —
+        //    `ahuZoneDelivery` is caught by rung 2 and must not be read as
+        //    `ahu-zone-delivery` here.
+        if let Some(conjunct) = self.conjuncts.resolve_normalized(bare) {
+            return Some(SpecTerm::Def(conjunct.to_string()));
+        }
         None
     }
 
@@ -416,10 +448,29 @@ impl DefNamespace {
     /// An unresolvable term is `false`; callers that can report an error should
     /// call [`resolve_spec_term`](Self::resolve_spec_term) first.
     pub fn fits_spec_term(&self, entity: &HDict, term: &str) -> bool {
+        self.fits_spec_term_with(entity, term, None)
+    }
+
+    /// As [`fits_spec_term`](Self::fits_spec_term), with traversal for query slots.
+    ///
+    /// A Xeto spec can constrain what an entity must be able to *reach* — an AHU
+    /// spec whose `vavs` slot queries `airRef+`, say. Those constraints cannot be
+    /// evaluated from the entity alone, so without a context they are skipped and
+    /// the spec matches more than it should. Callers holding a graph should pass
+    /// one; `fits_spec_term` remains for callers that have no entity store.
+    ///
+    /// A context that cannot answer inverse queries still reports them rather than
+    /// passing them — see [`QueryContext`](crate::xeto::QueryContext).
+    pub fn fits_spec_term_with(
+        &self,
+        entity: &HDict,
+        term: &str,
+        ctx: Option<crate::xeto::QueryContext<'_>>,
+    ) -> bool {
         match self.resolve_spec_term(term) {
             Some(SpecTerm::Def(name)) => self.entity_is_a(entity, &name),
             Some(SpecTerm::Spec(spec)) => {
-                crate::xeto::fitting::explain_against_spec_in(entity, spec, &self.specs, None)
+                crate::xeto::fitting::explain_against_spec_in(entity, spec, &self.specs, self, ctx)
                     .is_empty()
             }
             None => false,

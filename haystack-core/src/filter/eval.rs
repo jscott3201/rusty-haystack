@@ -2,14 +2,19 @@
 
 use super::ast::{CmpOp, FilterNode, Path};
 use crate::data::HDict;
-use crate::kinds::{HRef, Kind};
+use crate::kinds::Kind;
 use crate::ontology::DefNamespace;
 
 /// Callback type that resolves a `Ref` to the target entity dict.
 ///
 /// Returns a borrowed reference to the entity, avoiding cloning during
 /// multi-segment path traversal.
-type ResolveRef<'a> = Option<&'a dyn Fn(&HRef) -> Option<&'a HDict>>;
+/// What filter evaluation may ask of the surrounding entity store.
+///
+/// Carries forward ref resolution (for multi-segment paths like
+/// `equipRef->siteRef`) and, when the caller can answer it, reverse lookup for
+/// inverse Xeto query slots. See [`QueryContext`](crate::xeto::QueryContext).
+type Ctx<'a> = Option<crate::xeto::QueryContext<'a>>;
 
 /// Evaluate a filter against an entity dict.
 ///
@@ -18,34 +23,37 @@ type ResolveRef<'a> = Option<&'a dyn Fn(&HRef) -> Option<&'a HDict>>;
 ///
 /// `namespace` is an optional ontology namespace used for SpecMatch evaluation
 /// (e.g. `ph::Ahu`). If `None`, SpecMatch always returns false.
-pub fn matches<'a>(node: &FilterNode, entity: &'a HDict, resolve_ref: ResolveRef<'a>) -> bool {
-    matches_with_ns(node, entity, resolve_ref, None)
+pub fn matches<'a>(node: &FilterNode, entity: &'a HDict, ctx: Ctx<'a>) -> bool {
+    matches_with_ns(node, entity, ctx, None)
 }
 
 /// Evaluate a filter with ontology namespace support for SpecMatch.
 pub fn matches_with_ns<'a>(
     node: &FilterNode,
     entity: &'a HDict,
-    resolve_ref: ResolveRef<'a>,
+    ctx: Ctx<'a>,
     namespace: Option<&DefNamespace>,
 ) -> bool {
     match node {
-        FilterNode::Has(path) => resolve_path(path, entity, resolve_ref).is_some(),
-        FilterNode::Missing(path) => resolve_path(path, entity, resolve_ref).is_none(),
-        FilterNode::Cmp { path, op, val } => match resolve_path(path, entity, resolve_ref) {
+        FilterNode::Has(path) => resolve_path(path, entity, ctx).is_some(),
+        FilterNode::Missing(path) => resolve_path(path, entity, ctx).is_none(),
+        FilterNode::Cmp { path, op, val } => match resolve_path(path, entity, ctx) {
             Some(actual) => compare(actual, op, val),
             None => false,
         },
         FilterNode::And(left, right) => {
-            matches_with_ns(left, entity, resolve_ref, namespace)
-                && matches_with_ns(right, entity, resolve_ref, namespace)
+            matches_with_ns(left, entity, ctx, namespace)
+                && matches_with_ns(right, entity, ctx, namespace)
         }
         FilterNode::Or(left, right) => {
-            matches_with_ns(left, entity, resolve_ref, namespace)
-                || matches_with_ns(right, entity, resolve_ref, namespace)
+            matches_with_ns(left, entity, ctx, namespace)
+                || matches_with_ns(right, entity, ctx, namespace)
         }
         FilterNode::SpecMatch(spec) => match namespace {
-            Some(ns) => ns.fits_spec_term(entity, spec),
+            // Pass the resolver on. Dropping it here is what left Xeto query slots
+            // unchecked, so a spec constraining what an entity must reach matched
+            // entities that reach nothing (issue #22).
+            Some(ns) => ns.fits_spec_term_with(entity, spec, ctx),
             None => false,
         },
     }
@@ -90,17 +98,13 @@ fn collect_unresolved(node: &FilterNode, namespace: Option<&DefNamespace>, out: 
 // Note: Unlike the Python reference which raises ValueError when resolve_ref
 // is None for multi-segment paths, we silently return false. This is intentional:
 // filters should evaluate to false for unresolvable paths rather than crashing.
-fn resolve_path<'a>(
-    path: &Path,
-    entity: &'a HDict,
-    resolve_ref: ResolveRef<'a>,
-) -> Option<&'a Kind> {
+fn resolve_path<'a>(path: &Path, entity: &'a HDict, ctx: Ctx<'a>) -> Option<&'a Kind> {
     if path.is_single() {
         return entity.get(path.first());
     }
 
     // Multi-segment path: need resolve_ref
-    let resolve = resolve_ref?;
+    let resolve = ctx?.forward;
 
     let segments = &path.0;
     let mut current_entity = entity;
@@ -159,7 +163,7 @@ fn ordered_cmp(actual: &Kind, op: &CmpOp, expected: &Kind) -> bool {
 mod tests {
     use super::*;
     use crate::filter::parse_filter;
-    use crate::kinds::Number;
+    use crate::kinds::{HRef, Number};
     use chrono::NaiveDate;
 
     fn make_site_entity() -> HDict {
@@ -398,7 +402,11 @@ mod tests {
         let resolver =
             |r: &HRef| -> Option<&HDict> { if r.val == "site-1" { Some(&site) } else { None } };
         let filter = parse_filter("siteRef->dis == \"Main Site\"").unwrap();
-        assert!(matches(&filter, &entity, Some(&resolver)));
+        assert!(matches(
+            &filter,
+            &entity,
+            Some(crate::xeto::QueryContext::forward_only(&resolver))
+        ));
     }
 
     #[test]
@@ -408,7 +416,11 @@ mod tests {
         let resolver =
             |r: &HRef| -> Option<&HDict> { if r.val == "site-1" { Some(&site) } else { None } };
         let filter = parse_filter("siteRef->area").unwrap();
-        assert!(matches(&filter, &entity, Some(&resolver)));
+        assert!(matches(
+            &filter,
+            &entity,
+            Some(crate::xeto::QueryContext::forward_only(&resolver))
+        ));
     }
 
     #[test]
@@ -417,7 +429,11 @@ mod tests {
         let resolver = |_r: &HRef| -> Option<&HDict> { None };
         // siteRef resolves to a ref but resolver returns None
         let filter = parse_filter("siteRef->dis").unwrap();
-        assert!(!matches(&filter, &entity, Some(&resolver)));
+        assert!(!matches(
+            &filter,
+            &entity,
+            Some(crate::xeto::QueryContext::forward_only(&resolver))
+        ));
     }
 
     #[test]
@@ -427,7 +443,11 @@ mod tests {
         entity.set("dis", Kind::Str("hello".into()));
         let resolver = |_r: &HRef| -> Option<&HDict> { None };
         let filter = parse_filter("dis->foo").unwrap();
-        assert!(!matches(&filter, &entity, Some(&resolver)));
+        assert!(!matches(
+            &filter,
+            &entity,
+            Some(crate::xeto::QueryContext::forward_only(&resolver))
+        ));
     }
 
     // ── SpecMatch tests ──
@@ -513,7 +533,11 @@ mod tests {
         let resolver =
             |r: &HRef| -> Option<&HDict> { if r.val == "site-1" { Some(&site) } else { None } };
         let filter = parse_filter("siteRef->area > 4000ft²").unwrap();
-        assert!(matches(&filter, &equip, Some(&resolver)));
+        assert!(matches(
+            &filter,
+            &equip,
+            Some(crate::xeto::QueryContext::forward_only(&resolver))
+        ));
     }
 
     // ── DateTime comparison tests ──

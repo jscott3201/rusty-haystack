@@ -364,6 +364,7 @@ fn decode_ref(m: &Map<String, Value>) -> Result<Kind, CodecError> {
 /// Decode a datetime from a `_kind: "dateTime"` object.
 fn decode_datetime(m: &Map<String, Value>) -> Result<Kind, CodecError> {
     let val = get_str(m, "val")?;
+    super::reject_lowercase_t_separator(&val)?;
     let dt = chrono::DateTime::parse_from_rfc3339(&val)
         .or_else(|_| {
             // Try a more lenient format

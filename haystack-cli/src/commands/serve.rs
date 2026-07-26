@@ -90,10 +90,6 @@ pub fn run(cfg: ServeConfig<'_>) {
         };
 
         let bind_host = cfg.host.unwrap_or("127.0.0.1");
-        eprintln!(
-            "Starting Haystack HTTP server on {}:{}",
-            bind_host, cfg.port
-        );
 
         HaystackServer::new(graph)
             // The server keeps its own mutable copy: the lib load/unload
@@ -102,7 +98,11 @@ pub fn run(cfg: ServeConfig<'_>) {
             .with_auth(auth)
             .host(bind_host)
             .port(cfg.port)
-            .run()
+            // Printed after the bind succeeds, so it is a readiness signal as well
+            // as an address. The old banner was printed before binding and reported
+            // the REQUESTED port, which made it useless for both purposes and left
+            // `--port 0` undiscoverable.
+            .run_reporting_addr(|addr| println!("Listening on {addr}"))
             .await
             .unwrap_or_else(|e| {
                 eprintln!("Server error: {}", e);

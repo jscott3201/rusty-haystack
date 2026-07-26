@@ -14,7 +14,11 @@ Clone the repository and build all crates:
 cargo build --workspace --exclude rusty-haystack
 ```
 
-The `rusty-haystack` crate (Python bindings) is excluded because it requires maturin and a Python virtual environment. See [Python Bindings](python.md) for setup.
+The `rusty-haystack` crate (Python bindings) is excluded because it is a PyO3 extension
+module: it is linked against a Python interpreter that only exists at import time, so
+`cargo build` cannot link it and fails with undefined `_Py_*` symbols. Build it with
+maturin instead — see [Python Bindings](python.md) for setup, or
+[CONTRIBUTING.md](../CONTRIBUTING.md) for the full explanation.
 
 To build only the CLI binary:
 

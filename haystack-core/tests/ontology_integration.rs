@@ -303,3 +303,589 @@ fn meter_is_equip() {
     let ns = load_ns();
     assert!(ns.is_a("meter", "equip"));
 }
+
+/// A spec whose constraints live in query slots must be checked against the graph,
+/// not just against the entity's own tags (issue #22).
+///
+/// `EntityGraph` has always built a ref resolver and handed it to `matches_with_ns`,
+/// but the `SpecMatch` arm dropped it — the two resolver types disagreed on owned
+/// vs borrowed, and `None` was the only thing that compiled. `None` is
+/// indistinguishable from "no resolver available", so query slots were silently
+/// skipped and the spec matched entities it should not.
+#[test]
+fn query_slot_specs_are_checked_against_the_graph() {
+    use haystack_core::graph::EntityGraph;
+
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    // A vav is only this spec if something is actually reachable via airRef.
+    ns.load_xeto_str(
+        "AhuFedVav: Dict {\n  vav: Marker\n  myAhu: Query<of:Ahu, via:\"airRef\">\n}\n",
+        "qtest",
+    )
+    .expect("load test lib");
+
+    let mut graph = EntityGraph::with_namespace(ns);
+
+    let mut ahu = HDict::new();
+    ahu.set("id", Kind::Ref(HRef::from_val("ahu-1")));
+    ahu.set("ahu", Kind::Marker);
+    ahu.set("equip", Kind::Marker);
+    graph.add(ahu).unwrap();
+
+    // Connected: airRef points at an AHU that exists in the graph.
+    let mut fed = HDict::new();
+    fed.set("id", Kind::Ref(HRef::from_val("vav-fed")));
+    fed.set("vav", Kind::Marker);
+    fed.set("airRef", Kind::Ref(HRef::from_val("ahu-1")));
+    graph.add(fed).unwrap();
+
+    // Orphan: same tags, but nothing reachable. Identical under tag-only checking.
+    let mut orphan = HDict::new();
+    orphan.set("id", Kind::Ref(HRef::from_val("vav-orphan")));
+    orphan.set("vav", Kind::Marker);
+    graph.add(orphan).unwrap();
+
+    let matched = graph
+        .read_all("qtest::AhuFedVav", 0)
+        .expect("spec filter is accepted");
+    let ids: Vec<String> = matched
+        .iter()
+        .filter_map(|e| e.id().map(|r| r.val.clone()))
+        .collect();
+
+    assert!(
+        ids.contains(&"vav-fed".to_string()),
+        "the connected vav must match: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"vav-orphan".to_string()),
+        "a vav reaching no AHU must NOT match — the query slot was not checked: {ids:?}"
+    );
+    assert_eq!(ids.len(), 1, "exactly one vav satisfies the query: {ids:?}");
+}
+
+// ── Conjunct defs as filter spec terms (issue #26) ──
+//
+// Answering `ph::ElecMeter` for a conjunct def takes three independent pieces:
+// the filter parser must keep the hyphen, `resolve_spec_term` must reach the
+// def, and `entity_is_a` must decompose it into component markers. Any two
+// without the third still parse and still evaluate — they just answer `false`
+// for every entity, which is indistinguishable from "no entity matched" at the
+// call site. So these sweep all 162 bundled conjuncts rather than spot-check,
+// and each reports the offending names instead of a bare count.
+
+/// Every conjunct def in the standard namespace, e.g. `elec-meter`.
+fn all_conjuncts(ns: &DefNamespace) -> Vec<String> {
+    let mut v: Vec<String> = ns
+        .defs()
+        .keys()
+        .filter(|n| ns.conjunct_parts(n).is_some())
+        .cloned()
+        .collect();
+    v.sort();
+    assert!(
+        v.len() > 100,
+        "expected ~162 bundled conjuncts, found {} — the sweeps below prove \
+         nothing if the corpus is empty",
+        v.len()
+    );
+    v
+}
+
+/// `elec-meter` -> `ElecMeter`, the Haystack-capitalised spelling.
+fn camel(conjunct: &str) -> String {
+    conjunct
+        .split('-')
+        .map(|w| {
+            let mut ch = w.chars();
+            match ch.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// An entity carrying exactly `tags` as markers.
+fn marked(tags: &[&str]) -> HDict {
+    let mut d = HDict::new();
+    for t in tags {
+        d.set(*t, Kind::Marker);
+    }
+    d
+}
+
+#[test]
+fn every_conjunct_def_parses_and_resolves_as_a_spec_term() {
+    let ns = load_ns();
+    let mut unparsed = Vec::new();
+    let mut unresolved = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let term = format!("ph::{c}");
+        if haystack_core::filter::parse_filter(&term).is_err() {
+            unparsed.push(term.clone());
+        }
+        if ns.resolve_spec_term(&term).is_none() {
+            unresolved.push(term);
+        }
+    }
+    assert!(
+        unparsed.is_empty(),
+        "conjuncts that failed to parse: {unparsed:?}"
+    );
+    assert!(
+        unresolved.is_empty(),
+        "conjuncts that parsed but resolved to nothing: {unresolved:?}"
+    );
+}
+
+#[test]
+fn every_conjunct_def_resolves_from_its_camel_case_spelling() {
+    // `FuelOilOutput` cannot be transformed into `fuelOil-output` — the capital
+    // that was a word boundary and the capital inside a component are the same
+    // character — so resolution is a lookup over the conjunct index, and this
+    // sweep is what proves the lookup covers the camelCase-component defs and
+    // not just the flat ones like `elec-meter`.
+    let ns = load_ns();
+    let mut unresolved = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let term = format!("ph::{}", camel(&c));
+        match ns.resolve_spec_term(&term) {
+            Some(_) => {}
+            None => unresolved.push(format!("{term} (for {c})")),
+        }
+    }
+    assert!(
+        unresolved.is_empty(),
+        "conjuncts unreachable by CamelCase: {unresolved:?}"
+    );
+}
+
+#[test]
+fn every_conjunct_def_matches_an_entity_carrying_its_component_markers() {
+    // The end-to-end path: parse the filter, then evaluate it. A fix to the
+    // parser and the resolver that missed conjunct decomposition would pass the
+    // two tests above and fail every case here.
+    let ns = load_ns();
+    let mut unmatched = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let parts = ns.conjunct_parts(&c).unwrap().to_vec();
+        let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
+        let entity = marked(&refs);
+        let filter = haystack_core::filter::parse_filter(&format!("ph::{c}")).unwrap();
+        if !haystack_core::filter::matches_with_ns(&filter, &entity, None, Some(&ns)) {
+            unmatched.push(format!("{c} (markers {refs:?})"));
+        }
+    }
+    assert!(
+        unmatched.is_empty(),
+        "conjuncts that did not match their own components: {unmatched:?}"
+    );
+}
+
+#[test]
+fn no_conjunct_def_matches_an_entity_missing_its_components() {
+    // The counterweight. A decomposition that answered `true` unconditionally
+    // would satisfy every test above.
+    let ns = load_ns();
+    let bare = HDict::new();
+    let mut false_positives = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let filter = haystack_core::filter::parse_filter(&format!("ph::{c}")).unwrap();
+        if haystack_core::filter::matches_with_ns(&filter, &bare, None, Some(&ns)) {
+            false_positives.push(c);
+        }
+    }
+    assert!(
+        false_positives.is_empty(),
+        "conjuncts matched by a tagless entity: {false_positives:?}"
+    );
+
+    // Holding all but one component is still not membership.
+    let mut partials = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let parts = ns.conjunct_parts(&c).unwrap().to_vec();
+        if parts.len() < 2 {
+            continue;
+        }
+        let refs: Vec<&str> = parts[..parts.len() - 1]
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let entity = marked(&refs);
+        let filter = haystack_core::filter::parse_filter(&format!("ph::{c}")).unwrap();
+        if haystack_core::filter::matches_with_ns(&filter, &entity, None, Some(&ns)) {
+            partials.push(format!("{c} matched by {refs:?}"));
+        }
+    }
+    assert!(
+        partials.is_empty(),
+        "conjuncts matched without all components: {partials:?}"
+    );
+}
+
+// ── Inverse query slots and `of` enforcement (issue #39) ──
+
+use haystack_core::graph::EntityGraph;
+
+/// Build a graph from `(id, tags...)` tuples where every tag is a marker except
+/// those written `tag=ref`, which become refs.
+fn graph_of(ns: DefNamespace, rows: &[(&str, &[&str])]) -> EntityGraph {
+    let mut graph = EntityGraph::with_namespace(ns);
+    for (id, tags) in rows {
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val(*id)));
+        for t in tags.iter() {
+            match t.split_once('=') {
+                Some((tag, target)) => e.set(tag, Kind::Ref(HRef::from_val(target))),
+                None => e.set(*t, Kind::Marker),
+            }
+        }
+        graph.add(e).unwrap();
+    }
+    graph
+}
+
+fn matched_ids(graph: &EntityGraph, filter: &str) -> Vec<String> {
+    let mut ids: Vec<String> = graph
+        .read_all(filter, 0)
+        .unwrap_or_else(|e| panic!("{filter} rejected: {e}"))
+        .iter()
+        .filter_map(|e| e.id().map(|r| r.val.clone()))
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// An inverse query asks which entities point *at* this one — the mirror of a
+/// forward `via`. Before #39 the slot was skipped entirely, so the spec matched
+/// every entity that satisfied its other slots.
+#[test]
+fn an_inverse_query_slot_matches_only_entities_something_points_at() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "FedVav: Dict {\n  vav\n  myAhu: Query<of:Ahu, via:\"airRef\">\n}\n\
+         FeedingAhu: Dict {\n  ahu\n  vavs: Query<of:Vav, inverse:\"inv::FedVav.myAhu\">\n}\n",
+        "inv",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("ahu-fed", &["ahu", "equip"]),
+            ("ahu-idle", &["ahu", "equip"]),
+            ("vav-1", &["vav", "airRef=ahu-fed"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "inv::FeedingAhu"),
+        vec!["ahu-fed".to_string()],
+        "only the AHU a vav actually points at is a FeedingAhu"
+    );
+}
+
+/// Inverse traversal follows `+` transitively, the same as the forward path it
+/// mirrors: an entity two ref-hops upstream still counts.
+///
+/// The only qualifying source is deliberately two hops away. A one-hop
+/// implementation finds `middle`, which `of:Vav` then rejects, so the slot comes
+/// back empty and `root` does not match — which is what makes this test fail if
+/// transitivity is dropped.
+#[test]
+fn a_transitive_inverse_query_reaches_indirect_sources() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Child: Dict {\n  vav\n  up: Query<of:Ahu, via:\"airRef+\">\n}\n\
+         Root: Dict {\n  ahu\n  below: Query<of:Vav, inverse:\"deep::Child.up\">\n}\n",
+        "deep",
+    )
+    .expect("load test lib");
+
+    // grandchild(vav) -> middle(not a vav) -> root
+    let graph = graph_of(
+        ns,
+        &[
+            ("root", &["ahu", "equip"]),
+            ("lonely", &["ahu", "equip"]),
+            ("middle", &["equip", "airRef=root"]),
+            ("grandchild", &["vav", "airRef=middle"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "deep::Root"),
+        vec!["root".to_string()],
+        "the vav two hops below counts; the lonely ahu has nothing below it"
+    );
+}
+
+/// `of` narrows what counts as reached. Reaching something is not enough — it has
+/// to be the declared type, which the code parsed and then ignored.
+#[test]
+fn a_query_slot_is_not_satisfied_by_reaching_the_wrong_type() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "NeedsAhu: Dict {\n  vav\n  src: Query<of:Ahu, via:\"airRef\">\n}\n",
+        "oft",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("real-ahu", &["ahu", "equip"]),
+            ("a-chiller", &["chiller", "equip"]),
+            ("vav-good", &["vav", "airRef=real-ahu"]),
+            ("vav-bad", &["vav", "airRef=a-chiller"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "oft::NeedsAhu"),
+        vec!["vav-good".to_string()],
+        "reaching a chiller does not satisfy of:Ahu"
+    );
+}
+
+/// An inverse reference naming a slot that does not exist cannot be evaluated
+/// either way. It fails closed, consistently with how an unknown spec name is
+/// treated — the bundled `ph.equips::VavZoneAhu` is in exactly this state (#46).
+#[test]
+fn an_inverse_query_naming_a_missing_slot_matches_nothing() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Dangling: Dict {\n  ahu\n  vavs: Query<of:Vav, inverse:\"dang::NoSuchSpec.nope\">\n}\n",
+        "dang",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(ns, &[("ahu-1", &["ahu", "equip"])]);
+
+    assert!(
+        matched_ids(&graph, "dang::Dangling").is_empty(),
+        "an unevaluatable constraint must not pass"
+    );
+}
+
+/// The bundled `ph.equips::VavZoneAhu` carries the dangling reference from #46,
+/// so it matches nothing until that data defect is fixed. Pinned so the number
+/// changes visibly when it is, rather than silently.
+///
+/// This graph is built by hand rather than taken from the demo, and that matters:
+/// the demo AHUs carry no `vavZone`, so they fail this spec's marker slot on
+/// `dev` too and the demo answer is zero either way. The entity below does carry
+/// `vavZone`, which is what makes the comparison real — on `dev`, where the
+/// inverse slot is skipped, this same graph returns `["ahu-1"]`.
+#[test]
+fn the_bundled_vav_zone_ahu_currently_matches_nothing() {
+    let ns = DefNamespace::load_standard().expect("standard ontology");
+    let graph = graph_of(
+        ns,
+        &[
+            ("ahu-1", &["ahu", "equip", "vavZone"]),
+            ("vav-1", &["vav", "equip", "airRef=ahu-1"]),
+        ],
+    );
+
+    assert!(
+        matched_ids(&graph, "ph.equips::VavZoneAhu").is_empty(),
+        "VavZoneAhu points at AhuVav.ahu, but that slot is named myAhu (#46)"
+    );
+    // The forward half of the same pair does work, which is what shows the
+    // failure is the dangling reference and not inverse queries generally.
+    assert_eq!(
+        matched_ids(&graph, "ph.equips::AhuVav"),
+        vec!["vav-1".to_string()]
+    );
+}
+
+/// A caller that can traverse forward but not backward must not have its inverse
+/// query slots quietly pass. Degrading to "true" is the failure mode #22 and #39
+/// both exist to remove, so a context without a reverse index reports the slot.
+#[test]
+fn an_inverse_query_without_a_reverse_index_fails_closed() {
+    use haystack_core::xeto::QueryContext;
+
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Src: Dict {\n  vav\n  up: Query<of:Ahu, via:\"airRef\">\n}\n\
+         Sink: Dict {\n  ahu\n  below: Query<of:Vav, inverse:\"nr::Src.up\">\n}\n",
+        "nr",
+    )
+    .expect("load test lib");
+
+    let mut ahu = HDict::new();
+    ahu.set("id", Kind::Ref(HRef::from_val("ahu-1")));
+    ahu.set("ahu", Kind::Marker);
+
+    // A forward resolver that knows nothing is still a forward resolver; what is
+    // missing is the reverse direction.
+    let forward = |_r: &HRef| -> Option<&HDict> { None };
+    let ctx = QueryContext::forward_only(&forward);
+
+    let issues = haystack_core::xeto::fits_explain(&ahu, "nr::Sink", &ns, Some(ctx));
+    assert!(
+        !issues.is_empty(),
+        "an inverse slot that cannot be evaluated must be reported, not skipped"
+    );
+    assert!(
+        format!("{issues:?}").contains("reverse index"),
+        "the issue should say why it could not be evaluated: {issues:?}"
+    );
+}
+
+/// `of:` names a type unqualified, and a Xeto spec in the same library must be
+/// found. `resolve_spec_term` only matches a spec on its exact qualified name,
+/// so a bare `Target` fell through to the def rungs and resolved to nothing —
+/// the slot then counted zero matches and the spec matched no entity at all.
+///
+/// Found by adversarial review of the change that introduced `of` enforcement.
+#[test]
+fn an_of_type_resolves_to_a_spec_in_the_same_library() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Target: Dict {\n  target\n}\n\
+         Holder: Dict {\n  holder\n  child: Query<of:Target, via:\"childRef\">\n}\n",
+        "same",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("target", &["target"]),
+            ("holder", &["holder", "childRef=target"]),
+            ("empty-holder", &["holder"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "same::Holder"),
+        vec!["holder".to_string()],
+        "of:Target must resolve to same::Target"
+    );
+}
+
+/// A bare `of:` that names a def must still resolve, which is the bundled case —
+/// `ph.equips` writes `of:Ahu` for the def `ahu`, not for a spec in its own lib.
+#[test]
+fn an_of_type_still_resolves_to_a_def_when_no_local_spec_exists() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "NeedsAhu: Dict {\n  vav\n  src: Query<of:Ahu, via:\"airRef\">\n}\n",
+        "deft",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("real-ahu", &["ahu", "equip"]),
+            ("a-chiller", &["chiller", "equip"]),
+            ("vav-good", &["vav", "airRef=real-ahu"]),
+            ("vav-bad", &["vav", "airRef=a-chiller"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "deft::NeedsAhu"),
+        vec!["vav-good".to_string()],
+        "of:Ahu resolves to the def `ahu` when no deft::Ahu spec exists"
+    );
+}
+
+/// A spec declaring a required marker must not fit an entity that lacks it,
+/// whichever of the two Xeto spellings it uses (issue #48).
+///
+/// `ahu: Marker` used to leave `is_marker` false and `type_ref = Some("Marker")`.
+/// That slot never reached `mandatory_markers()`, and `check_slot_types` has
+/// nothing to check when the tag is simply absent — so the spec fitted every
+/// entity in the graph, including one with no tags at all.
+#[test]
+fn a_required_marker_is_enforced_in_both_spellings() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Bare: Dict {\n  ahu\n}\n\
+         Typed: Dict {\n  ahu: Marker\n}\n\
+         OptBare: Dict {\n  ahu?\n}\n\
+         OptTyped: Dict {\n  ahu: Marker?\n}\n",
+        "mk",
+    )
+    .expect("load test lib");
+
+    let empty = HDict::new();
+    let mut carries = HDict::new();
+    carries.set("ahu", Kind::Marker);
+
+    for spec in ["mk::Bare", "mk::Typed"] {
+        assert!(
+            !ns.fits_spec_term(&empty, spec),
+            "{spec} must not fit an entity with no tags"
+        );
+        assert!(
+            ns.fits_spec_term(&carries, spec),
+            "{spec} must fit an entity carrying the marker"
+        );
+    }
+
+    // The optional spellings must stay optional — the fix must not turn `?` into
+    // a requirement on the way past.
+    for spec in ["mk::OptBare", "mk::OptTyped"] {
+        assert!(
+            ns.fits_spec_term(&empty, spec),
+            "{spec} is optional and must still fit"
+        );
+        assert!(
+            ns.fits_spec_term(&carries, spec),
+            "{spec} must fit either way"
+        );
+    }
+}
+
+/// Only the built-in `Marker` collapses to a marker slot. A library defining its
+/// own type of that name keeps its constraint.
+///
+/// Found by adversarial review: matching any name ending in `::Marker` reduced
+/// `x: mylib::Marker` to presence-only, so an entity carrying `x: "value"` fitted
+/// a slot declaring a Str-derived type. That destroyed a constraint the code had
+/// been enforcing — a worse defect than the one being fixed.
+#[test]
+fn a_librarys_own_marker_type_is_not_collapsed_to_a_marker_slot() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Marker: Str\nUsesOwnMarker: Dict {\n  x: collision::Marker\n}\n",
+        "collision",
+    )
+    .expect("load test lib");
+
+    let spec = ns
+        .specs_map()
+        .get("collision::UsesOwnMarker")
+        .expect("spec loaded");
+    let slot = &spec.slots[0];
+    assert!(
+        !slot.is_marker,
+        "a qualified name pointing at another library's type is not the built-in"
+    );
+    assert_eq!(slot.type_ref.as_deref(), Some("collision::Marker"));
+}
+
+/// The canonical qualified spelling of the built-in still collapses. `sys.xeto`
+/// defines `Marker`, so `sys::Marker` and bare `Marker` are the same type.
+#[test]
+fn the_qualified_builtin_marker_is_still_a_marker_slot() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str("Q: Dict {\n  ahu: sys::Marker\n}\n", "qm")
+        .expect("load test lib");
+
+    let empty = HDict::new();
+    let mut carries = HDict::new();
+    carries.set("ahu", Kind::Marker);
+    assert!(
+        !ns.fits_spec_term(&empty, "qm::Q"),
+        "sys::Marker is required"
+    );
+    assert!(ns.fits_spec_term(&carries, "qm::Q"));
+}

@@ -93,7 +93,15 @@ pub struct ConversionFactor {
 /// Error type for unit conversion failures.
 #[derive(Debug, Clone)]
 pub enum UnitError {
+    /// The name or symbol is not in the units database at all.
     UnknownUnit(String),
+    /// The unit is recognised, but its quantity has no conversion factors.
+    ///
+    /// Distinct from [`UnknownUnit`](Self::UnknownUnit) on purpose. `unit_for("m/s")`
+    /// resolves, so reporting "unknown unit: m/s" sent callers looking for a typo
+    /// when the real answer is that velocity has no factors registered. Use
+    /// [`has_conversion_factor`] to detect this before converting.
+    NotConvertible(String),
     IncompatibleUnits(String, String),
 }
 
@@ -101,6 +109,11 @@ impl std::fmt::Display for UnitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UnitError::UnknownUnit(u) => write!(f, "unknown unit: {u}"),
+            UnitError::NotConvertible(u) => write!(
+                f,
+                "unit '{u}' is recognised but not convertible: its quantity has no \
+                 conversion factors registered"
+            ),
             UnitError::IncompatibleUnits(a, b) => write!(f, "incompatible units: {a} and {b}"),
         }
     }
@@ -215,6 +228,52 @@ static CONVERSION_FACTORS: LazyLock<HashMap<&'static str, ConversionFactor>> =
             ("lux", 1.0, 0.0),
             ("footcandle", 10.764, 0.0),
             ("phot", 10000.0, 0.0),
+            // velocity (SI base: meters_per_second)
+            ("meters_per_second", 1.0, 0.0),
+            ("kilometers_per_second", 1000.0, 0.0),
+            ("kilometers_per_hour", 1.0 / 3.6, 0.0),
+            ("miles_per_hour", 0.447_04, 0.0),
+            ("feet_per_second", 0.3048, 0.0),
+            ("feet_per_minute", 0.3048 / 60.0, 0.0),
+            ("inches_per_hour", 0.0254 / 3600.0, 0.0),
+            ("millimeters_per_second", 0.001, 0.0),
+            ("millimeters_per_minute", 0.001 / 60.0, 0.0),
+            ("millimeters_per_hour", 0.001 / 3600.0, 0.0),
+            ("meters_per_minute", 1.0 / 60.0, 0.0),
+            ("meters_per_hour", 1.0 / 3600.0, 0.0),
+            ("knot", 1852.0 / 3600.0, 0.0),
+            // ft³/min per ft² reduces to ft/min — an air-velocity spelling common
+            // in BAS data, and dimensionally a velocity.
+            ("cubic_feet_per_minute_per_square_foot", 0.3048 / 60.0, 0.0),
+            // density (SI base: kilograms_per_cubic_meter)
+            ("kilograms_per_cubic_meter", 1.0, 0.0),
+            ("grams_per_cubic_meter", 0.001, 0.0),
+            ("milligrams_per_cubic_meter", 1e-6, 0.0),
+            ("micrograms_per_cubic_meter", 1e-9, 0.0),
+            ("kilograms_per_liter", 1000.0, 0.0),
+            ("milligrams_per_liter", 0.001, 0.0),
+            // acceleration (SI base: meters_per_second_squared)
+            ("meters_per_second_squared", 1.0, 0.0),
+            // angular velocity (SI base: radians_per_second)
+            ("radians_per_second", 1.0, 0.0),
+            ("revolutions_per_minute", std::f64::consts::TAU / 60.0, 0.0),
+            // force (SI base: newton)
+            ("newton", 1.0, 0.0),
+            ("pound_force", 4.448_221_615_260_5, 0.0),
+            // electric charge (SI base: coulomb)
+            ("coulomb", 1.0, 0.0),
+            ("ampere_hour", 3600.0, 0.0),
+            // electric resistance (SI base: ohm)
+            ("ohm", 1.0, 0.0),
+            ("kilohm", 1e3, 0.0),
+            ("megohm", 1e6, 0.0),
+            ("milliohm", 1e-3, 0.0),
+            // electric conductance (SI base: siemens)
+            ("siemens", 1.0, 0.0),
+            // capacitance (SI base: farad)
+            ("farad", 1.0, 0.0),
+            // inductance (SI base: henry)
+            ("henry", 1.0, 0.0),
             // luminous flux (SI base: lumen)
             ("lumen", 1.0, 0.0),
         ];
@@ -241,6 +300,16 @@ static BASE_UNITS: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new
         ("frequency", "hertz"),
         ("illuminance", "lux"),
         ("luminous flux", "lumen"),
+        ("velocity", "meters_per_second"),
+        ("density", "kilograms_per_cubic_meter"),
+        ("acceleration", "meters_per_second_squared"),
+        ("angular velocity", "radians_per_second"),
+        ("force", "newton"),
+        ("electric charge", "coulomb"),
+        ("electric resistance", "ohm"),
+        ("electric conductance", "siemens"),
+        ("capacitance", "farad"),
+        ("inductance", "henry"),
     ];
     entries.iter().copied().collect()
 });
@@ -250,7 +319,7 @@ fn resolve(s: &str) -> Result<(&'static Unit, &'static ConversionFactor), UnitEr
     let unit = unit_for(s).ok_or_else(|| UnitError::UnknownUnit(s.to_string()))?;
     let cf = CONVERSION_FACTORS
         .get(unit.name.as_str())
-        .ok_or_else(|| UnitError::UnknownUnit(s.to_string()))?;
+        .ok_or_else(|| UnitError::NotConvertible(s.to_string()))?;
     Ok((unit, cf))
 }
 
@@ -294,11 +363,53 @@ pub fn compatible(a: &str, b: &str) -> bool {
     ua.quantity == ub.quantity
 }
 
+/// Whether this unit can be converted, as opposed to merely recognised.
+///
+/// The units database covers every quantity Project Haystack defines, but the
+/// conversion table is hand-written and covers a subset. Call this before
+/// [`convert`] to tell "I cannot convert this" apart from a typo — the two used to
+/// be reported identically.
+///
+/// ```
+/// use haystack_core::kinds::{has_conversion_factor, unit_for};
+/// assert!(has_conversion_factor("°F"));
+/// assert!(unit_for("USD").is_some());          // recognised
+/// assert!(!has_conversion_factor("USD"));      // but not convertible
+/// ```
+pub fn has_conversion_factor(unit: &str) -> bool {
+    unit_for(unit).is_some_and(|u| CONVERSION_FACTORS.contains_key(u.name.as_str()))
+}
+
+/// Every quantity that [`convert`] can handle, sorted.
+///
+/// The complement of this against the units database is the documented gap: those
+/// quantities parse and compare by name but cannot be converted.
+pub fn convertible_quantities() -> Vec<&'static str> {
+    // Derived from the factor table itself rather than from BASE_UNITS. Keying it
+    // off a second hand-maintained list is how the two drift apart, which is the
+    // whole complaint in issue #5.
+    let mut qs: Vec<&'static str> = UNITS
+        .by_name
+        .values()
+        .filter(|u| CONVERSION_FACTORS.contains_key(u.name.as_str()))
+        .map(|u| u.quantity.as_str())
+        .collect();
+    qs.sort_unstable();
+    qs.dedup();
+    qs
+}
+
 /// Get the quantity name for a unit.
+///
+/// Answers for every recognised unit, convertible or not. It previously looked the
+/// quantity up in `BASE_UNITS`, which lists only quantities that have a registered
+/// SI base — so `quantity("m/s")` returned `None` even though velocity is a
+/// perfectly good quantity in the units database. That made the convertibility gap
+/// look like a units-database gap.
 pub fn quantity(unit: &str) -> Option<&'static str> {
-    let u = unit_for(unit)?;
-    // Return a &'static str by looking up in BASE_UNITS keys
-    BASE_UNITS.keys().find(|&&q| q == u.quantity).copied()
+    // `unit_for` yields a &'static Unit out of the LazyLock registry, so the
+    // borrowed name lives as long as the program.
+    unit_for(unit).map(|u| u.quantity.as_str())
 }
 
 /// Get the SI base unit name for a quantity.
@@ -521,5 +632,81 @@ mod tests {
         assert_eq!(e.to_string(), "unknown unit: bogus");
         let e = UnitError::IncompatibleUnits("celsius".into(), "meter".into());
         assert_eq!(e.to_string(), "incompatible units: celsius and meter");
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    /// The gap between "recognised" and "convertible" must be queryable, because
+    /// `convert` used to report both sides of it as `UnknownUnit` (issue #5).
+    #[test]
+    fn recognised_but_not_convertible_is_distinguishable() {
+        // Currency is the clearest case: a real Haystack unit with no SI factor.
+        assert!(unit_for("USD").is_some(), "USD is a recognised unit");
+        assert!(!has_conversion_factor("USD"));
+
+        match convert(1.0, "USD", "EUR") {
+            Err(UnitError::NotConvertible(u)) => assert_eq!(u, "USD"),
+            other => panic!("expected NotConvertible, got {other:?}"),
+        }
+
+        // A genuine typo must still report UnknownUnit, or the distinction is lost.
+        match convert(1.0, "definitely_not_a_unit", "meter") {
+            Err(UnitError::UnknownUnit(_)) => {}
+            other => panic!("expected UnknownUnit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn newly_covered_quantities_convert() {
+        // Each of these returned UnknownUnit before the table was extended.
+        let cases: &[(f64, &str, &str, f64)] = &[
+            (1.0, "m/s", "km/h", 3.6),
+            (60.0, "mph", "ft/s", 88.0),
+            (1.0, "knot", "m/s", 1852.0 / 3600.0),
+            (1.0, "kg/L", "kg/m³", 1000.0),
+            (1.0, "Ah", "C", 3600.0),
+            (1.0, "kilohm", "ohm", 1000.0),
+            (1.0, "lbf", "N", 4.448_221_615_260_5),
+            (60.0, "rpm", "rad/s", std::f64::consts::TAU),
+        ];
+        for &(val, from, to, want) in cases {
+            let got = convert(val, from, to)
+                .unwrap_or_else(|e| panic!("{val} {from} -> {to} failed: {e}"));
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{val} {from} -> {to}: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn convertible_quantities_is_the_documented_boundary() {
+        let qs = convertible_quantities();
+        for expected in ["temperature", "length", "velocity", "density", "force"] {
+            assert!(
+                qs.contains(&expected),
+                "{expected} should be convertible: {qs:?}"
+            );
+        }
+        // Currency is the deliberate exclusion: there is no fixed SI factor for it.
+        assert!(
+            !qs.contains(&"currency"),
+            "currency must not claim convertibility"
+        );
+    }
+
+    /// `compatible` must agree with `has_conversion_factor`, or callers get a
+    /// different answer depending on which one they asked.
+    #[test]
+    fn compatible_agrees_with_has_conversion_factor() {
+        assert!(compatible("m/s", "km/h"));
+        assert!(
+            !compatible("USD", "EUR"),
+            "same quantity, but not convertible"
+        );
+        assert!(!compatible("m/s", "kg"));
     }
 }

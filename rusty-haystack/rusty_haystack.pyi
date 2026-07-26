@@ -616,10 +616,12 @@ class SharedGraph:
 
     Safe for concurrent reads and serialized writes.
 
-    Note: the constructor consumes its EntityGraph argument (the original is
-    left empty). An entity graph is mutable state and cannot be shared by
-    copying. A DefNamespace attached to it is shared, not consumed, and the
-    SharedGraph inherits it.
+    Note: the constructor consumes its EntityGraph argument. An entity graph is
+    mutable state and cannot be shared by copying, so it genuinely moves. The
+    source EntityGraph is left poisoned: every later call on it raises
+    RuntimeError rather than silently operating on an empty graph the
+    SharedGraph cannot see. A DefNamespace attached to it is shared, not
+    consumed, and the SharedGraph inherits it.
     """
     def __init__(self, graph: EntityGraph | None = None) -> None: ...
     @staticmethod
@@ -1018,7 +1020,12 @@ class WsClient:
 # ── server ──
 
 class AuthManager:
-    """SCRAM SHA-256 authentication manager for the server."""
+    """SCRAM SHA-256 authentication manager for the server.
+
+    Passing one to HaystackServer.with_auth consumes it. Every method on a
+    consumed AuthManager raises RuntimeError, except repr(), which reports
+    "AuthManager(consumed)".
+    """
     @staticmethod
     def empty() -> AuthManager:
         """Create a disabled (no-auth) manager."""
@@ -1047,8 +1054,9 @@ class HisStore:
 class HaystackServer:
     """Embedded Haystack HTTP API server with builder-pattern configuration.
 
-    Note: with_auth consumes its argument (the original AuthManager becomes
-    empty after the call). with_namespace does not.
+    Note: with_auth consumes its argument. The source AuthManager is left
+    poisoned: every later call on it raises RuntimeError. with_namespace does
+    not consume — it copies.
 
     Examples:
         server = HaystackServer(SharedGraph())
@@ -1066,7 +1074,17 @@ class HaystackServer:
         """
         ...
     def with_auth(self, auth: AuthManager) -> None:
-        """Set the auth manager. Warning: consumes the auth manager."""
+        """Set the auth manager, consuming it.
+
+        `auth` is unusable afterwards and every later call on it raises
+        RuntimeError. An AuthManager holds live SCRAM state — in-flight
+        handshakes, issued tokens, and the server secret used to derive
+        anti-enumeration challenges — so it moves rather than being shared or
+        copied. Configure it fully before calling this.
+
+        Raises:
+            RuntimeError: if `auth` was already given to a server.
+        """
         ...
     def port(self, port: int) -> None:
         """Set the HTTP listen port (default 8080)."""
