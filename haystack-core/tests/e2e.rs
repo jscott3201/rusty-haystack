@@ -676,3 +676,87 @@ fn tz_name_containing_z_is_not_read_as_utc() {
     assert_eq!(ts.tz_name, "Zurich");
     assert_eq!(ts.dt.offset().local_minus_utc(), 3600);
 }
+
+/// A lowercase `t` separator must be rejected by every codec, not accepted by
+/// some and silently downgraded by others.
+///
+/// RFC 3339 §5.6 permits `2024-06-30t12:00:00Z`, so `parse_from_rfc3339` accepts
+/// it and both JSON codecs used to decode it as a DateTime. Zinc checked for an
+/// uppercase `T` and, finding none, fell through to a bare `Date` — dropping the
+/// time, the offset and the timezone with no error anywhere. A consumer reading
+/// `ts` got a Date where a DateTime was sent, and since a Date never compares
+/// equal to a DateTime under Haystack filter semantics, the damage surfaced later
+/// as a `ts >=` range returning the wrong rows.
+///
+/// The ratified rule is strict everywhere: all four codecs reject it.
+#[test]
+fn lowercase_t_separator_is_rejected_by_every_codec() {
+    let payloads: &[(&str, &str)] = &[
+        ("text/zinc", "ver:\"3.0\"\nts\n2024-06-30t12:00:00Z\n"),
+        (
+            "application/json",
+            "{\"_kind\":\"grid\",\"meta\":{\"ver\":\"4.0\"},\"cols\":[{\"name\":\"ts\"}],\
+             \"rows\":[{\"ts\":{\"_kind\":\"dateTime\",\"val\":\"2024-06-30t12:00:00Z\"}}]}",
+        ),
+        (
+            "application/json;v=3",
+            "{\"meta\":{\"ver\":\"3.0\"},\"cols\":[{\"name\":\"ts\"}],\
+             \"rows\":[{\"ts\":\"t:2024-06-30t12:00:00Z UTC\"}]}",
+        ),
+    ];
+
+    for (mime, payload) in payloads {
+        let result = codec_for(mime).unwrap().decode_grid(payload);
+        assert!(
+            result.is_err(),
+            "{mime}: a lowercase 't' must be a parse error, got {:?}",
+            result.map(|g| g.rows.first().and_then(|r| r.get("ts")).cloned()),
+        );
+    }
+}
+
+/// The uppercase form must keep working — the guard above rejects a separator,
+/// not the datetime grammar.
+#[test]
+fn uppercase_t_separator_still_decodes_everywhere() {
+    let expected = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2024, 6, 30, 12, 0, 0)
+        .unwrap();
+
+    let payloads: &[(&str, &str)] = &[
+        ("text/zinc", "ver:\"3.0\"\nts\n2024-06-30T12:00:00Z\n"),
+        (
+            "application/json",
+            "{\"_kind\":\"grid\",\"meta\":{\"ver\":\"4.0\"},\"cols\":[{\"name\":\"ts\"}],\
+             \"rows\":[{\"ts\":{\"_kind\":\"dateTime\",\"val\":\"2024-06-30T12:00:00Z\"}}]}",
+        ),
+        (
+            "application/json;v=3",
+            "{\"meta\":{\"ver\":\"3.0\"},\"cols\":[{\"name\":\"ts\"}],\
+             \"rows\":[{\"ts\":\"t:2024-06-30T12:00:00Z UTC\"}]}",
+        ),
+    ];
+
+    for (mime, payload) in payloads {
+        let grid = codec_for(mime)
+            .unwrap()
+            .decode_grid(payload)
+            .unwrap_or_else(|e| panic!("{mime}: uppercase T must still decode: {e}"));
+        assert_eq!(datetime_of(&grid, mime).dt, expected, "{mime}");
+    }
+}
+
+/// A bare Date is still a Date. The guard must not turn every date into an error.
+#[test]
+fn bare_date_still_decodes_as_date() {
+    let grid = codec_for("text/zinc")
+        .unwrap()
+        .decode_grid("ver:\"3.0\"\nd\n2024-06-30\n")
+        .expect("a bare date is valid Zinc");
+    assert!(
+        matches!(grid.rows[0].get("d"), Some(Kind::Date(_))),
+        "expected Date, got {:?}",
+        grid.rows[0].get("d")
+    );
+}

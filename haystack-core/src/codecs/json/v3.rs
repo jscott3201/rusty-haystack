@@ -298,6 +298,7 @@ fn decode_time_str(s: &str) -> Result<Kind, CodecError> {
 /// `"2024-01-01T12:30:45-05:00 New_York"` or `"2024-01-01T12:30:45-05:00"`.
 fn decode_datetime_str(s: &str) -> Result<Kind, CodecError> {
     let (dt_str, tz_name) = split_datetime_tz(s);
+    super::reject_lowercase_t_separator(dt_str)?;
 
     let dt = chrono::DateTime::parse_from_rfc3339(dt_str)
         .or_else(|_| chrono::DateTime::parse_from_str(dt_str, "%Y-%m-%dT%H:%M:%S%:z"))

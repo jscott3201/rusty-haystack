@@ -363,6 +363,19 @@ impl<'a> ZincParser<'a> {
             return self.read_datetime_after_date(date);
         }
 
+        // A lowercase `t` is RFC 3339's permitted alternate separator, but not
+        // Zinc's. Falling through here would return a Date and discard the time,
+        // the offset and the timezone — a different kind than the producer sent,
+        // with nothing reporting a problem. Reject instead: under Haystack filter
+        // semantics a Date never compares equal to a DateTime, so the coercion
+        // surfaces later as a `ts >=` range that quietly returns the wrong rows.
+        if self.peek() == Some('t') {
+            return Err(self.err(
+                "invalid datetime: separator must be an uppercase 'T'; \
+                 a lowercase 't' is not valid Zinc",
+            ));
+        }
+
         Ok(Kind::Date(date))
     }
 
