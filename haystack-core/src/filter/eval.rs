@@ -45,7 +45,10 @@ pub fn matches_with_ns<'a>(
                 || matches_with_ns(right, entity, resolve_ref, namespace)
         }
         FilterNode::SpecMatch(spec) => match namespace {
-            Some(ns) => ns.fits_spec_term(entity, spec),
+            // Pass the resolver on. Dropping it here is what left Xeto query slots
+            // unchecked, so a spec constraining what an entity must reach matched
+            // entities that reach nothing (issue #22).
+            Some(ns) => ns.fits_spec_term_with(entity, spec, resolve_ref),
             None => false,
         },
     }
