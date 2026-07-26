@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::config::ClientConfig;
 use crate::error::ClientError;
 use crate::transport::Transport;
 use crate::transport::http::HttpTransport;
@@ -25,10 +26,45 @@ impl HaystackClient<HttpTransport> {
     /// * `username` - The username to authenticate as
     /// * `password` - The user's plaintext password
     pub async fn connect(url: &str, username: &str, password: &str) -> Result<Self, ClientError> {
+        Self::connect_with_config(url, username, password, &ClientConfig::default()).await
+    }
+
+    /// Connect with explicit TLS verification and auth mode.
+    ///
+    /// Use [`ClientConfig::niagara_lab`] for Niagara nHaystack (HTTP Basic + insecure TLS).
+    /// Use [`ClientConfig::scram_insecure_tls`] to test SCRAM on self-signed HTTPS.
+    pub async fn connect_with_config(
+        url: &str,
+        username: &str,
+        password: &str,
+        config: &ClientConfig,
+    ) -> Result<Self, ClientError> {
         crate::ensure_crypto_provider();
-        let client = reqwest::Client::new();
-        let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
-        let transport = HttpTransport::new(url, auth_token);
+        let client = config.build_reqwest_client()?;
+        let transport = match config.auth_mode {
+            crate::config::AuthMode::Scram => {
+                let auth_token =
+                    crate::auth::authenticate(&client, url, username, password).await?;
+                HttpTransport::with_bearer(url, auth_token, client, &config.wire_format)
+            }
+            crate::config::AuthMode::Basic => {
+                // Refused, not warned about. Basic sends a reusable password on
+                // every request, so over plain HTTP it is disclosed to any
+                // passive observer — and `tls_verify: true` does not help,
+                // because there is no TLS to verify. See
+                // `ClientConfig::allow_plaintext_basic`.
+                if !url.starts_with("https://") && !config.allow_plaintext_basic {
+                    return Err(ClientError::Connection(format!(
+                        "refusing HTTP Basic auth over a non-HTTPS URL ({url}): the \
+                         password would be sent base64-encoded, not encrypted, on \
+                         every request. Use https://, or set \
+                         ClientConfig::allow_plaintext_basic if the network is \
+                         genuinely trusted"
+                    )));
+                }
+                HttpTransport::with_basic(url, username, password, client, &config.wire_format)
+            }
+        };
         Ok(Self { transport })
     }
 
@@ -436,5 +472,82 @@ impl<T: Transport> HaystackClient<T> {
     /// explicitly end the server-side session before disconnecting.
     pub async fn close(&self) -> Result<(), ClientError> {
         self.transport.close().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AuthMode, ClientConfig};
+
+    fn basic_config() -> ClientConfig {
+        ClientConfig {
+            auth_mode: AuthMode::Basic,
+            ..ClientConfig::default()
+        }
+    }
+
+    /// Basic over plain HTTP is refused, not warned about. A library `log::warn!`
+    /// reaches nobody unless the consuming application installed a logger, so a
+    /// warning is not a boundary for reusable password disclosure.
+    ///
+    /// `AuthMode::Basic` performs no handshake, so these construct no connection.
+    #[tokio::test]
+    async fn basic_over_plaintext_http_is_refused_by_default() {
+        // HaystackClient is not Debug (it holds credentials), so unwrap the
+        // Result by hand rather than via expect_err.
+        let msg = match HaystackClient::connect_with_config(
+            "http://station.test/api",
+            "svc",
+            "secret",
+            &basic_config(),
+        )
+        .await
+        {
+            Ok(_) => panic!("plaintext Basic must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("non-HTTPS"), "unexpected error: {msg}");
+        assert!(
+            !msg.contains("secret"),
+            "the refusal must not echo the password: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn basic_over_https_is_allowed() {
+        HaystackClient::connect_with_config(
+            "https://station.test/api",
+            "svc",
+            "secret",
+            &basic_config(),
+        )
+        .await
+        .map(|_| ())
+        .expect("Basic over HTTPS is the supported case");
+    }
+
+    /// The opt-in exists for genuinely trusted networks, and has to be written
+    /// out in the caller's own source.
+    #[tokio::test]
+    async fn plaintext_basic_is_allowed_when_explicitly_opted_in() {
+        let config = ClientConfig {
+            allow_plaintext_basic: true,
+            ..basic_config()
+        };
+        HaystackClient::connect_with_config("http://station.test/api", "svc", "secret", &config)
+            .await
+            .map(|_| ())
+            .expect("explicit opt-in permits plaintext Basic");
+    }
+
+    /// The guard is specific to Basic — SCRAM never transmits the password, so
+    /// plain HTTP is not this kind of exposure and must not be blocked here.
+    #[test]
+    fn the_default_config_is_scram_with_tls_verification() {
+        let d = ClientConfig::default();
+        assert_eq!(d.auth_mode, AuthMode::Scram);
+        assert!(d.tls_verify);
+        assert!(!d.allow_plaintext_basic);
     }
 }

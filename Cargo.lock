@@ -1260,6 +1260,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "niagara-read"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "rusty-haystack-client",
+ "rusty-haystack-core",
+ "tokio",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

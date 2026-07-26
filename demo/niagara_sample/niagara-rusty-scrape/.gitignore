@@ -1,0 +1,4 @@
+/target/
+/.env
+/nhaystack_points.csv
+/Cargo.lock
