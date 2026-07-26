@@ -103,7 +103,7 @@ fn parse_records(input: &str) -> Result<Vec<HDict>, CodecError> {
                 } else {
                     // Value follows colon
                     let val_str = rest.trim();
-                    let val = parse_scalar_value(val_str);
+                    let val = parse_scalar_value(val_str)?;
                     current_tags.push((name, val));
                 }
             }
@@ -123,29 +123,104 @@ fn parse_records(input: &str) -> Result<Vec<HDict>, CodecError> {
     Ok(records)
 }
 
-/// Try to parse a value string as a Zinc scalar.
-/// If parsing fails or the parser doesn't consume all input, treat as a plain string.
+/// Does the value's first whitespace-delimited word parse as a complete scalar?
 ///
-/// The fallback-to-string behavior is by-design for the Trio format: values that
-/// cannot be parsed as Zinc scalars (e.g., unrecognized keywords, partial input,
-/// or free-form text) are intentionally treated as plain strings. This allows Trio
-/// files to contain arbitrary text values without requiring quoting, and provides
-/// forward-compatibility when new scalar types are added to the Zinc grammar.
-fn parse_scalar_value(val_str: &str) -> Kind {
+/// This is what separates an unquoted Trio string from a malformed literal. Trio
+/// allows `dis: @Home AHU`, and its first word `@Home` is a perfectly good Ref — the
+/// value is a scalar followed by prose, which is text, not a failed literal. A
+/// malformed literal such as `2024-99-99` has no valid leading word at all.
+fn first_word_is_a_scalar(val_str: &str) -> bool {
+    match val_str.split_whitespace().next() {
+        Some(word) if word != val_str => {
+            let mut parser = ZincParser::new(word);
+            parser.parse_scalar().is_ok() && parser.at_end()
+        }
+        _ => false,
+    }
+}
+
+/// Is this value unambiguously attempting a typed Zinc literal?
+///
+/// Reached only once the value is known not to be a scalar-plus-prose string, so a
+/// leading sigil or a date/time shape means the author meant a literal and got it
+/// wrong — report the error rather than filing it away as a string.
+///
+/// Trio genuinely allows unquoted strings as tag values, so the `Kind::Str`
+/// fallback cannot simply be deleted; what it must stop doing is swallowing values
+/// that were plainly attempting a typed literal (issue #16).
+fn attempts_literal_outright(val_str: &str) -> bool {
+    let b = val_str.as_bytes();
+
+    // `@` ref, `^` symbol, `` ` `` uri. None of them opens an unquoted display
+    // string, so a sigil that yields no valid scalar at all is a malformed literal.
+    if matches!(b.first(), Some(b'@' | b'^' | b'`')) {
+        return true;
+    }
+
+    is_date_shaped(b) || is_time_shaped(b)
+}
+
+/// Is this value attempting a DateTime specifically?
+///
+/// Checked first and independently, because a datetime is the one literal whose own
+/// grammar contains spaces — `2024-06-30T12:00:00Z UTC` — so the "first word parses,
+/// the rest is prose" test below would wrongly clear a malformed one.
+fn attempts_datetime(val_str: &str) -> bool {
+    let b = val_str.as_bytes();
+    // A lowercase `t` counts even though Zinc rejects it. This asks what the value
+    // was attempting, not whether it is well-formed; keyed on `T` alone, Trio would
+    // be the one codec still swallowing the case the other three reject (#15).
+    b.len() > 10 && (b[10] == b'T' || b[10] == b't') && is_date_shaped(b)
+}
+
+/// `YYYY-MM-DD` in the leading ten bytes.
+fn is_date_shaped(b: &[u8]) -> bool {
+    b.len() >= 10
+        && b[..10].iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// `H:MM` or `HH:MM` at the start.
+fn is_time_shaped(b: &[u8]) -> bool {
+    let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
+    (1..=2).contains(&digits)
+        && b.get(digits) == Some(&b':')
+        && b.get(digits + 1).is_some_and(u8::is_ascii_digit)
+        && b.get(digits + 2).is_some_and(u8::is_ascii_digit)
+}
+
+fn parse_scalar_value(val_str: &str) -> Result<Kind, CodecError> {
     let mut parser = ZincParser::new(val_str);
     match parser.parse_scalar() {
-        Ok(val) => {
-            if parser.at_end() {
-                val
-            } else {
-                // Parser didn't consume all input, treat as plain string
-                Kind::Str(val_str.to_string())
-            }
-        }
-        Err(_) => {
-            // Unparseable as Zinc scalar, treat as plain string
-            Kind::Str(val_str.to_string())
-        }
+        Ok(val) if parser.at_end() => Ok(val),
+        Ok(_) => fallback_or_error(val_str, is_failed_literal(val_str), "trailing input"),
+        Err(e) => fallback_or_error(val_str, is_failed_literal(val_str), &e.to_string()),
+    }
+}
+
+/// Zinc would not take this value. Was it a botched literal, or ordinary text?
+fn is_failed_literal(val_str: &str) -> bool {
+    // A datetime owns the space inside it, so decide this one before the
+    // scalar-plus-prose test below, which would otherwise clear it.
+    if attempts_datetime(val_str) {
+        return true;
+    }
+    if first_word_is_a_scalar(val_str) {
+        return false;
+    }
+    attempts_literal_outright(val_str)
+}
+
+fn fallback_or_error(val_str: &str, is_attempt: bool, detail: &str) -> Result<Kind, CodecError> {
+    if is_attempt {
+        Err(CodecError::Parse {
+            pos: 0,
+            message: format!("invalid scalar value '{val_str}': {detail}"),
+        })
+    } else {
+        Ok(Kind::Str(val_str.to_string()))
     }
 }
 
@@ -545,5 +620,66 @@ floorRef: @floor1
         assert_eq!(encoded, "42");
         let decoded = codec.decode_scalar(&encoded).unwrap();
         assert_eq!(decoded, val);
+    }
+
+    /// The discriminator contract for issue #16, stated as a table.
+    ///
+    /// Trio allows unquoted strings, so the `Kind::Str` fallback cannot simply be
+    /// removed. What it must stop doing is swallowing values that were plainly
+    /// attempting a typed literal and failed — those used to arrive downstream as
+    /// a `Str` where a `DateTime` was sent, and surfaced much later as an empty
+    /// history rather than as a parse error at the boundary.
+    #[test]
+    fn typed_literal_attempts_error_and_display_strings_do_not() {
+        // Attempting a typed literal and failing — must be an error.
+        let must_error = [
+            "2024-06-30T12:00:00",            // no UTC offset; illegal Haystack
+            "2024-06-30T12:00:00Z UTC extra", // trailing junk after the tz name
+            "2024-06-30t12:00:00Z",           // lowercase separator; see #15
+            "2024-99-99",                     // date-shaped, no valid leading word
+            "25:00:00",                       // time-shaped, hour out of range
+            "@bad!!ref",                      // sigil-led, parses to nothing
+        ];
+        for v in must_error {
+            let src = format!("ts: {v}\n");
+            assert!(
+                parse_records(&src).is_err(),
+                "{v:?} must report a parse error, got {:?}",
+                parse_records(&src).map(|r| r[0].get("ts").cloned()),
+            );
+        }
+
+        // Ordinary unquoted display text — must still decode as Str.
+        // `3rd Floor AHU` leads with a digit and `A-1:2 Riser` is punctuation
+        // heavy, so neither can be separated from a timestamp by those cues
+        // alone; only the `YYYY-MM-DD` + separator shape distinguishes them.
+        // Each of these is a valid scalar followed by prose, which is exactly what
+        // Trio's unquoted-string feature is for. The sigil-led pair regressed in
+        // review before the discriminator learned to check the first word.
+        let must_be_str = [
+            "3rd Floor AHU",
+            "Some Display Name",
+            "AHU-1",
+            "A-1:2 Riser",
+            "2024-01-15 Retrofit Notes", // opens with a date, is not one
+            "@Home AHU",                 // @Home is a valid Ref; "AHU" is prose
+            "^Caution label",            // ^Caution is a valid Symbol
+            "12:30 Shift Change",        // 12:30 is a valid Time
+        ];
+        for v in must_be_str {
+            let recs = parse_records(&format!("dis: {v}\n"))
+                .unwrap_or_else(|e| panic!("{v:?} must stay a Str, got error: {e}"));
+            assert_eq!(recs[0].get("dis"), Some(&Kind::Str(v.to_string())), "{v:?}");
+        }
+    }
+
+    /// Well-formed typed literals must be unaffected by the discriminator.
+    #[test]
+    fn valid_typed_literals_still_parse() {
+        let recs = parse_records("ts: 2024-06-30T12:00:00Z UTC\nd: 2024-06-30\nr: @site-1\n")
+            .expect("well-formed literals parse");
+        assert!(matches!(recs[0].get("ts"), Some(Kind::DateTime(_))));
+        assert!(matches!(recs[0].get("d"), Some(Kind::Date(_))));
+        assert!(matches!(recs[0].get("r"), Some(Kind::Ref(_))));
     }
 }
