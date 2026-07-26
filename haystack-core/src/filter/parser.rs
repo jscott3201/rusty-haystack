@@ -151,6 +151,30 @@ impl<'a> FilterParser<'a> {
         Some(self.src[start..self.pos].to_string())
     }
 
+    /// Read the type name after `::`, where a hyphen is part of the name.
+    ///
+    /// Haystack conjunct defs are hyphenated — `elec-meter`, `ac-elec-meter` — and
+    /// 162 of the 719 standard defs are conjuncts. `read_name` stops at the hyphen
+    /// because `-` is a subtraction operator elsewhere in the grammar, which made
+    /// every one of them a parse error.
+    ///
+    /// A hyphen is only taken when an alphanumeric follows it, so a trailing `-`
+    /// still ends the name and stays available to the expression grammar.
+    fn read_spec_type_name(&mut self) -> Option<String> {
+        let start = self.pos;
+        self.read_name()?;
+        while self.peek() == Some('-') {
+            match self.src[self.pos + 1..].chars().next() {
+                Some(next) if next.is_ascii_alphanumeric() => {
+                    self.pos += 1;
+                    self.read_name()?;
+                }
+                _ => break,
+            }
+        }
+        Some(self.src[start..self.pos].to_string())
+    }
+
     /// Read a path: name ("->" name)*
     fn read_path(&mut self) -> Result<Path, FilterError> {
         let first = self
@@ -287,7 +311,7 @@ impl<'a> FilterParser<'a> {
                     let mut spec = first_name;
                     spec.push_str("::");
                     // Read the type name after ::
-                    match self.read_name() {
+                    match self.read_spec_type_name() {
                         Some(type_name) => {
                             spec.push_str(&type_name);
                             return Ok(FilterNode::SpecMatch(spec));
@@ -319,7 +343,7 @@ impl<'a> FilterParser<'a> {
                     if self.try_consume_str("::") {
                         let mut spec = full_name;
                         spec.push_str("::");
-                        match self.read_name() {
+                        match self.read_spec_type_name() {
                             Some(type_name) => {
                                 spec.push_str(&type_name);
                                 return Ok(FilterNode::SpecMatch(spec));
@@ -556,6 +580,41 @@ mod tests {
     fn parse_spec_match_dotted() {
         let node = parse_filter("ph.equips::Ahu").unwrap();
         assert_eq!(node, FilterNode::SpecMatch("ph.equips::Ahu".into()));
+    }
+
+    #[test]
+    fn parse_spec_match_conjunct() {
+        // Haystack conjunct defs are hyphenated. Stopping the type name at the
+        // first `-` left `elec` as the term and `-meter` as trailing garbage,
+        // so every conjunct spec filter was rejected outright.
+        let node = parse_filter("ph::elec-meter").unwrap();
+        assert_eq!(node, FilterNode::SpecMatch("ph::elec-meter".into()));
+
+        let node = parse_filter("ph::ac-elec-meter and siteRef").unwrap();
+        assert_eq!(
+            node,
+            FilterNode::And(
+                Box::new(FilterNode::SpecMatch("ph::ac-elec-meter".into())),
+                Box::new(FilterNode::Has(Path(vec!["siteRef".into()]))),
+            )
+        );
+    }
+
+    #[test]
+    fn a_hyphen_not_starting_a_name_is_left_for_the_caller_to_report() {
+        // The type name only absorbs a `-` that begins another name segment.
+        // Both spellings are errors either way — what the lookahead buys is the
+        // accurate one. Without it the parser consumes the `-`, fails to find a
+        // name after it, and blames the `::`, which was never the problem.
+        let err = parse_filter("ph::Ahu->foo").unwrap_err().to_string();
+        assert!(
+            err.contains("->foo"),
+            "error should point at the trailing input, got: {err}"
+        );
+        assert!(
+            !err.contains("after '::'"),
+            "error should not blame the qualifier, got: {err}"
+        );
     }
 
     #[test]

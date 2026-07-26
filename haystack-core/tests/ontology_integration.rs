@@ -363,3 +363,163 @@ fn query_slot_specs_are_checked_against_the_graph() {
     );
     assert_eq!(ids.len(), 1, "exactly one vav satisfies the query: {ids:?}");
 }
+
+// ── Conjunct defs as filter spec terms (issue #26) ──
+//
+// Answering `ph::ElecMeter` for a conjunct def takes three independent pieces:
+// the filter parser must keep the hyphen, `resolve_spec_term` must reach the
+// def, and `entity_is_a` must decompose it into component markers. Any two
+// without the third still parse and still evaluate — they just answer `false`
+// for every entity, which is indistinguishable from "no entity matched" at the
+// call site. So these sweep all 162 bundled conjuncts rather than spot-check,
+// and each reports the offending names instead of a bare count.
+
+/// Every conjunct def in the standard namespace, e.g. `elec-meter`.
+fn all_conjuncts(ns: &DefNamespace) -> Vec<String> {
+    let mut v: Vec<String> = ns
+        .defs()
+        .keys()
+        .filter(|n| ns.conjunct_parts(n).is_some())
+        .cloned()
+        .collect();
+    v.sort();
+    assert!(
+        v.len() > 100,
+        "expected ~162 bundled conjuncts, found {} — the sweeps below prove \
+         nothing if the corpus is empty",
+        v.len()
+    );
+    v
+}
+
+/// `elec-meter` -> `ElecMeter`, the Haystack-capitalised spelling.
+fn camel(conjunct: &str) -> String {
+    conjunct
+        .split('-')
+        .map(|w| {
+            let mut ch = w.chars();
+            match ch.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// An entity carrying exactly `tags` as markers.
+fn marked(tags: &[&str]) -> HDict {
+    let mut d = HDict::new();
+    for t in tags {
+        d.set(*t, Kind::Marker);
+    }
+    d
+}
+
+#[test]
+fn every_conjunct_def_parses_and_resolves_as_a_spec_term() {
+    let ns = load_ns();
+    let mut unparsed = Vec::new();
+    let mut unresolved = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let term = format!("ph::{c}");
+        if haystack_core::filter::parse_filter(&term).is_err() {
+            unparsed.push(term.clone());
+        }
+        if ns.resolve_spec_term(&term).is_none() {
+            unresolved.push(term);
+        }
+    }
+    assert!(
+        unparsed.is_empty(),
+        "conjuncts that failed to parse: {unparsed:?}"
+    );
+    assert!(
+        unresolved.is_empty(),
+        "conjuncts that parsed but resolved to nothing: {unresolved:?}"
+    );
+}
+
+#[test]
+fn every_conjunct_def_resolves_from_its_camel_case_spelling() {
+    // `FuelOilOutput` cannot be transformed into `fuelOil-output` — the capital
+    // that was a word boundary and the capital inside a component are the same
+    // character — so resolution is a lookup over the conjunct index, and this
+    // sweep is what proves the lookup covers the camelCase-component defs and
+    // not just the flat ones like `elec-meter`.
+    let ns = load_ns();
+    let mut unresolved = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let term = format!("ph::{}", camel(&c));
+        match ns.resolve_spec_term(&term) {
+            Some(_) => {}
+            None => unresolved.push(format!("{term} (for {c})")),
+        }
+    }
+    assert!(
+        unresolved.is_empty(),
+        "conjuncts unreachable by CamelCase: {unresolved:?}"
+    );
+}
+
+#[test]
+fn every_conjunct_def_matches_an_entity_carrying_its_component_markers() {
+    // The end-to-end path: parse the filter, then evaluate it. A fix to the
+    // parser and the resolver that missed conjunct decomposition would pass the
+    // two tests above and fail every case here.
+    let ns = load_ns();
+    let mut unmatched = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let parts = ns.conjunct_parts(&c).unwrap().to_vec();
+        let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
+        let entity = marked(&refs);
+        let filter = haystack_core::filter::parse_filter(&format!("ph::{c}")).unwrap();
+        if !haystack_core::filter::matches_with_ns(&filter, &entity, None, Some(&ns)) {
+            unmatched.push(format!("{c} (markers {refs:?})"));
+        }
+    }
+    assert!(
+        unmatched.is_empty(),
+        "conjuncts that did not match their own components: {unmatched:?}"
+    );
+}
+
+#[test]
+fn no_conjunct_def_matches_an_entity_missing_its_components() {
+    // The counterweight. A decomposition that answered `true` unconditionally
+    // would satisfy every test above.
+    let ns = load_ns();
+    let bare = HDict::new();
+    let mut false_positives = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let filter = haystack_core::filter::parse_filter(&format!("ph::{c}")).unwrap();
+        if haystack_core::filter::matches_with_ns(&filter, &bare, None, Some(&ns)) {
+            false_positives.push(c);
+        }
+    }
+    assert!(
+        false_positives.is_empty(),
+        "conjuncts matched by a tagless entity: {false_positives:?}"
+    );
+
+    // Holding all but one component is still not membership.
+    let mut partials = Vec::new();
+    for c in all_conjuncts(&ns) {
+        let parts = ns.conjunct_parts(&c).unwrap().to_vec();
+        if parts.len() < 2 {
+            continue;
+        }
+        let refs: Vec<&str> = parts[..parts.len() - 1]
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let entity = marked(&refs);
+        let filter = haystack_core::filter::parse_filter(&format!("ph::{c}")).unwrap();
+        if haystack_core::filter::matches_with_ns(&filter, &entity, None, Some(&ns)) {
+            partials.push(format!("{c} matched by {refs:?}"));
+        }
+    }
+    assert!(
+        partials.is_empty(),
+        "conjuncts matched without all components: {partials:?}"
+    );
+}
