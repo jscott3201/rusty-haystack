@@ -303,3 +303,63 @@ fn meter_is_equip() {
     let ns = load_ns();
     assert!(ns.is_a("meter", "equip"));
 }
+
+/// A spec whose constraints live in query slots must be checked against the graph,
+/// not just against the entity's own tags (issue #22).
+///
+/// `EntityGraph` has always built a ref resolver and handed it to `matches_with_ns`,
+/// but the `SpecMatch` arm dropped it — the two resolver types disagreed on owned
+/// vs borrowed, and `None` was the only thing that compiled. `None` is
+/// indistinguishable from "no resolver available", so query slots were silently
+/// skipped and the spec matched entities it should not.
+#[test]
+fn query_slot_specs_are_checked_against_the_graph() {
+    use haystack_core::graph::EntityGraph;
+
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    // A vav is only this spec if something is actually reachable via airRef.
+    ns.load_xeto_str(
+        "AhuFedVav: Dict {\n  vav: Marker\n  myAhu: Query<of:Ahu, via:\"airRef\">\n}\n",
+        "qtest",
+    )
+    .expect("load test lib");
+
+    let mut graph = EntityGraph::with_namespace(ns);
+
+    let mut ahu = HDict::new();
+    ahu.set("id", Kind::Ref(HRef::from_val("ahu-1")));
+    ahu.set("ahu", Kind::Marker);
+    ahu.set("equip", Kind::Marker);
+    graph.add(ahu).unwrap();
+
+    // Connected: airRef points at an AHU that exists in the graph.
+    let mut fed = HDict::new();
+    fed.set("id", Kind::Ref(HRef::from_val("vav-fed")));
+    fed.set("vav", Kind::Marker);
+    fed.set("airRef", Kind::Ref(HRef::from_val("ahu-1")));
+    graph.add(fed).unwrap();
+
+    // Orphan: same tags, but nothing reachable. Identical under tag-only checking.
+    let mut orphan = HDict::new();
+    orphan.set("id", Kind::Ref(HRef::from_val("vav-orphan")));
+    orphan.set("vav", Kind::Marker);
+    graph.add(orphan).unwrap();
+
+    let matched = graph
+        .read_all("qtest::AhuFedVav", 0)
+        .expect("spec filter is accepted");
+    let ids: Vec<String> = matched
+        .iter()
+        .filter_map(|e| e.id().map(|r| r.val.clone()))
+        .collect();
+
+    assert!(
+        ids.contains(&"vav-fed".to_string()),
+        "the connected vav must match: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"vav-orphan".to_string()),
+        "a vav reaching no AHU must NOT match — the query slot was not checked: {ids:?}"
+    );
+    assert_eq!(ids.len(), 1, "exactly one vav satisfies the query: {ids:?}");
+}

@@ -11,7 +11,16 @@ use super::spec::Spec;
 
 /// Entity resolver function type for query evaluation.
 /// Given a ref, returns the entity dict if it exists.
-pub type EntityResolver = dyn Fn(&HRef) -> Option<HDict>;
+/// Resolves a ref to the entity it points at, for query-slot traversal.
+///
+/// Borrowed rather than owned, and deliberately so: `EntityGraph` already builds
+/// exactly this closure over its own entity map, and an owned signature meant the
+/// two could not be connected without cloning a dict per lookup. Faced with that,
+/// the filter path passed `None` — and `None` is indistinguishable from "no
+/// resolver available", so query slots went unchecked and specs over-matched
+/// (issue #22). Converging on the borrowed form makes threading the real resolver
+/// the only thing that compiles.
+pub type EntityResolver<'a> = dyn Fn(&HRef) -> Option<&'a HDict> + 'a;
 
 /// Check whether an entity structurally fits a Xeto spec.
 ///
@@ -26,7 +35,7 @@ pub fn fits(
     entity: &HDict,
     spec_qname: &str,
     ns: &DefNamespace,
-    resolver: Option<&EntityResolver>,
+    resolver: Option<&EntityResolver<'_>>,
 ) -> bool {
     fits_explain(entity, spec_qname, ns, resolver).is_empty()
 }
@@ -38,7 +47,7 @@ pub fn fits_explain(
     entity: &HDict,
     spec_qname: &str,
     ns: &DefNamespace,
-    resolver: Option<&EntityResolver>,
+    resolver: Option<&EntityResolver<'_>>,
 ) -> Vec<FitIssue> {
     // Resolution goes through the namespace so this agrees with filter
     // evaluation about what a `lib::Name` term means. Doing its own bare-name
@@ -115,7 +124,7 @@ pub(crate) fn explain_against_spec_in(
     entity: &HDict,
     spec: &Spec,
     specs: &HashMap<String, Spec>,
-    resolver: Option<&EntityResolver>,
+    resolver: Option<&EntityResolver<'_>>,
 ) -> Vec<FitIssue> {
     explain_against_spec_with_specs(entity, spec, specs, resolver)
 }
@@ -126,7 +135,7 @@ fn explain_against_spec_with_specs(
     entity: &HDict,
     spec: &Spec,
     specs: &HashMap<String, Spec>,
-    resolver: Option<&EntityResolver>,
+    resolver: Option<&EntityResolver<'_>>,
 ) -> Vec<FitIssue> {
     let mut issues = Vec::new();
 
@@ -374,7 +383,7 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 fn check_query_slots(
     entity: &HDict,
     spec: &Spec,
-    resolver: &EntityResolver,
+    resolver: &EntityResolver<'_>,
     issues: &mut Vec<FitIssue>,
 ) {
     for slot in &spec.slots {
@@ -398,6 +407,12 @@ fn check_query_slots(
             }
         });
 
+        // Inverse queries — `Query<of:Vav, inverse:"ph.equips::AhuVav.ahu">`, as
+        // ph.equips::VavZoneAhu.vavs is written — carry `of` and `inverse` but no
+        // `via`, so they fall past this and go unchecked. Evaluating one means
+        // asking which entities point AT this one, and an EntityResolver only maps
+        // a ref forward to its target; answering it needs a reverse index or a
+        // whole-graph handle. Tracked separately rather than silently pretended.
         if let (Some(_of_type), Some(via)) = (of_type, via_path) {
             // Parse via path: "equipRef+" means follow equipRef transitively
             let (ref_tag, transitive) = if let Some(stripped) = via.strip_suffix('+') {
@@ -422,12 +437,12 @@ fn check_query_slots(
 }
 
 /// Follow ref tags from an entity, optionally transitively.
-fn traverse_refs(
+fn traverse_refs<'a>(
     entity: &HDict,
     ref_tag: &str,
     transitive: bool,
-    resolver: &EntityResolver,
-) -> Vec<HDict> {
+    resolver: &EntityResolver<'a>,
+) -> Vec<&'a HDict> {
     let mut results = Vec::new();
     let mut visited = std::collections::HashSet::new();
     let mut queue = Vec::new();
@@ -1016,7 +1031,7 @@ depends:[^lib:ph]
                 .into_iter()
                 .collect();
 
-        let resolver = move |r: &HRef| -> Option<HDict> { entities.get(&r.val).cloned() };
+        let resolver = |r: &HRef| -> Option<&HDict> { entities.get(&r.val) };
 
         let reachable = traverse_refs(&child, "equipRef", false, &resolver);
         assert_eq!(reachable.len(), 1);
@@ -1040,7 +1055,7 @@ depends:[^lib:ph]
                 .into_iter()
                 .collect();
 
-        let resolver = move |r: &HRef| -> Option<HDict> { entities.get(&r.val).cloned() };
+        let resolver = |r: &HRef| -> Option<&HDict> { entities.get(&r.val) };
 
         let reachable = traverse_refs(&a, "siteRef", true, &resolver);
         assert_eq!(reachable.len(), 2); // b and c
@@ -1059,7 +1074,7 @@ depends:[^lib:ph]
         let entities: HashMap<String, HDict> =
             vec![("a".into(), a), ("b".into(), b)].into_iter().collect();
 
-        let resolver = move |r: &HRef| -> Option<HDict> { entities.get(&r.val).cloned() };
+        let resolver = |r: &HRef| -> Option<&HDict> { entities.get(&r.val) };
 
         let mut entity = HDict::new();
         entity.set("equipRef", Kind::Ref(HRef::from_val("a")));
