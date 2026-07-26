@@ -60,7 +60,28 @@ struct ServeChild {
 }
 
 impl ServeChild {
+    /// Spawn a server on a free port, retrying if the port is taken from under us.
+    ///
+    /// The port has to be picked here rather than with `--port 0`, because the server
+    /// never reports the address it actually bound (see issue #35). That leaves a
+    /// window between releasing the reservation and the child binding it, in which
+    /// another process can claim the port — so a child that dies before binding is
+    /// retried on a fresh port instead of failing a test whose subject is fine.
     fn spawn(extra_args: &[&str]) -> Self {
+        const ATTEMPTS: usize = 5;
+        for attempt in 1..=ATTEMPTS {
+            if let Some(server) = Self::try_spawn(extra_args) {
+                return server;
+            }
+            assert!(
+                attempt < ATTEMPTS,
+                "haystack serve failed to bind a free port in {ATTEMPTS} attempts"
+            );
+        }
+        unreachable!()
+    }
+
+    fn try_spawn(extra_args: &[&str]) -> Option<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a test port");
         let port = listener.local_addr().expect("reserved port address").port();
         drop(listener);
@@ -75,21 +96,20 @@ impl ServeChild {
             .spawn()
             .expect("spawn haystack serve");
         let mut server = Self { child, port };
-        server.wait_until_ready();
-        server
+        server.wait_until_ready().then_some(server)
     }
 
-    fn wait_until_ready(&mut self) {
+    /// True once the port accepts a connection. False if the child died first —
+    /// which is the lost-the-port case, and is retryable. Dropping `self` on that
+    /// path still reaps the process through the guard.
+    fn wait_until_ready(&mut self) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-                return;
+                return true;
             }
-            if let Some(status) = self.child.try_wait().expect("poll serve process") {
-                panic!(
-                    "haystack serve exited with {status} before binding port {}",
-                    self.port
-                );
+            if self.child.try_wait().expect("poll serve process").is_some() {
+                return false;
             }
             assert!(
                 Instant::now() < deadline,
@@ -116,6 +136,12 @@ impl ServeChild {
         );
         let mut stream =
             TcpStream::connect(("127.0.0.1", self.port)).expect("connect to haystack serve");
+        // Without a deadline a server that accepts the connection and then wedges
+        // blocks this read forever: the test never reaches an assertion, never drops
+        // its guard, and the whole test binary hangs instead of failing.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("set read timeout");
         stream
             .write_all(request.as_bytes())
             .expect("send read request");
