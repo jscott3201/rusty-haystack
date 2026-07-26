@@ -28,6 +28,16 @@ pub struct ClientConfig {
     pub wire_format: String,
     /// Overall per-request timeout applied to the underlying reqwest client.
     pub timeout: Duration,
+    /// Permit [`AuthMode::Basic`] against a non-HTTPS URL.
+    ///
+    /// Off by default, and refused rather than warned about, because Basic sends
+    /// a reusable password on every request and a library `log::warn!` reaches
+    /// nobody unless the consuming application happens to have installed a
+    /// logger. A boundary that is commonly invisible is not a boundary.
+    ///
+    /// Setting this puts the decision in the caller's own source, where it is
+    /// greppable and reviewable.
+    pub allow_plaintext_basic: bool,
 }
 
 impl Default for ClientConfig {
@@ -37,6 +47,7 @@ impl Default for ClientConfig {
             auth_mode: AuthMode::Scram,
             wire_format: "text/zinc".to_string(),
             timeout: Duration::from_secs(30),
+            allow_plaintext_basic: false,
         }
     }
 }

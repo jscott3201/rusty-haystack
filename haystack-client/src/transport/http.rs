@@ -46,8 +46,15 @@ impl HttpTransport {
     /// Basic sends the password on **every** request, base64-encoded, which is
     /// encoding rather than encryption. Over plain HTTP that is the password in
     /// cleartext on the wire — a different exposure from SCRAM, which never
-    /// transmits it at all — so an insecure scheme is warned about here rather
-    /// than only where TLS verification is turned off.
+    /// transmits it at all.
+    ///
+    /// The warning below is defence in depth for callers constructing a
+    /// transport directly, **not** the boundary: a library `log::warn!` reaches
+    /// nobody unless the application installed a logger. The boundary is in
+    /// [`HaystackClient::connect_with_config`], which refuses this combination
+    /// unless `ClientConfig::allow_plaintext_basic` is set.
+    ///
+    /// [`HaystackClient::connect_with_config`]: crate::HaystackClient::connect_with_config
     pub fn with_basic(
         base_url: &str,
         username: &str,

@@ -12,7 +12,7 @@ use std::time::Duration;
 use clap::Parser;
 use haystack_client::{AuthMode, ClientConfig, HaystackClient};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(
     name = "niagara-read",
     about = "Haystack point read (Niagara nHaystack demo)"
@@ -39,6 +39,12 @@ struct Args {
     /// Disable TLS certificate and hostname verification (lab self-signed certs only)
     #[arg(long)]
     insecure_tls: bool,
+
+    /// Permit Basic auth against an http:// URL. The client refuses this by
+    /// default: Basic sends a reusable password on every request, so over plain
+    /// HTTP it is disclosed to anyone on the path.
+    #[arg(long)]
+    allow_plaintext_basic: bool,
 
     #[arg(long, default_value = "point and cur")]
     filter: String,
@@ -83,6 +89,7 @@ async fn main() {
     let config = ClientConfig {
         tls_verify,
         auth_mode,
+        allow_plaintext_basic: args.allow_plaintext_basic,
         ..ClientConfig::default()
     };
 
