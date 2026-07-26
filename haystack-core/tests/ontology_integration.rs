@@ -843,3 +843,49 @@ fn a_required_marker_is_enforced_in_both_spellings() {
         );
     }
 }
+
+/// Only the built-in `Marker` collapses to a marker slot. A library defining its
+/// own type of that name keeps its constraint.
+///
+/// Found by adversarial review: matching any name ending in `::Marker` reduced
+/// `x: mylib::Marker` to presence-only, so an entity carrying `x: "value"` fitted
+/// a slot declaring a Str-derived type. That destroyed a constraint the code had
+/// been enforcing — a worse defect than the one being fixed.
+#[test]
+fn a_librarys_own_marker_type_is_not_collapsed_to_a_marker_slot() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Marker: Str\nUsesOwnMarker: Dict {\n  x: collision::Marker\n}\n",
+        "collision",
+    )
+    .expect("load test lib");
+
+    let spec = ns
+        .specs_map()
+        .get("collision::UsesOwnMarker")
+        .expect("spec loaded");
+    let slot = &spec.slots[0];
+    assert!(
+        !slot.is_marker,
+        "a qualified name pointing at another library's type is not the built-in"
+    );
+    assert_eq!(slot.type_ref.as_deref(), Some("collision::Marker"));
+}
+
+/// The canonical qualified spelling of the built-in still collapses. `sys.xeto`
+/// defines `Marker`, so `sys::Marker` and bare `Marker` are the same type.
+#[test]
+fn the_qualified_builtin_marker_is_still_a_marker_slot() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str("Q: Dict {\n  ahu: sys::Marker\n}\n", "qm")
+        .expect("load test lib");
+
+    let empty = HDict::new();
+    let mut carries = HDict::new();
+    carries.set("ahu", Kind::Marker);
+    assert!(
+        !ns.fits_spec_term(&empty, "qm::Q"),
+        "sys::Marker is required"
+    );
+    assert!(ns.fits_spec_term(&carries, "qm::Q"));
+}

@@ -316,13 +316,27 @@ impl Parser {
                     }
                     slot.meta = query_meta;
                 }
-            } else if type_ref == "Marker" || type_ref.ends_with("::Marker") {
+            } else if type_ref == "Marker" || type_ref == "sys::Marker" {
                 // `ahu: Marker` and bare `ahu` mean the same thing. Converging
                 // here is what makes them behave the same: a slot carrying
                 // `type_ref = "Marker"` was not a marker slot, so it never
                 // reached `mandatory_markers()` and was never required — and
                 // `check_slot_types` finds nothing to check when the tag is
                 // absent, so the spec fitted an entity that had none of it.
+                //
+                // Only the two spellings of the built-in are accepted. Matching
+                // any name ending in `::Marker` looked equivalent and was not: a
+                // library defining its own `Marker: Str` had `x: mylib::Marker`
+                // silently reduced to presence-only, so `{x: "value"}` fitted a
+                // slot that declared a Str-derived type. That destroys a
+                // constraint the old code kept, which is worse than the bug being
+                // fixed here.
+                //
+                // A library that shadows the *bare* name with its own `Marker` is
+                // still read as the built-in. The parser is purely syntactic and
+                // has no library scope to resolve that against; it was equally
+                // unresolved before this change, so it is left alone rather than
+                // half-handled.
                 slot.is_marker = true;
             } else {
                 slot.type_ref = Some(type_ref);
