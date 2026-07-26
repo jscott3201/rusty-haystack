@@ -48,6 +48,10 @@ enum Commands {
         /// Load a demo building automation dataset
         #[arg(long)]
         demo: bool,
+        /// Allow cross-origin browser requests from this origin, scheme and
+        /// port included (repeatable). Omit to refuse all cross-origin requests.
+        #[arg(long = "cors-origin", value_name = "ORIGIN")]
+        cors_origins: Vec<String>,
     },
     /// Validate entities in a file against the standard Haystack ontology
     Validate {
@@ -282,12 +286,14 @@ fn main() {
             users,
             host,
             demo,
+            cors_origins,
         } => commands::serve::run(commands::serve::ServeConfig {
             port,
             file: file.as_deref(),
             users_file: users.as_deref(),
             host: host.as_deref(),
             demo,
+            cors_origins,
         }),
         Commands::Validate {
             file,

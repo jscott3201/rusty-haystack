@@ -24,8 +24,11 @@ haystack serve [OPTIONS]
 | `--file` | `-f` | Load entities from file at startup | |
 | `--users` | `-u` | TOML file with user credentials for SCRAM auth | |
 | `--demo` | | Load a demo building automation dataset | |
+| `--cors-origin` | | Allow cross-origin browser requests from this origin (repeatable) | No CORS headers |
 
 The server password can also be provided via the `HAYSTACK_PASSWORD` environment variable, which is useful for containerized deployments where CLI flags are less convenient.
+
+Origins are matched verbatim, scheme and port included. See [Configuration](configuration.md#cross-origin-requests) for what the policy allows.
 
 Examples:
 
@@ -41,6 +44,9 @@ haystack serve --demo --host 0.0.0.0 --port 8080
 
 # Password via environment variable
 HAYSTACK_PASSWORD=s3cret haystack serve --file data/entities.zinc --users users.toml
+
+# Reachable from a dashboard on another origin
+haystack serve --demo --cors-origin https://ops.example.com
 ```
 
 ### `import`

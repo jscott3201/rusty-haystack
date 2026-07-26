@@ -138,9 +138,8 @@ pub fn parse_password_hash(hash: &str) -> Result<ScramCredentials, String> {
 /// Generates a random 16-byte salt and uses `DEFAULT_ITERATIONS`.
 /// Returns the hash in the format accepted by [`parse_password_hash`].
 pub fn hash_password(password: &str) -> String {
-    let mut salt = [0u8; 16];
     use rand::RngExt;
-    rand::rng().fill(&mut salt);
+    let salt: [u8; 16] = rand::rng().random();
 
     let creds = derive_credentials(password, &salt, DEFAULT_ITERATIONS);
 

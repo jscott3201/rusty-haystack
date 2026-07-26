@@ -64,8 +64,7 @@ impl Drop for AuthManager {
 impl AuthManager {
     /// Create a new AuthManager with the given user records and token TTL.
     pub fn new(users: HashMap<String, UserRecord>, token_ttl: Duration) -> Self {
-        let mut server_secret = [0u8; 32];
-        rand::RngExt::fill(&mut rand::rng(), &mut server_secret);
+        let server_secret: [u8; 32] = rand::RngExt::random(&mut rand::rng());
         Self {
             users,
             handshakes: RwLock::new(HashMap::new()),
