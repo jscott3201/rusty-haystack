@@ -123,12 +123,12 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 
 ## Security
 
-- **No `unsafe` code** — entire codebase is safe Rust
+- **No `unsafe` code** — entire codebase is safe Rust (by convention; not enforced by a `forbid` lint)
 - **SCRAM SHA-256** authentication with PBKDF2 (100k iterations) credential storage
 - **Credential zeroization** — `zeroize` crate clears salted passwords, client keys, and SCRAM state from memory on drop (both server and client)
 - **Username enumeration prevention** — fake SCRAM challenges for unknown users
 - **Constant-time comparison** — prevents timing side-channels during auth
-- **Request limits** — 2 MB body size, 100 concurrent watches, 10k IDs per watch, 1M history items
+- **Request limits** — 2 MB body size, 100 concurrent watches, 1,000 IDs per watch, 1M history items
 - **Filter recursion depth limit** — max depth 100 to prevent stack overflow
 - **Parser DoS protection** — depth limits and size limits on all parsers
 - **Xeto loader safety** — symlink traversal protection, file size limits, and directory depth guards
