@@ -16,6 +16,7 @@ use haystack_core::ontology::DefNamespace;
 
 use crate::actions::ActionRegistry;
 use crate::auth::AuthManager;
+use crate::cors::CorsPolicy;
 use crate::his_store::HisStore;
 use crate::ops;
 use crate::state::{AppState, SharedState};
@@ -31,6 +32,7 @@ pub struct HaystackServer {
     custom_router: Option<Router<SharedState>>,
     authenticated_router: Option<Router<SharedState>>,
     history_provider: Option<Box<dyn crate::his_provider::HistoryProvider>>,
+    cors: CorsPolicy,
     port: u16,
     host: String,
 }
@@ -46,6 +48,7 @@ impl HaystackServer {
             custom_router: None,
             authenticated_router: None,
             history_provider: None,
+            cors: CorsPolicy::default(),
             port: 8080,
             host: "127.0.0.1".to_string(),
         }
@@ -60,6 +63,12 @@ impl HaystackServer {
     /// Set the authentication manager.
     pub fn with_auth(mut self, auth: AuthManager) -> Self {
         self.auth_manager = auth;
+        self
+    }
+
+    /// Set the cross-origin policy (default: [`CorsPolicy::Disabled`]).
+    pub fn with_cors(mut self, cors: CorsPolicy) -> Self {
+        self.cors = cors;
         self
     }
 
@@ -129,6 +138,30 @@ impl HaystackServer {
     where
         F: FnOnce(std::net::SocketAddr),
     {
+        let (host, port) = (self.host.clone(), self.port);
+        let app = self.build_router();
+
+        log::info!("Starting haystack-server on {host}:{port}");
+
+        let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
+
+        // Report the address actually bound, not the one requested. With `--port 0`
+        // the kernel picks the port, and nothing outside the process could discover
+        // it — so callers had to guess a free port and race the bind (issue #35).
+        let bound = listener.local_addr()?;
+        log::info!("haystack-server listening on {bound}");
+        on_bound(bound);
+
+        axum::serve(listener, app).await
+    }
+
+    /// Assemble the router and its middleware stack, without binding a socket.
+    ///
+    /// Split out from [`Self::run_reporting_addr`] so the stack can be driven
+    /// directly in tests. Layer *order* below is load-bearing rather than
+    /// incidental, and an assertion about it in a comment is worth only as much
+    /// as the test that exercises it.
+    fn build_router(self) -> Router {
         let his: Box<dyn crate::his_provider::HistoryProvider> = self
             .history_provider
             .unwrap_or_else(|| Box::new(HisStore::new()));
@@ -191,19 +224,21 @@ impl HaystackServer {
             app = app.merge(custom.with_state(state));
         }
 
-        log::info!("Starting haystack-server on {}:{}", self.host, self.port);
+        // Outermost, and after the custom-router merge so those routes are
+        // covered too. Preflight is what fixes the position: a browser sends
+        // OPTIONS with no Authorization header, and CorsLayer must be the thing
+        // that answers it. As written, `route_layer` above would skip an
+        // OPTIONS anyway — it does not run for a request matching no route, and
+        // every API route is registered `get` or `post` — but that is a
+        // property of axum's routing rather than a guarantee this server makes.
+        // Nesting CORS inside auth applied as a plain `.layer()` 401s every
+        // preflight; `cors_layering::preflight_is_answered_without_authentication`
+        // is what catches that.
+        if let Some(cors) = self.cors.layer() {
+            app = app.layer(cors);
+        }
 
-        let listener =
-            tokio::net::TcpListener::bind(format!("{}:{}", self.host, self.port)).await?;
-
-        // Report the address actually bound, not the one requested. With `--port 0`
-        // the kernel picks the port, and nothing outside the process could discover
-        // it — so callers had to guess a free port and race the bind (issue #35).
-        let bound = listener.local_addr()?;
-        log::info!("haystack-server listening on {bound}");
-        on_bound(bound);
-
-        axum::serve(listener, app).await
+        app
     }
 }
 
@@ -328,5 +363,166 @@ mod tests {
         assert_eq!(required_permission("/api/hisWrite"), Some("write"));
         assert_eq!(required_permission("/api/invokeAction"), Some("write"));
         assert_eq!(required_permission("/api/import"), Some("write"));
+    }
+
+    mod cors_layering {
+        use super::*;
+        use crate::auth::users::hash_password;
+        use axum::http::header;
+        use haystack_core::graph::EntityGraph;
+        use tower::ServiceExt;
+
+        const ORIGIN: &str = "https://ops.example.com";
+
+        /// A server with auth genuinely enabled — the whole point of these
+        /// tests is that CORS answers *before* auth, so auth must be able to
+        /// reject in the first place.
+        fn server_with_auth_and_cors(cors: CorsPolicy) -> HaystackServer {
+            let hash = hash_password("s3cret");
+            let auth = AuthManager::from_toml_str(&format!(
+                "[users.admin]\npassword_hash = \"{hash}\"\npermissions = [\"read\", \"write\"]\n"
+            ))
+            .unwrap();
+            assert!(auth.is_enabled(), "auth must be live for these tests");
+
+            HaystackServer::new(SharedGraph::new(EntityGraph::new()))
+                .with_auth(auth)
+                .with_cors(cors)
+        }
+
+        fn preflight(origin: &str) -> Request<Body> {
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/api/read")
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        /// The baseline the CORS tests below are meaningful against: an
+        /// unauthenticated POST really is refused.
+        #[tokio::test]
+        async fn unauthenticated_post_is_rejected() {
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
+                .build_router();
+
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/read")
+                        .header(header::ORIGIN, ORIGIN)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        /// The load-bearing one. A browser sends preflight with no
+        /// `Authorization` header; if `CorsLayer` sat inside `auth_middleware`
+        /// this would be a 401 and every cross-origin call would fail.
+        #[tokio::test]
+        async fn preflight_is_answered_without_authentication() {
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
+                .build_router();
+
+            let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
+
+            assert_ne!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "preflight reached the auth middleware — CorsLayer is nested too deep"
+            );
+            assert!(res.status().is_success(), "status was {}", res.status());
+            assert_eq!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .map(|v| v.to_str().unwrap()),
+                Some(ORIGIN)
+            );
+        }
+
+        /// `POST` is what every Haystack op but four uses, and `Authorization`
+        /// is how auth crosses origins at all. Both must survive preflight.
+        #[tokio::test]
+        async fn preflight_allows_post_and_the_authorization_header() {
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
+                .build_router();
+
+            let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
+            let headers = res.headers();
+
+            let methods = headers
+                .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_ascii_uppercase();
+            assert!(methods.contains("POST"), "methods were {methods}");
+            assert!(methods.contains("GET"), "methods were {methods}");
+
+            let allowed = headers
+                .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_ascii_lowercase();
+            assert!(allowed.contains("authorization"), "headers were {allowed}");
+            assert!(allowed.contains("content-type"), "headers were {allowed}");
+        }
+
+        /// Auth is header-based and no cookie is ever set, so granting
+        /// credentials would widen the policy for nothing.
+        #[tokio::test]
+        async fn preflight_does_not_allow_credentials() {
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
+                .build_router();
+
+            let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
+
+            assert!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn an_origin_off_the_allowlist_is_not_granted() {
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
+                .build_router();
+
+            let res = app
+                .oneshot(preflight("https://attacker.example.com"))
+                .await
+                .unwrap();
+
+            assert!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "an unlisted origin was granted access"
+            );
+        }
+
+        /// The default must behave exactly as the server did before CORS
+        /// existed: no headers, and the route's own 405 for a bare OPTIONS.
+        #[tokio::test]
+        async fn disabled_grants_nothing() {
+            let app = server_with_auth_and_cors(CorsPolicy::Disabled).build_router();
+
+            let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
+
+            assert!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none()
+            );
+        }
     }
 }
