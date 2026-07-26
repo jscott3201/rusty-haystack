@@ -1,0 +1,68 @@
+name: CodeQL
+
+# Replaces GitHub's default setup, which cannot read a configuration file and so
+# gave the repository no way to silence a rule that produced 22 alerts and zero
+# true positives. See `.github/codeql/codeql-config.yml` and issue #58.
+#
+# The language list, `default` query suite and weekly schedule below mirror what
+# default setup was configured with, so the migration changes what is *filtered*
+# and not what is *covered*. Losing a language here would be silent.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    # Default setup only ever gated PRs into main, which meant an alert was first
+    # seen at propagation time — with a batch of commits behind it and someone
+    # waiting on the merge. Running on dev PRs too surfaces it next to the change
+    # that caused it.
+    branches: [main, dev]
+  schedule:
+    # Matches default setup's weekly cadence. Advisories and query updates land
+    # against code that has not changed, so a timer is the only thing that catches
+    # them. GitHub fires scheduled workflows from the default branch only, so this
+    # file has to reach main before the cron runs at all.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Writing results is the whole point; the other two are what the action
+      # needs to read workflow metadata and the repository itself.
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `none` builds the database by reading source rather than by compiling.
+          # Rust supports it, and it keeps this workflow off the toolchain-pinning
+          # treadmill that ci.yml lives on — CodeQL never has to agree with the
+          # MSRV to analyse the code.
+          - language: rust
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

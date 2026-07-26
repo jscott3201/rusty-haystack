@@ -1,0 +1,33 @@
+name: "rusty-haystack CodeQL config"
+
+# Why this file exists at all: a configuration file is only honoured by advanced
+# setup, so the repository had no way to express any of the below while it was on
+# default setup. See issue #58.
+
+query-filters:
+  # `rust/hard-coded-cryptographic-value` has produced 22 alerts on this
+  # repository and zero true positives: 19 fixtures inside `#[cfg(test)]`, one
+  # deliberate anti-user-enumeration credential (`haystack-server/src/auth/mod.rs`,
+  # where an empty password derives a fake SCRAM challenge so an unknown username
+  # looks like a real one), and one genuine false positive that was fixed at
+  # source in #56.
+  #
+  # Per-alert dismissal did not scale. The fixtures live in `#[cfg(test)]` blocks
+  # *inside* files that also hold production code, so no path filter can reach
+  # them, and every new test that hashes a password mints a fresh alert that
+  # blocks the next `dev` -> `main` PR until someone dismisses it by hand. That
+  # recurred within hours of the last cleanup.
+  #
+  # This is a real reduction in coverage, not a free win: the rule is off for
+  # production code too. Revisit if the crypto surface grows beyond SCRAM —
+  # `haystack-core/src/auth.rs` and `haystack-server/src/auth/` are the paths that
+  # would make it worth paying the noise for again.
+  - exclude:
+      id: rust/hard-coded-cryptographic-value
+
+paths-ignore:
+  # The Python binding tests are the one case path filtering genuinely solves:
+  # they are standalone files rather than test blocks embedded in shipped source,
+  # so excluding them costs no production coverage. This is what produced the
+  # `py/incomplete-url-substring-sanitization` alert on a test assertion.
+  - rusty-haystack/tests
