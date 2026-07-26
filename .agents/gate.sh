@@ -68,11 +68,21 @@ run "tests (chrono-tz)" cargo test -p rusty-haystack-core --features chrono-tz  
 # The PyO3 crate is excluded above because it needs a Python interpreter to link.
 # It is the crate users actually execute, so skipping it silently would hide real
 # breakage — build and test it whenever a venv is present, and say so when not.
-if [[ -x .venv/bin/python ]]; then
+if [[ -x .venv/bin/python && -f .venv/bin/activate ]]; then
   printf '\n\033[1m== python bindings ==\033[0m\n'
+  # There is no `set -e`, so an activation that fails would otherwise fall
+  # through and run against whatever maturin, pytest and python happen to be on
+  # PATH — a different interpreter from the one CI pins, reported as if it were
+  # the same. CI's multiline steps are fail-fast and would stop at `source`.
   # shellcheck disable=SC1091
-  source .venv/bin/activate
-  if maturin develop --release -m rusty-haystack/Cargo.toml -q && pytest rusty-haystack/tests -q; then
+  if ! source .venv/bin/activate; then
+    printf '\033[31mFAIL\033[0m python bindings — could not activate .venv\n'
+    status=1
+  elif [[ "$(command -v python || true)" != "$PWD/.venv/bin/python" ]]; then
+    printf '\033[31mFAIL\033[0m python bindings — .venv did not take effect (python is %s)\n' \
+      "$(command -v python || echo none)"
+    status=1
+  elif maturin develop --release -m rusty-haystack/Cargo.toml -q && pytest rusty-haystack/tests -q; then
     printf '\033[32mok\033[0m  python bindings\n'
   else
     printf '\033[31mFAIL\033[0m python bindings\n'
@@ -89,7 +99,11 @@ fi
 # Network-dependent and slow, so opt-in. CI runs it on every PR and nightly, which
 # is where a newly-published advisory will surface; locally it mostly costs time.
 if (( FULL )); then
-  run "cargo-deny" cargo deny check                                       # ci.yml:110
+  # cargo-deny-action@v2 defaults to `check` with `--all-features` and the root
+  # manifest. A bare `cargo deny check` inspects a narrower graph, so a crate
+  # pulled in only by a non-default feature — `chrono-tz`, here — could violate
+  # an advisory in CI while this printed green.
+  run "cargo-deny" cargo deny --all-features --manifest-path ./Cargo.toml check  # ci.yml:110
 else
   skip "cargo-deny" "run with --full"
 fi
@@ -103,8 +117,12 @@ if (( ${#skipped[@]} )); then
   # Deliberately not "passed", and deliberately not 0. Exit 2 means the checks
   # that ran were green but the run was not CI-equivalent, so a caller cannot
   # treat it as evidence CI will pass.
+  # `${skipped[*]}` joins on the FIRST character of IFS only, so `IFS=', '`
+  # renders "a,b" rather than "a, b". Built explicitly instead.
+  joined="${skipped[0]}"
+  for s in "${skipped[@]:1}"; do joined+=", $s"; done
   printf '\033[33mgate incomplete\033[0m — %d check(s) did not run: %s\n' \
-    "${#skipped[@]}" "$(IFS=', '; echo "${skipped[*]}")"
+    "${#skipped[@]}" "$joined"
   printf 'Everything that ran passed. For a CI-equivalent run: create the venv, then --full\n'
   exit 2
 fi
