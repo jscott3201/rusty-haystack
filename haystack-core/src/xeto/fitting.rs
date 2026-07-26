@@ -22,6 +22,56 @@ use super::spec::Spec;
 /// the only thing that compiles.
 pub type EntityResolver<'a> = dyn Fn(&HRef) -> Option<&'a HDict> + 'a;
 
+/// Resolves the entities that point *at* a ref through a given tag.
+///
+/// The mirror of [`EntityResolver`], and a genuinely different capability: a
+/// forward resolver answers "what does this entity point at", which the entity
+/// carries in its own tags. An inverse query asks "which entities point at me",
+/// which the entity cannot know. Answering it needs an index over the whole
+/// store — `EntityGraph` already maintains one, as `refs_to`.
+///
+/// Called as `inverse(target, tag)`, returning every entity whose `tag` is a ref
+/// equal to `target`.
+pub type InverseResolver<'a> = dyn Fn(&HRef, &str) -> Vec<&'a HDict> + 'a;
+
+/// What query-slot evaluation may ask of the surrounding entity store.
+///
+/// Grouped rather than passed as separate parameters because the two travel
+/// together through every layer between a filter and a query slot, and because
+/// the set is not closed — `of:` checking wanted a third capability the week
+/// after the second was added.
+///
+/// `inverse` is optional on purpose: a caller holding only a map of entities can
+/// answer forward traversal but not reverse, and should say so rather than
+/// silently degrade. A spec with an inverse query slot evaluated without an
+/// inverse resolver reports [`FitIssue::ConstraintViolation`] rather than
+/// passing, so an unanswerable constraint fails closed.
+#[derive(Clone, Copy)]
+pub struct QueryContext<'a> {
+    /// Follows a ref to the entity it points at.
+    pub forward: &'a EntityResolver<'a>,
+    /// Finds the entities pointing at a ref, when the caller can answer that.
+    pub inverse: Option<&'a InverseResolver<'a>>,
+}
+
+impl<'a> QueryContext<'a> {
+    /// A context that can traverse forward only.
+    pub fn forward_only(forward: &'a EntityResolver<'a>) -> Self {
+        Self {
+            forward,
+            inverse: None,
+        }
+    }
+
+    /// A context that can traverse in both directions.
+    pub fn new(forward: &'a EntityResolver<'a>, inverse: &'a InverseResolver<'a>) -> Self {
+        Self {
+            forward,
+            inverse: Some(inverse),
+        }
+    }
+}
+
 /// Check whether an entity structurally fits a Xeto spec.
 ///
 /// This performs three levels of validation:
@@ -35,9 +85,9 @@ pub fn fits(
     entity: &HDict,
     spec_qname: &str,
     ns: &DefNamespace,
-    resolver: Option<&EntityResolver<'_>>,
+    ctx: Option<QueryContext<'_>>,
 ) -> bool {
-    fits_explain(entity, spec_qname, ns, resolver).is_empty()
+    fits_explain(entity, spec_qname, ns, ctx).is_empty()
 }
 
 /// Explain why an entity does or does not fit a Xeto spec.
@@ -47,7 +97,7 @@ pub fn fits_explain(
     entity: &HDict,
     spec_qname: &str,
     ns: &DefNamespace,
-    resolver: Option<&EntityResolver<'_>>,
+    ctx: Option<QueryContext<'_>>,
 ) -> Vec<FitIssue> {
     // Resolution goes through the namespace so this agrees with filter
     // evaluation about what a `lib::Name` term means. Doing its own bare-name
@@ -55,10 +105,10 @@ pub fn fits_explain(
     // `matches_with_ns` on the same string.
     match ns.resolve_spec_term(spec_qname) {
         Some(SpecTerm::Spec(spec)) => {
-            explain_against_spec_with_specs(entity, spec, ns.specs_map(), resolver)
+            explain_against_spec_with_specs(entity, spec, ns.specs_map(), ns, ctx)
         }
         Some(SpecTerm::Def(name)) => match synthetic_spec_for_def(&name, spec_qname, ns) {
-            Some(spec) => explain_against_spec_with_specs(entity, &spec, &HashMap::new(), resolver),
+            Some(spec) => explain_against_spec_with_specs(entity, &spec, &HashMap::new(), ns, ctx),
             None => ns.fits_explain(entity, &name),
         },
         None => vec![FitIssue::UnknownType {
@@ -109,7 +159,10 @@ fn synthetic_spec_for_def(def_name: &str, qname: &str, ns: &DefNamespace) -> Opt
 /// Check an entity against a resolved Spec.
 #[cfg(test)]
 fn explain_against_spec(entity: &HDict, spec: &Spec) -> Vec<FitIssue> {
-    explain_against_spec_with_specs(entity, spec, &HashMap::new(), None)
+    // No namespace and no traversal: these tests exercise markers, slot types and
+    // value constraints, none of which consult either.
+    let ns = DefNamespace::new();
+    explain_against_spec_with_specs(entity, spec, &HashMap::new(), &ns, None)
 }
 
 /// Check an entity against an already-resolved Spec, given the namespace's own
@@ -124,9 +177,10 @@ pub(crate) fn explain_against_spec_in(
     entity: &HDict,
     spec: &Spec,
     specs: &HashMap<String, Spec>,
-    resolver: Option<&EntityResolver<'_>>,
+    ns: &DefNamespace,
+    ctx: Option<QueryContext<'_>>,
 ) -> Vec<FitIssue> {
-    explain_against_spec_with_specs(entity, spec, specs, resolver)
+    explain_against_spec_with_specs(entity, spec, specs, ns, ctx)
 }
 
 /// Check an entity against a resolved Spec, with access to a specs map for
@@ -135,7 +189,8 @@ fn explain_against_spec_with_specs(
     entity: &HDict,
     spec: &Spec,
     specs: &HashMap<String, Spec>,
-    resolver: Option<&EntityResolver<'_>>,
+    ns: &DefNamespace,
+    ctx: Option<QueryContext<'_>>,
 ) -> Vec<FitIssue> {
     let mut issues = Vec::new();
 
@@ -148,9 +203,9 @@ fn explain_against_spec_with_specs(
     // Level 2.5: Value constraints
     check_value_constraints(entity, spec, &mut issues);
 
-    // Level 3: Query evaluation (only when resolver is provided)
-    if let Some(resolver) = resolver {
-        check_query_slots(entity, spec, resolver, &mut issues);
+    // Level 3: Query evaluation (only when the caller can traverse)
+    if let Some(ctx) = ctx {
+        check_query_slots(entity, spec, specs, ns, ctx, &mut issues);
     }
 
     issues
@@ -380,60 +435,211 @@ fn check_value_constraints(entity: &HDict, spec: &Spec, issues: &mut Vec<FitIssu
 }
 
 /// Level 3: Evaluate query slots by traversing entity relationships.
+///
+/// A query slot constrains what an entity must be able to *reach*. Two forms:
+///
+/// - **Forward** — `Query<of:Ahu, via:"airRef+">`: follow `airRef` from this
+///   entity, transitively when the path ends in `+`.
+/// - **Inverse** — `Query<of:Vav, inverse:"ph.equips::AhuVav.ahu">`: find the
+///   entities whose named slot reaches *this* one. The reference names a forward
+///   query slot on another spec, and that slot's `via` supplies the tag to search
+///   on, so an inverse query is the forward one read backwards.
+///
+/// `of` is enforced in both directions: reaching something is not enough, it has
+/// to be the declared type. Skipping that check made `Query<of:Ahu, via:"airRef+">`
+/// satisfied by reaching *anything*.
 fn check_query_slots(
     entity: &HDict,
     spec: &Spec,
-    resolver: &EntityResolver<'_>,
+    specs: &HashMap<String, Spec>,
+    ns: &DefNamespace,
+    ctx: QueryContext<'_>,
     issues: &mut Vec<FitIssue>,
 ) {
     for slot in &spec.slots {
         if !slot.is_query {
             continue;
         }
-        // Extract "of" type and "via" path from slot meta
-        let of_type = slot.meta.get("of").and_then(|v| {
-            if let Kind::Str(s) = v {
-                Some(s.as_str())
-            } else {
-                None
-            }
-        });
+        let of_type = str_meta(slot, "of");
+        let via_path = str_meta(slot, "via");
+        let inverse_ref = str_meta(slot, "inverse");
 
-        let via_path = slot.meta.get("via").and_then(|v| {
-            if let Kind::Str(s) = v {
-                Some(s.as_str())
-            } else {
-                None
+        let found: Vec<&HDict> = if let Some(via) = via_path {
+            let (ref_tag, transitive) = split_via(via);
+            traverse_refs(entity, ref_tag, transitive, ctx.forward)
+        } else if let Some(inverse) = inverse_ref {
+            match resolve_inverse_via(inverse, specs) {
+                Some((ref_tag, transitive)) => {
+                    // An inverse query the caller cannot answer is reported, not
+                    // skipped. Skipping is what made these specs match anything.
+                    let Some(reverse) = ctx.inverse else {
+                        issues.push(FitIssue::ConstraintViolation {
+                            tag: slot.name.clone(),
+                            constraint: "query".into(),
+                            detail: format!(
+                                "inverse query '{inverse}' needs a reverse index, \
+                                 and this caller supplied none"
+                            ),
+                        });
+                        continue;
+                    };
+                    traverse_refs_inverse(entity, &ref_tag, transitive, reverse)
+                }
+                None => {
+                    // A reference to a spec or slot that does not exist cannot be
+                    // evaluated either way. Fail closed, consistently with how an
+                    // unknown spec name is treated.
+                    issues.push(FitIssue::ConstraintViolation {
+                        tag: slot.name.clone(),
+                        constraint: "query".into(),
+                        detail: format!(
+                            "inverse query names '{inverse}', which is not a \
+                             forward query slot in this namespace"
+                        ),
+                    });
+                    continue;
+                }
             }
-        });
+        } else {
+            // Neither direction declared: nothing to evaluate.
+            continue;
+        };
 
-        // Inverse queries — `Query<of:Vav, inverse:"ph.equips::AhuVav.ahu">`, as
-        // ph.equips::VavZoneAhu.vavs is written — carry `of` and `inverse` but no
-        // `via`, so they fall past this and go unchecked. Evaluating one means
-        // asking which entities point AT this one, and an EntityResolver only maps
-        // a ref forward to its target; answering it needs a reverse index or a
-        // whole-graph handle. Tracked separately rather than silently pretended.
-        if let (Some(_of_type), Some(via)) = (of_type, via_path) {
-            // Parse via path: "equipRef+" means follow equipRef transitively
-            let (ref_tag, transitive) = if let Some(stripped) = via.strip_suffix('+') {
-                (stripped, true)
-            } else {
-                (via, false)
+        // `of` narrows what counts as reached. Absent, anything does.
+        let matching = match of_type {
+            Some(of) => found
+                .iter()
+                .filter(|candidate| fits_of(candidate, of, &spec.lib, specs, ns))
+                .count(),
+            None => found.len(),
+        };
+
+        if matching == 0 && !slot.is_maybe() {
+            let detail = match (via_path, inverse_ref, of_type) {
+                (Some(via), _, Some(of)) => {
+                    format!("no '{of}' reachable via '{via}'")
+                }
+                (Some(via), _, None) => format!("no entities reachable via '{via}'"),
+                (None, Some(inv), Some(of)) => {
+                    format!("no '{of}' reaches this entity through '{inv}'")
+                }
+                (None, Some(inv), None) => {
+                    format!("no entities reach this entity through '{inv}'")
+                }
+                (None, None, _) => unreachable!("continue above covers this"),
             };
-
-            // Traverse from entity following ref_tag
-            let reachable = traverse_refs(entity, ref_tag, transitive, resolver);
-
-            // For non-maybe query slots, having no reachable entities is an issue
-            if reachable.is_empty() && !slot.is_maybe() {
-                issues.push(FitIssue::ConstraintViolation {
-                    tag: slot.name.clone(),
-                    constraint: "query".into(),
-                    detail: format!("no entities reachable via '{}'", via),
-                });
-            }
+            issues.push(FitIssue::ConstraintViolation {
+                tag: slot.name.clone(),
+                constraint: "query".into(),
+                detail,
+            });
         }
     }
+}
+
+/// Does `candidate` count as the type an `of:` names?
+///
+/// `of` is written unqualified — `of:Vav`, `of:Target` — and where it resolves
+/// depends on what is in scope. A spec in the same library is checked first,
+/// because `DefNamespace::resolve_spec_term` only finds a Xeto spec under its
+/// exact qualified name; a bare `Target` would fall through to the def rungs and
+/// resolve to nothing, or worse, to an unrelated global def that happens to share
+/// the name.
+///
+/// The check is structural and shallow: no query context is passed down, so query
+/// slots on the `of` type itself are not evaluated. `of` asks what a reached
+/// entity *is*, and resolving that should not recursively drag in the whole graph.
+fn fits_of(
+    candidate: &HDict,
+    of: &str,
+    enclosing_lib: &str,
+    specs: &HashMap<String, Spec>,
+    ns: &DefNamespace,
+) -> bool {
+    if !of.contains("::")
+        && let Some(local) = specs.get(&format!("{enclosing_lib}::{of}"))
+    {
+        return explain_against_spec_with_specs(candidate, local, specs, ns, None).is_empty();
+    }
+    ns.fits_spec_term(candidate, of)
+}
+
+/// Read a string-valued slot meta entry.
+fn str_meta<'s>(slot: &'s super::spec::Slot, key: &str) -> Option<&'s str> {
+    match slot.meta.get(key) {
+        Some(Kind::Str(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Split a `via` path into its ref tag and whether it is transitive.
+///
+/// `"equipRef+"` follows `equipRef` repeatedly; `"equipRef"` follows it once.
+fn split_via(via: &str) -> (&str, bool) {
+    match via.strip_suffix('+') {
+        Some(stripped) => (stripped, true),
+        None => (via, false),
+    }
+}
+
+/// Resolve `inverse:"lib::Spec.slot"` to the ref tag and transitivity of the
+/// forward query slot it names.
+///
+/// Returns `None` when the spec or the slot does not exist, or when the named
+/// slot is not itself a forward query — all of which make the inverse
+/// unevaluatable rather than trivially true.
+fn resolve_inverse_via(inverse: &str, specs: &HashMap<String, Spec>) -> Option<(String, bool)> {
+    let (spec_qname, slot_name) = inverse.rsplit_once('.')?;
+    let target = specs.get(spec_qname)?;
+    let slot = target.slots.iter().find(|s| s.name == slot_name)?;
+    if !slot.is_query {
+        return None;
+    }
+    let via = str_meta(slot, "via")?;
+    let (tag, transitive) = split_via(via);
+    Some((tag.to_string(), transitive))
+}
+
+/// Find the entities that reach `entity` through `ref_tag`, optionally
+/// transitively.
+///
+/// The mirror of [`traverse_refs`]. Transitive here means descendants: the
+/// entities pointing at this one, plus the entities pointing at those, and so on.
+fn traverse_refs_inverse<'a>(
+    entity: &HDict,
+    ref_tag: &str,
+    transitive: bool,
+    reverse: &InverseResolver<'a>,
+) -> Vec<&'a HDict> {
+    let Some(Kind::Ref(start)) = entity.get("id") else {
+        // Without an id there is nothing for anything else to point at. This is
+        // not an error — an unsaved dict genuinely has no inbound refs.
+        return Vec::new();
+    };
+
+    let mut results = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue = vec![start.clone()];
+
+    while let Some(target) = queue.pop() {
+        if !visited.insert(target.val.clone()) {
+            continue;
+        }
+        for source in reverse(&target, ref_tag) {
+            results.push(source);
+            if transitive
+                && let Some(Kind::Ref(source_id)) = source.get("id")
+                && !visited.contains(&source_id.val)
+            {
+                queue.push(source_id.clone());
+            }
+        }
+        if !transitive {
+            break;
+        }
+    }
+
+    results
 }
 
 /// Follow ref tags from an entity, optionally transitively.
@@ -775,7 +981,8 @@ depends:[^lib:ph]
         let mut entity = HDict::new();
         entity.set("ahu", Kind::Marker);
 
-        let issues = explain_against_spec_with_specs(&entity, &child, &specs, None);
+        let issues =
+            explain_against_spec_with_specs(&entity, &child, &specs, &DefNamespace::new(), None);
         assert!(!issues.is_empty());
         let has_equip_issue = issues
             .iter()
@@ -790,7 +997,8 @@ depends:[^lib:ph]
         entity2.set("ahu", Kind::Marker);
         entity2.set("equip", Kind::Marker);
 
-        let issues2 = explain_against_spec_with_specs(&entity2, &child, &specs, None);
+        let issues2 =
+            explain_against_spec_with_specs(&entity2, &child, &specs, &DefNamespace::new(), None);
         assert!(issues2.is_empty(), "should pass with all markers present");
     }
 

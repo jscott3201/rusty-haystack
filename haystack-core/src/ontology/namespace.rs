@@ -451,23 +451,26 @@ impl DefNamespace {
         self.fits_spec_term_with(entity, term, None)
     }
 
-    /// As [`fits_spec_term`](Self::fits_spec_term), with a resolver for query slots.
+    /// As [`fits_spec_term`](Self::fits_spec_term), with traversal for query slots.
     ///
     /// A Xeto spec can constrain what an entity must be able to *reach* — an AHU
     /// spec whose `vavs` slot queries `airRef+`, say. Those constraints cannot be
-    /// evaluated from the entity alone, so without a resolver they are skipped and
+    /// evaluated from the entity alone, so without a context they are skipped and
     /// the spec matches more than it should. Callers holding a graph should pass
     /// one; `fits_spec_term` remains for callers that have no entity store.
+    ///
+    /// A context that cannot answer inverse queries still reports them rather than
+    /// passing them — see [`QueryContext`](crate::xeto::QueryContext).
     pub fn fits_spec_term_with(
         &self,
         entity: &HDict,
         term: &str,
-        resolver: Option<&crate::xeto::EntityResolver<'_>>,
+        ctx: Option<crate::xeto::QueryContext<'_>>,
     ) -> bool {
         match self.resolve_spec_term(term) {
             Some(SpecTerm::Def(name)) => self.entity_is_a(entity, &name),
             Some(SpecTerm::Spec(spec)) => {
-                crate::xeto::fitting::explain_against_spec_in(entity, spec, &self.specs, resolver)
+                crate::xeto::fitting::explain_against_spec_in(entity, spec, &self.specs, self, ctx)
                     .is_empty()
             }
             None => false,

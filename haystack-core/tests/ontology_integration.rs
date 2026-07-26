@@ -523,3 +523,275 @@ fn no_conjunct_def_matches_an_entity_missing_its_components() {
         "conjuncts matched without all components: {partials:?}"
     );
 }
+
+// ── Inverse query slots and `of` enforcement (issue #39) ──
+
+use haystack_core::graph::EntityGraph;
+
+/// Build a graph from `(id, tags...)` tuples where every tag is a marker except
+/// those written `tag=ref`, which become refs.
+fn graph_of(ns: DefNamespace, rows: &[(&str, &[&str])]) -> EntityGraph {
+    let mut graph = EntityGraph::with_namespace(ns);
+    for (id, tags) in rows {
+        let mut e = HDict::new();
+        e.set("id", Kind::Ref(HRef::from_val(*id)));
+        for t in tags.iter() {
+            match t.split_once('=') {
+                Some((tag, target)) => e.set(tag, Kind::Ref(HRef::from_val(target))),
+                None => e.set(*t, Kind::Marker),
+            }
+        }
+        graph.add(e).unwrap();
+    }
+    graph
+}
+
+fn matched_ids(graph: &EntityGraph, filter: &str) -> Vec<String> {
+    let mut ids: Vec<String> = graph
+        .read_all(filter, 0)
+        .unwrap_or_else(|e| panic!("{filter} rejected: {e}"))
+        .iter()
+        .filter_map(|e| e.id().map(|r| r.val.clone()))
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// An inverse query asks which entities point *at* this one — the mirror of a
+/// forward `via`. Before #39 the slot was skipped entirely, so the spec matched
+/// every entity that satisfied its other slots.
+#[test]
+fn an_inverse_query_slot_matches_only_entities_something_points_at() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "FedVav: Dict {\n  vav\n  myAhu: Query<of:Ahu, via:\"airRef\">\n}\n\
+         FeedingAhu: Dict {\n  ahu\n  vavs: Query<of:Vav, inverse:\"inv::FedVav.myAhu\">\n}\n",
+        "inv",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("ahu-fed", &["ahu", "equip"]),
+            ("ahu-idle", &["ahu", "equip"]),
+            ("vav-1", &["vav", "airRef=ahu-fed"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "inv::FeedingAhu"),
+        vec!["ahu-fed".to_string()],
+        "only the AHU a vav actually points at is a FeedingAhu"
+    );
+}
+
+/// Inverse traversal follows `+` transitively, the same as the forward path it
+/// mirrors: an entity two ref-hops upstream still counts.
+///
+/// The only qualifying source is deliberately two hops away. A one-hop
+/// implementation finds `middle`, which `of:Vav` then rejects, so the slot comes
+/// back empty and `root` does not match — which is what makes this test fail if
+/// transitivity is dropped.
+#[test]
+fn a_transitive_inverse_query_reaches_indirect_sources() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Child: Dict {\n  vav\n  up: Query<of:Ahu, via:\"airRef+\">\n}\n\
+         Root: Dict {\n  ahu\n  below: Query<of:Vav, inverse:\"deep::Child.up\">\n}\n",
+        "deep",
+    )
+    .expect("load test lib");
+
+    // grandchild(vav) -> middle(not a vav) -> root
+    let graph = graph_of(
+        ns,
+        &[
+            ("root", &["ahu", "equip"]),
+            ("lonely", &["ahu", "equip"]),
+            ("middle", &["equip", "airRef=root"]),
+            ("grandchild", &["vav", "airRef=middle"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "deep::Root"),
+        vec!["root".to_string()],
+        "the vav two hops below counts; the lonely ahu has nothing below it"
+    );
+}
+
+/// `of` narrows what counts as reached. Reaching something is not enough — it has
+/// to be the declared type, which the code parsed and then ignored.
+#[test]
+fn a_query_slot_is_not_satisfied_by_reaching_the_wrong_type() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "NeedsAhu: Dict {\n  vav\n  src: Query<of:Ahu, via:\"airRef\">\n}\n",
+        "oft",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("real-ahu", &["ahu", "equip"]),
+            ("a-chiller", &["chiller", "equip"]),
+            ("vav-good", &["vav", "airRef=real-ahu"]),
+            ("vav-bad", &["vav", "airRef=a-chiller"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "oft::NeedsAhu"),
+        vec!["vav-good".to_string()],
+        "reaching a chiller does not satisfy of:Ahu"
+    );
+}
+
+/// An inverse reference naming a slot that does not exist cannot be evaluated
+/// either way. It fails closed, consistently with how an unknown spec name is
+/// treated — the bundled `ph.equips::VavZoneAhu` is in exactly this state (#46).
+#[test]
+fn an_inverse_query_naming_a_missing_slot_matches_nothing() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Dangling: Dict {\n  ahu\n  vavs: Query<of:Vav, inverse:\"dang::NoSuchSpec.nope\">\n}\n",
+        "dang",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(ns, &[("ahu-1", &["ahu", "equip"])]);
+
+    assert!(
+        matched_ids(&graph, "dang::Dangling").is_empty(),
+        "an unevaluatable constraint must not pass"
+    );
+}
+
+/// The bundled `ph.equips::VavZoneAhu` carries the dangling reference from #46,
+/// so it matches nothing until that data defect is fixed. Pinned so the number
+/// changes visibly when it is, rather than silently.
+///
+/// This graph is built by hand rather than taken from the demo, and that matters:
+/// the demo AHUs carry no `vavZone`, so they fail this spec's marker slot on
+/// `dev` too and the demo answer is zero either way. The entity below does carry
+/// `vavZone`, which is what makes the comparison real — on `dev`, where the
+/// inverse slot is skipped, this same graph returns `["ahu-1"]`.
+#[test]
+fn the_bundled_vav_zone_ahu_currently_matches_nothing() {
+    let ns = DefNamespace::load_standard().expect("standard ontology");
+    let graph = graph_of(
+        ns,
+        &[
+            ("ahu-1", &["ahu", "equip", "vavZone"]),
+            ("vav-1", &["vav", "equip", "airRef=ahu-1"]),
+        ],
+    );
+
+    assert!(
+        matched_ids(&graph, "ph.equips::VavZoneAhu").is_empty(),
+        "VavZoneAhu points at AhuVav.ahu, but that slot is named myAhu (#46)"
+    );
+    // The forward half of the same pair does work, which is what shows the
+    // failure is the dangling reference and not inverse queries generally.
+    assert_eq!(
+        matched_ids(&graph, "ph.equips::AhuVav"),
+        vec!["vav-1".to_string()]
+    );
+}
+
+/// A caller that can traverse forward but not backward must not have its inverse
+/// query slots quietly pass. Degrading to "true" is the failure mode #22 and #39
+/// both exist to remove, so a context without a reverse index reports the slot.
+#[test]
+fn an_inverse_query_without_a_reverse_index_fails_closed() {
+    use haystack_core::xeto::QueryContext;
+
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Src: Dict {\n  vav\n  up: Query<of:Ahu, via:\"airRef\">\n}\n\
+         Sink: Dict {\n  ahu\n  below: Query<of:Vav, inverse:\"nr::Src.up\">\n}\n",
+        "nr",
+    )
+    .expect("load test lib");
+
+    let mut ahu = HDict::new();
+    ahu.set("id", Kind::Ref(HRef::from_val("ahu-1")));
+    ahu.set("ahu", Kind::Marker);
+
+    // A forward resolver that knows nothing is still a forward resolver; what is
+    // missing is the reverse direction.
+    let forward = |_r: &HRef| -> Option<&HDict> { None };
+    let ctx = QueryContext::forward_only(&forward);
+
+    let issues = haystack_core::xeto::fits_explain(&ahu, "nr::Sink", &ns, Some(ctx));
+    assert!(
+        !issues.is_empty(),
+        "an inverse slot that cannot be evaluated must be reported, not skipped"
+    );
+    assert!(
+        format!("{issues:?}").contains("reverse index"),
+        "the issue should say why it could not be evaluated: {issues:?}"
+    );
+}
+
+/// `of:` names a type unqualified, and a Xeto spec in the same library must be
+/// found. `resolve_spec_term` only matches a spec on its exact qualified name,
+/// so a bare `Target` fell through to the def rungs and resolved to nothing —
+/// the slot then counted zero matches and the spec matched no entity at all.
+///
+/// Found by adversarial review of the change that introduced `of` enforcement.
+#[test]
+fn an_of_type_resolves_to_a_spec_in_the_same_library() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Target: Dict {\n  target\n}\n\
+         Holder: Dict {\n  holder\n  child: Query<of:Target, via:\"childRef\">\n}\n",
+        "same",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("target", &["target"]),
+            ("holder", &["holder", "childRef=target"]),
+            ("empty-holder", &["holder"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "same::Holder"),
+        vec!["holder".to_string()],
+        "of:Target must resolve to same::Target"
+    );
+}
+
+/// A bare `of:` that names a def must still resolve, which is the bundled case —
+/// `ph.equips` writes `of:Ahu` for the def `ahu`, not for a spec in its own lib.
+#[test]
+fn an_of_type_still_resolves_to_a_def_when_no_local_spec_exists() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "NeedsAhu: Dict {\n  vav\n  src: Query<of:Ahu, via:\"airRef\">\n}\n",
+        "deft",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("real-ahu", &["ahu", "equip"]),
+            ("a-chiller", &["chiller", "equip"]),
+            ("vav-good", &["vav", "airRef=real-ahu"]),
+            ("vav-bad", &["vav", "airRef=a-chiller"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "deft::NeedsAhu"),
+        vec!["vav-good".to_string()],
+        "of:Ahu resolves to the def `ahu` when no deft::Ahu spec exists"
+    );
+}
