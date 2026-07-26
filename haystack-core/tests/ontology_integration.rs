@@ -672,6 +672,12 @@ fn an_inverse_query_naming_a_missing_slot_matches_nothing() {
 /// The bundled `ph.equips::VavZoneAhu` carries the dangling reference from #46,
 /// so it matches nothing until that data defect is fixed. Pinned so the number
 /// changes visibly when it is, rather than silently.
+///
+/// This graph is built by hand rather than taken from the demo, and that matters:
+/// the demo AHUs carry no `vavZone`, so they fail this spec's marker slot on
+/// `dev` too and the demo answer is zero either way. The entity below does carry
+/// `vavZone`, which is what makes the comparison real — on `dev`, where the
+/// inverse slot is skipped, this same graph returns `["ahu-1"]`.
 #[test]
 fn the_bundled_vav_zone_ahu_currently_matches_nothing() {
     let ns = DefNamespace::load_standard().expect("standard ontology");
@@ -727,5 +733,65 @@ fn an_inverse_query_without_a_reverse_index_fails_closed() {
     assert!(
         format!("{issues:?}").contains("reverse index"),
         "the issue should say why it could not be evaluated: {issues:?}"
+    );
+}
+
+/// `of:` names a type unqualified, and a Xeto spec in the same library must be
+/// found. `resolve_spec_term` only matches a spec on its exact qualified name,
+/// so a bare `Target` fell through to the def rungs and resolved to nothing —
+/// the slot then counted zero matches and the spec matched no entity at all.
+///
+/// Found by adversarial review of the change that introduced `of` enforcement.
+#[test]
+fn an_of_type_resolves_to_a_spec_in_the_same_library() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "Target: Dict {\n  target\n}\n\
+         Holder: Dict {\n  holder\n  child: Query<of:Target, via:\"childRef\">\n}\n",
+        "same",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("target", &["target"]),
+            ("holder", &["holder", "childRef=target"]),
+            ("empty-holder", &["holder"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "same::Holder"),
+        vec!["holder".to_string()],
+        "of:Target must resolve to same::Target"
+    );
+}
+
+/// A bare `of:` that names a def must still resolve, which is the bundled case —
+/// `ph.equips` writes `of:Ahu` for the def `ahu`, not for a spec in its own lib.
+#[test]
+fn an_of_type_still_resolves_to_a_def_when_no_local_spec_exists() {
+    let mut ns = DefNamespace::load_standard().expect("standard ontology");
+    ns.load_xeto_str(
+        "NeedsAhu: Dict {\n  vav\n  src: Query<of:Ahu, via:\"airRef\">\n}\n",
+        "deft",
+    )
+    .expect("load test lib");
+
+    let graph = graph_of(
+        ns,
+        &[
+            ("real-ahu", &["ahu", "equip"]),
+            ("a-chiller", &["chiller", "equip"]),
+            ("vav-good", &["vav", "airRef=real-ahu"]),
+            ("vav-bad", &["vav", "airRef=a-chiller"]),
+        ],
+    );
+
+    assert_eq!(
+        matched_ids(&graph, "deft::NeedsAhu"),
+        vec!["vav-good".to_string()],
+        "of:Ahu resolves to the def `ahu` when no deft::Ahu spec exists"
     );
 }

@@ -509,7 +509,7 @@ fn check_query_slots(
         let matching = match of_type {
             Some(of) => found
                 .iter()
-                .filter(|candidate| ns.fits_spec_term(candidate, of))
+                .filter(|candidate| fits_of(candidate, of, &spec.lib, specs, ns))
                 .count(),
             None => found.len(),
         };
@@ -535,6 +535,33 @@ fn check_query_slots(
             });
         }
     }
+}
+
+/// Does `candidate` count as the type an `of:` names?
+///
+/// `of` is written unqualified — `of:Vav`, `of:Target` — and where it resolves
+/// depends on what is in scope. A spec in the same library is checked first,
+/// because `DefNamespace::resolve_spec_term` only finds a Xeto spec under its
+/// exact qualified name; a bare `Target` would fall through to the def rungs and
+/// resolve to nothing, or worse, to an unrelated global def that happens to share
+/// the name.
+///
+/// The check is structural and shallow: no query context is passed down, so query
+/// slots on the `of` type itself are not evaluated. `of` asks what a reached
+/// entity *is*, and resolving that should not recursively drag in the whole graph.
+fn fits_of(
+    candidate: &HDict,
+    of: &str,
+    enclosing_lib: &str,
+    specs: &HashMap<String, Spec>,
+    ns: &DefNamespace,
+) -> bool {
+    if !of.contains("::")
+        && let Some(local) = specs.get(&format!("{enclosing_lib}::{of}"))
+    {
+        return explain_against_spec_with_specs(candidate, local, specs, ns, None).is_empty();
+    }
+    ns.fits_spec_term(candidate, of)
 }
 
 /// Read a string-valued slot meta entry.
