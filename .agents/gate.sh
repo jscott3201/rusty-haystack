@@ -82,31 +82,88 @@ run "tests (current stable 1.98.1, chrono-tz)" \
 
 # The PyO3 crate is excluded above because it needs a Python interpreter to link.
 # It is the crate users actually execute, so skipping it silently would hide real
-# breakage — build and test it whenever a venv is present, and say so when not.
-if [[ -x .venv/bin/python && -f .venv/bin/activate ]]; then
-  printf '\n\033[1m== python bindings ==\033[0m\n'
-  # There is no `set -e`, so an activation that fails would otherwise fall
-  # through and run against whatever maturin, pytest and python happen to be on
-  # PATH — a different interpreter from the one CI pins, reported as if it were
-  # the same. CI's multiline steps are fail-fast and would stop at `source`.
-  # shellcheck disable=SC1091
-  if ! source .venv/bin/activate; then
-    printf '\033[31mFAIL\033[0m python bindings — could not activate .venv\n'
+# breakage. A configured but invalid venv is a failure; only a wholly absent venv
+# gets the gate's "incomplete" result.
+if [[ -e .venv || -L .venv ]]; then
+  venv_dir="$PWD/.venv"
+  venv_python="$venv_dir/bin/python"
+  venv_maturin="$venv_dir/bin/maturin"
+  venv_pytest="$venv_dir/bin/pytest"
+  python_env_valid=1
+
+  python_env_fail() {
+    printf '\033[31mFAIL\033[0m python environment — %s\n' "$1"
     status=1
-  elif [[ "$(command -v python || true)" != "$PWD/.venv/bin/python" ]]; then
-    printf '\033[31mFAIL\033[0m python bindings — .venv did not take effect (python is %s)\n' \
-      "$(command -v python || echo none)"
-    status=1
-  elif maturin develop --release -m rusty-haystack/Cargo.toml && pytest rusty-haystack/tests -q; then
-    printf '\033[32mok\033[0m  python bindings\n'
-  else
-    printf '\033[31mFAIL\033[0m python bindings\n'
-    status=1
+    python_env_valid=0
+  }
+
+  printf '\n\033[1m== python environment ==\033[0m\n'
+  if [[ ! -d "$venv_dir" ]]; then
+    python_env_fail ".venv is not a directory"
   fi
-  # CI lints this crate here rather than in the Clippy job, because that job
-  # excludes it. Running it anywhere else would leave it unlinted entirely.
-  run "clippy (pyo3, MSRV 1.97.1)" \
-    cargo +1.97.1 clippy -p rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.python
+  for tool in python maturin pytest; do
+    tool_path="$venv_dir/bin/$tool"
+    if [[ ! -x "$tool_path" ]]; then
+      python_env_fail "$tool_path is missing or not executable; recreate it with 'uv venv --python 3.12' and 'uv pip install maturin==1.15.0 pytest'"
+    fi
+  done
+
+  if (( python_env_valid )); then
+    if ! python_version="$("$venv_python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)"; then
+      python_env_fail "$venv_python could not report its interpreter version"
+    elif [[ "$python_version" != "3.12" ]]; then
+      python_env_fail "expected Python 3.12, found Python $python_version; recreate .venv with 'uv venv --python 3.12'"
+    fi
+  fi
+
+  if (( python_env_valid )); then
+    if ! maturin_version="$("$venv_maturin" --version 2>/dev/null)"; then
+      python_env_fail "$venv_maturin could not report its version"
+    elif [[ "$maturin_version" != "maturin 1.15.0" ]]; then
+      python_env_fail "expected maturin 1.15.0, found '$maturin_version'; run 'uv pip install --python .venv/bin/python maturin==1.15.0'"
+    fi
+  fi
+
+  if (( python_env_valid )); then
+    if ! pytest_version="$("$venv_pytest" --version 2>/dev/null)"; then
+      python_env_fail "$venv_pytest is not usable; run 'uv pip install --python .venv/bin/python pytest'"
+    elif [[ "$pytest_version" != pytest\ * ]]; then
+      python_env_fail "$venv_pytest returned an unexpected version string: '$pytest_version'"
+    fi
+  fi
+
+  if (( python_env_valid )); then
+    export VIRTUAL_ENV="$venv_dir"
+    export PATH="$venv_dir/bin:$PATH"
+    export PYO3_PYTHON="$venv_python"
+    hash -r
+    for tool in python maturin pytest; do
+      resolved="$(command -v "$tool" || true)"
+      expected="$venv_dir/bin/$tool"
+      if [[ "$resolved" != "$expected" ]]; then
+        python_env_fail "$tool resolved to '${resolved:-none}', expected '$expected'"
+      fi
+    done
+  fi
+
+  if (( python_env_valid )); then
+    printf '\033[32mok\033[0m  python environment — Python %s, %s, %s\n' \
+      "$python_version" "$maturin_version" "$pytest_version"
+    printf '\n\033[1m== python bindings ==\033[0m\n'
+    if "$venv_maturin" develop --release -m rusty-haystack/Cargo.toml \
+      && "$venv_pytest" rusty-haystack/tests -q; then
+      printf '\033[32mok\033[0m  python bindings\n'
+    else
+      printf '\033[31mFAIL\033[0m python bindings\n'
+      status=1
+    fi
+    # CI lints this crate here rather than in the Clippy job, because that job
+    # excludes it. Running it anywhere else would leave it unlinted entirely.
+    run "clippy (pyo3, MSRV 1.97.1)" \
+      cargo +1.97.1 clippy -p rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.python
+  else
+    printf '\033[31mFAIL\033[0m python bindings and PyO3 clippy — invalid .venv\n'
+  fi
 else
   skip "python bindings" "no .venv (uv venv --python 3.12)"
   skip "clippy (pyo3)" "needs the venv above"
