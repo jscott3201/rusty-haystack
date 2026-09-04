@@ -2,8 +2,10 @@
 
 ## Prerequisites
 
-- **Rust 1.97.1.** CI pins this exact toolchain (`.github/workflows/ci.yml`), and the
-  workspace declares `edition = "2024"` with `rust-version = "1.97"` (`Cargo.toml`).
+- **Rust 1.97.1.** The repository pins normal local commands to this exact toolchain in
+  `rust-toolchain.toml`. It is also the CI MSRV lane for the workspace's declared
+  `rust-version = "1.97"`. A separate Ubuntu lane pins current stable Rust 1.98.1; both
+  pins move only through reviewed changes.
 - **[uv](https://docs.astral.sh/uv/)** and **Python 3.12**, only if you touch the Python
   bindings. CI pins the interpreter version deliberately — `pyo3` is configured without
   `abi3`, so every build is interpreter-specific.
@@ -53,8 +55,8 @@ crate is excluded from which command:
 ./.agents/gate.sh --full   # every CI check — this is the CI-equivalent run
 ```
 
-It runs CI's commands in CI's exact form, including the two `chrono-tz` feature
-invocations and clippy on the PyO3 crate.
+It runs CI's commands in CI's exact form, including the `chrono-tz` feature surface on
+both Rust 1.97.1 and Rust 1.98.1, plus clippy on the PyO3 crate.
 
 **Read the exit status, not just the last line.** A check that could not run is never
 reported as one that passed:
@@ -79,10 +81,11 @@ green on what CI is about to reject.
 
 | Job | Command |
 |---|---|
-| Rustfmt | `cargo fmt --all --check` |
-| Clippy | `cargo clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
-| Test | `cargo test --workspace --exclude rusty-haystack`<br>`cargo test -p rusty-haystack-core --features chrono-tz` |
-| Python Bindings | clippy on the excluded crate, then `maturin develop` and `pytest` |
+| Rustfmt (Rust 1.97.1) | `cargo +1.97.1 fmt --all --check` |
+| Clippy (MSRV, Rust 1.97.1) | `cargo +1.97.1 clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.97.1 clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
+| Test (MSRV, Rust 1.97.1) | `cargo +1.97.1 test --workspace --exclude rusty-haystack`<br>`cargo +1.97.1 test -p rusty-haystack-core --features chrono-tz` |
+| Current stable (Ubuntu, Rust 1.98.1) | The same two Clippy and two test commands above, using `cargo +1.98.1` |
+| Python Bindings (Rust 1.97.1) | clippy on the excluded crate, then `maturin develop` and `pytest` |
 | Cargo Deny | `EmbarkStudios/cargo-deny-action@v2`, configured by `deny.toml` — advisories, licenses, bans, sources |
 
 **The OS matrix is conditional.** Anything targeting `main` runs on Ubuntu, macOS and
@@ -101,7 +104,7 @@ locally, drop the exclusion and use it.
 
 ```bash
 uv venv --python 3.12
-uv pip install maturin pytest
+uv pip install maturin==1.15.0 pytest
 source .venv/bin/activate
 maturin develop --release -m rusty-haystack/Cargo.toml
 pytest rusty-haystack/tests -q
@@ -134,8 +137,9 @@ Directory names are unprefixed; crates.io names are not. `haystack-core/` publis
 
 ## Conventions
 
-- **No `unsafe`.** There is none in the codebase today. It is a convention rather than a
-  lint — there is no `forbid(unsafe_code)` — so it holds only if reviewers keep holding it.
+- **Project-authored Rust forbids `unsafe`.** Every workspace member inherits the root
+  `unsafe_code = "forbid"` lint, so the compiler rejects unsafe code in this workspace.
+  This policy makes no claim about code inside dependencies.
 - **Warning-free under `-D warnings`.** Do not reach for `#[allow]` to get there; fix the
   cause. If an allow is genuinely right, the comment must say why, and "renaming would
   break callers" is the kind of claim that needs checking before it is written down.

@@ -13,5 +13,6 @@ haystack-core/src/ontology/generated.rs
 CLAUDE.md
 claude-id.json
 .DS_Store
+/_roadmap/
 _plan/
 _codex-briefs/

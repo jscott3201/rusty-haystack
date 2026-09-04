@@ -26,6 +26,7 @@
 
 set -o pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+export RUSTFLAGS="-Dwarnings"
 
 FULL=0
 [[ "${1:-}" == "--full" ]] && FULL=1
@@ -55,15 +56,29 @@ skip() {
 # Keep the flags identical to CI's — a gate that lints a different target set than
 # CI is worse than no gate, because it reports green on what CI is about to reject.
 # Each block below cites the CI line it mirrors so drift is visible in review.
-run "rustfmt" cargo fmt --all --check                                    # ci.yml:30
-run "clippy" cargo clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml:42
-run "tests" cargo test --workspace --exclude rusty-haystack              # ci.yml:65
+run "rustfmt (MSRV 1.97.1)" cargo +1.97.1 fmt --all --check  # ci.yml: jobs.fmt
+run "clippy (MSRV 1.97.1)" \
+  cargo +1.97.1 clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.clippy
+run "tests (MSRV 1.97.1)" \
+  cargo +1.97.1 test --workspace --exclude rusty-haystack  # ci.yml: jobs.test
 
 # The chrono-tz feature is default-off, so the commands above never compile the
 # timezone paths. CI checks them separately and so must this.
-run "clippy (chrono-tz)" \
-  cargo clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml:43
-run "tests (chrono-tz)" cargo test -p rusty-haystack-core --features chrono-tz           # ci.yml:66
+run "clippy (MSRV 1.97.1, chrono-tz)" \
+  cargo +1.97.1 clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml: jobs.clippy
+run "tests (MSRV 1.97.1, chrono-tz)" \
+  cargo +1.97.1 test -p rusty-haystack-core --features chrono-tz  # ci.yml: jobs.test
+
+# The root toolchain keeps normal development on the MSRV lane. CI also carries
+# one exact current-stable Ubuntu lane, mirrored here without multiplying OSes.
+run "clippy (current stable 1.98.1)" \
+  cargo +1.98.1 clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.current-stable
+run "clippy (current stable 1.98.1, chrono-tz)" \
+  cargo +1.98.1 clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml: jobs.current-stable
+run "tests (current stable 1.98.1)" \
+  cargo +1.98.1 test --workspace --exclude rusty-haystack  # ci.yml: jobs.current-stable
+run "tests (current stable 1.98.1, chrono-tz)" \
+  cargo +1.98.1 test -p rusty-haystack-core --features chrono-tz  # ci.yml: jobs.current-stable
 
 # The PyO3 crate is excluded above because it needs a Python interpreter to link.
 # It is the crate users actually execute, so skipping it silently would hide real
@@ -82,7 +97,7 @@ if [[ -x .venv/bin/python && -f .venv/bin/activate ]]; then
     printf '\033[31mFAIL\033[0m python bindings — .venv did not take effect (python is %s)\n' \
       "$(command -v python || echo none)"
     status=1
-  elif maturin develop --release -m rusty-haystack/Cargo.toml -q && pytest rusty-haystack/tests -q; then
+  elif maturin develop --release -m rusty-haystack/Cargo.toml && pytest rusty-haystack/tests -q; then
     printf '\033[32mok\033[0m  python bindings\n'
   else
     printf '\033[31mFAIL\033[0m python bindings\n'
@@ -90,7 +105,8 @@ if [[ -x .venv/bin/python && -f .venv/bin/activate ]]; then
   fi
   # CI lints this crate here rather than in the Clippy job, because that job
   # excludes it. Running it anywhere else would leave it unlinted entirely.
-  run "clippy (pyo3)" cargo clippy -p rusty-haystack --all-targets -- -D warnings  # ci.yml:94
+  run "clippy (pyo3, MSRV 1.97.1)" \
+    cargo +1.97.1 clippy -p rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.python
 else
   skip "python bindings" "no .venv (uv venv --python 3.12)"
   skip "clippy (pyo3)" "needs the venv above"
@@ -103,7 +119,8 @@ if (( FULL )); then
   # manifest. A bare `cargo deny check` inspects a narrower graph, so a crate
   # pulled in only by a non-default feature — `chrono-tz`, here — could violate
   # an advisory in CI while this printed green.
-  run "cargo-deny" cargo deny --all-features --manifest-path ./Cargo.toml check  # ci.yml:110
+  run "cargo-deny (MSRV 1.97.1)" \
+    cargo +1.97.1 deny --all-features --manifest-path ./Cargo.toml check  # ci.yml: jobs.deny
 else
   skip "cargo-deny" "run with --full"
 fi
