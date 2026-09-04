@@ -42,7 +42,8 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 
 ### Prerequisites
 
-- Rust 1.97+ (edition 2024)
+- Rust 1.97 (edition 2024). Normal commands use the repository-pinned Rust 1.97.1;
+  CI also verifies exact current stable Rust 1.98.1.
 - cargo
 
 ### Build
@@ -123,7 +124,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 
 ## Security
 
-- **No `unsafe` code** — entire codebase is safe Rust (by convention; not enforced by a `forbid` lint)
+- **Safe project code** — every workspace member compiler-enforces `unsafe_code = "forbid"`; this does not claim that dependencies contain no unsafe code
 - **SCRAM SHA-256** authentication with PBKDF2 (100k iterations) credential storage
 - **Credential zeroization** — `zeroize` crate clears salted passwords, client keys, and SCRAM state from memory on drop (both server and client)
 - **Username enumeration prevention** — fake SCRAM challenges for unknown users
