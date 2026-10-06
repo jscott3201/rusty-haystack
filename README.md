@@ -119,6 +119,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | [Client Library](docs/client.md) | HaystackClient API, transports, authentication |
 | [CLI Reference](docs/cli.md) | All commands, flags, and examples |
 | [Python Bindings](docs/python.md) | Core types, codecs, graph, filter, client, server, auth |
+| [Arrow / DataFusion Plan and Cursor Prompt](docs/arrow-datafusion-update-plan.md) | Assessment and roadmap with a copyable implementation prompt for Arrow, Parquet, and optional DataFusion support |
 | [Configuration](docs/configuration.md) | Server config, users TOML, permissions, Docker |
 | [Contributing](CONTRIBUTING.md) | Build flags and why, the gate, CI jobs, conventions |
 
