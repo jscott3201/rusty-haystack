@@ -138,10 +138,42 @@ transport failures preserve their category without including the raw request URL
 
 ## WebSocket Transport Details
 
-- Always uses Zinc encoding
-- JSON envelope with `id`, `op`, and `body` fields
-- Atomic message counter for request/response correlation
-- Supports ping/pong heartbeat
+Only `watchSub`, `watchPoll`, and `watchUnsub` are supported. Requests are uncompressed
+JSON text, such as `{"op":"watchSub","reqId":"1","ids":["point-1"]}`. Responses
+carry the same string `reqId`, a `watchId` where applicable, and `rows` containing
+Haystack JSON v3 typed values. The client converts rows to a grid, derives columns
+from their tag names, and places `watchId` in grid metadata. Correlated server
+errors become `ClientError::ServerError` with a fixed diagnostic.
+
+- Individual frames and complete reassembled messages are each limited to 1 MiB.
+  Binary application messages and application compression are rejected.
+- A connection admits at most 1,024 simultaneous requests atomically. The default
+  30-second request deadline covers writer queueing, sending, and waiting for a
+  response. `WsTransport::connect_with_timeout` changes that budget.
+- Malformed messages, I/O loss, and closure terminate the connection and settle
+  every pending call. Well-formed responses with unknown, late, or duplicate IDs
+  are ignored. Cancellation or timeout after a complete send unregisters only
+  that call; cancellation during a write closes the connection because delivery
+  may have occurred. Cancelling a call does not undo any server-side effect.
+- Unsolicited `{"type":"push","watchId":"...","rows":[...]}` notifications are
+  available through `client.next_watch_push()` or `WsTransport::next_push()`.
+  The queue holds 64 notifications; overflow closes the connection explicitly.
+- `close()` rejects new work, settles pending calls, and joins the reader within
+  its bounded shutdown path. Ping/pong control frames remain supported.
+- `ReconnectingWsTransport` reconnects once before a new call when its prior
+  connection is terminal. It never replays a dispatched call and never reconnects
+  after explicit close. A new connection does not restore subscriptions.
+
+`watchSub` creates a new watch from 1–1,000 IDs. `lease`, `watchDis`, existing-watch
+subscription, generic operations, and extra request metadata are rejected locally.
+`watchPoll` requires a watch ID and no rows. `watchUnsub` with an empty ID list
+removes the watch; a nonempty list removes those IDs and leaves the watch alive,
+even if no IDs remain. IDs are nonempty after stripping one leading `@` and are
+limited to 1,024 bytes; watch IDs are nonempty and limited to 128 bytes.
+
+Watch ownership remains username-scoped on the server. Disconnecting one socket
+removes that user's watches, including watches used by another connection. Push
+routing also follows username ownership; connection isolation is not provided.
 
 ## API Methods
 

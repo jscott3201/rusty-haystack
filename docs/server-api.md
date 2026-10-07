@@ -153,7 +153,7 @@ Subscribe to entity changes.
 
 **Response**: grid with current state of watched entities. Grid meta contains `watchId` (Str).
 
-Watches are automatically cleaned up when a WebSocket connection disconnects.
+WebSocket disconnect cleanup currently removes all watches owned by that username, including watches created through another connection or HTTP.
 
 #### POST `/api/watchPoll`
 
@@ -247,39 +247,53 @@ Revokes the current bearer token (logout). Requires read permission.
 
 ### Message Format
 
-Request:
+Messages are uncompressed JSON text. Individual frames and complete reassembled
+messages are each capped at 1 MiB. Binary application messages and compression
+are unsupported; malformed envelopes close the connection. A nonempty string
+`reqId` of at most 128 bytes is required on every request and echoed on responses.
+
 ```json
-{
-  "op": "watchSub",
-  "reqId": "1",
-  "watchDis": "My Watch",
-  "ids": ["@site-1", "@equip-1"]
-}
+{"op":"watchSub","reqId":"1","ids":["@site-1","@equip-1"]}
 ```
 
-Response:
 ```json
-{
-  "reqId": "1",
-  "watchId": "abc-123",
-  "rows": [
-    {"id": "r:site-1", "dis": "s:Demo Site", "site": "m:"}
-  ]
-}
+{"reqId":"1","watchId":"abc-123","rows":[{"id":"r:site-1","dis":"s:Demo Site","site":"m:"}]}
 ```
 
-Supported operations: `watchSub`, `watchPoll`, `watchUnsub`.
+Rows contain Haystack JSON v3 typed values. Supported operations and arguments:
 
-Fields:
-- `op` (required): operation name
-- `reqId` (optional): request ID echoed in response
-- `watchDis` (optional): display name for new watch
-- `watchId` (optional): existing watch ID
-- `ids` (optional): array of entity ref strings (`@` prefix stripped automatically)
+| Operation | Arguments | Successful response |
+| --- | --- | --- |
+| `watchSub` | `ids`: 1–1,000 entity refs; no `watchId` | New `watchId` and current rows |
+| `watchPoll` | Nonempty `watchId`; no `ids` | Same `watchId` and changed rows |
+| `watchUnsub` | Nonempty `watchId`; optional `ids` | Empty rows; same `watchId` when removing selected IDs, omitted when removing the entire watch |
 
-Error responses include an `error` field with the message.
+Each entity ref is nonempty after stripping one optional leading `@` and at most
+1,024 bytes. Watch IDs are at most 128 bytes. Empty or absent `ids` for
+`watchUnsub` removes the entire watch. A nonempty list removes only those IDs,
+leaving an empty watch alive when all IDs have been removed. Leases, `watchDis`,
+and adding IDs to an existing watch are outside this WebSocket profile.
 
-Watches associated with a WebSocket connection are automatically cleaned up when the connection disconnects.
+An unsupported operation or invalid operation arguments receive a correlated
+error, for example `{"reqId":"1","error":"unsupported watch arguments"}`.
+Missing/invalid request IDs, unexpected fields, invalid JSON, and incompatible
+message types terminate the connection instead of creating an uncorrelated reply.
+
+Unsolicited notifications are separate from responses:
+
+```json
+{"type":"push","watchId":"abc-123","rows":[{"id":"r:site-1","dis":"s:Updated Site"}]}
+```
+
+The outbound queue holds 64 messages. Queue overflow, oversized output, and writer
+failure close the connection rather than silently losing a response or push.
+The socket owns its writer task and joins or aborts it on shutdown. The server
+sends a ping every 30 seconds and closes after a separate 10-second pong deadline.
+Clients must re-establish their watches after loss of a connection.
+
+Watch ownership and push routing remain username-scoped. Disconnecting one socket
+removes all watches owned by that username, including watches used by other
+connections or HTTP. This behavior does not provide connection-level isolation.
 
 ## SCRAM Authentication
 

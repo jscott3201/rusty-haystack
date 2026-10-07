@@ -131,6 +131,26 @@ The server keeps `AwaitFirst` and `AwaitFinal` phases and bearer records under o
 5. **Op handler** -- decodes request grid, executes operation, encodes response grid
 6. **Response** -- grid serialized with negotiated codec and returned
 
+## WebSocket Watch Lifecycle
+
+The client and server share a text-only watch JSON profile with string `reqId`
+correlation and JSON v3 typed rows. Both cap frames and reassembled messages at
+1 MiB. The client atomically admits 1,024 pending calls; one deadline covers
+writer queueing, sending, and response waiting. A cancellation guard unregisters
+a call and seals the connection if cancellation interrupts a write. Terminal
+paths seal admission and settle every waiter before the reader is joined.
+
+Push notifications use a separate client queue of 64 entries. The server also
+bounds its outbound queue at 64 and owns the writer through a task set, ensuring
+that connection cancellation aborts it. Overflow and protocol failures terminate
+the connection explicitly. Reconnection belongs to a later new call; no accepted
+operation is automatically replayed. Explicit close permanently disables reconnect.
+
+This slice preserves username ownership in `WatchManager`: a socket disconnect
+removes that username's watches across connections. It does not introduce
+connection-scoped watches, subscription recovery, or leases. HTTP TLS configuration
+also remains separate from the existing public-root WSS connection path.
+
 ## Parser DoS Protection
 
 The Zinc/JSON parsers enforce limits to prevent denial-of-service via malicious input:

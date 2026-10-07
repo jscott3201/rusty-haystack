@@ -2058,6 +2058,7 @@ dependencies = [
  "sha2",
  "time",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "toml",
  "tower",
  "tower-http 0.7.1",
