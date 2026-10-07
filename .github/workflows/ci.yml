@@ -18,6 +18,22 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
+  ci-policy:
+    name: CI policy
+    runs-on: ubuntu-latest
+    outputs:
+      profile: ${{ steps.plan.outputs.profile }}
+      test-os: ${{ steps.plan.outputs.test-os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test policy and workflow wiring
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - name: Select branch coverage
+        id: plan
+        env:
+          CI_EVENT_ACTION: ${{ github.event.action }}
+        run: python3 scripts/ci/policy.py plan >> "$GITHUB_OUTPUT"
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -42,18 +58,16 @@ jobs:
       - run: cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings
       - run: cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
 
-  # Anything targeting main runs the full three-OS matrix. Everything else
-  # (dev PRs, dev pushes) tests on ubuntu alone. Jobs run in parallel, so the
-  # slowest one paces the workflow, and windows takes about twice what the
-  # others do — 3m00s against ubuntu's 1m30s on the 2026-07-25 baseline run.
-  # Dropping it takes the slowest test job to 42s.
+  # The tested policy expands main to all three OSes and dev to Ubuntu.
+  # A retargeted PR uses its current base branch, including on `edited`.
   test:
     name: Test (${{ matrix.os }})
+    needs: ci-policy
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.base_ref == 'main' || github.ref == 'refs/heads/main') && '["ubuntu-latest", "macos-latest", "windows-latest"]' || '["ubuntu-latest"]') }}
+        os: ${{ fromJSON(needs.ci-policy.outputs.test-os) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -64,6 +78,25 @@ jobs:
           key: ${{ matrix.os }}
       - run: cargo +1.99.0 test --locked --workspace --exclude rusty-haystack
       - run: cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz
+
+  # Separate package invocations prevent workspace members from unifying extra
+  # dependency features into core's supported minimal/default builds.
+  core-features:
+    name: Core minimal and default features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-features
+      - run: cargo +1.99.0 clippy --locked -p rusty-haystack-core --no-default-features --all-targets -- -D warnings
+      - run: cargo +1.99.0 test --locked -p rusty-haystack-core --no-default-features
+      - run: cargo +1.99.0 clippy --locked -p rusty-haystack-core --all-targets -- -D warnings
+      - run: cargo +1.99.0 test --locked -p rusty-haystack-core
 
   # Keep one exact current-stable lane separate from the conditional OS matrix:
   # compatibility coverage should not multiply platform jobs.
@@ -135,3 +168,26 @@ jobs:
         with:
           rust-version: "1.99.0"
           arguments: --locked --all-features
+
+  codeql:
+    name: CodeQL
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    uses: ./.github/workflows/codeql.yml
+
+  # Keep the explicit needs list synchronized with policy.py, its independent
+  # tests, and docs/support-matrix.md. Never infer required jobs from toJSON(needs).
+  ci-ok:
+    name: CI OK
+    if: ${{ always() }}
+    needs: [ci-policy, fmt, clippy, test, current-stable, python, deny, core-features, codeql]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every check to succeed
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_PROFILE: ${{ needs.ci-policy.outputs.profile }}
+        run: python3 scripts/ci/policy.py aggregate

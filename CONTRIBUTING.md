@@ -83,30 +83,32 @@ Before opening a PR, run the repo gate. It exists so you do not have to remember
 crate is excluded from which command:
 
 ```bash
-./.agents/gate.sh          # everything except cargo-deny
-./.agents/gate.sh --full   # every CI check — this is the CI-equivalent run
+./.agents/gate.sh          # local checks except cargo-deny; exits 2 if otherwise green
+./.agents/gate.sh --full   # complete local profile on this host
 ```
 
-It runs CI's commands in CI's exact form, including the `chrono-tz` feature surface in
-both the MSRV and current-stable lanes (currently Rust 1.99.0), plus clippy on the PyO3
-crate. Builds, lints and tests use `--locked` so they validate the checked-in graph.
+It runs the CI policy tests, isolated core minimal/default checks, and CI's Rust
+commands, including the `chrono-tz` feature surface in both the MSRV and current-stable
+lanes (currently Rust 1.99.0). It rebuilds the Python extension before testing it and
+lints the PyO3 crate. Builds, lints and tests use `--locked` to validate the checked-in
+graph. The policy tests require `python3` and only use its standard library.
 
 **Read the exit status, not just the last line.** A check that could not run is never
 reported as one that passed:
 
 | Exit | Meaning |
 |---|---|
-| `0` | every CI check ran and passed — the only result that predicts CI |
+| `0` | every check in the full local profile ran and passed on this host |
 | `1` | something failed |
-| `2` | what ran was green, but the run was not CI-equivalent (something was skipped) |
+| `2` | what ran was green, but the local profile was incomplete (something was skipped) |
 
 So `--full` with a `.venv` present is the run that can exit `0`. Without the venv the
 Python bindings and their clippy pass cannot run, and the gate says so rather than
 implying they were fine.
 
-If the gate passes and CI fails, the gate is wrong and that is worth reporting — a gate
-that checks a different target set than CI is worse than no gate, because it reports
-green on what CI is about to reject.
+A local pass does not run hosted CodeQL, test another operating system, or validate
+release artifacts. CI can therefore find failures the local gate cannot observe.
+See the [support matrix](docs/support-matrix.md) for those evidence boundaries.
 
 ## What CI enforces
 
@@ -114,18 +116,32 @@ green on what CI is about to reject.
 
 | Job | Command |
 |---|---|
+| CI policy | `python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v`, then the validated dev/main matrix plan |
 | Rustfmt (Rust 1.99.0) | `cargo +1.99.0 fmt --all --check` |
 | Clippy (MSRV, Rust 1.99.0) | `cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
 | Test (MSRV, Rust 1.99.0) | `cargo +1.99.0 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz` |
+| Core minimal and default features (Ubuntu, Rust 1.99.0) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features` |
 | Current stable (Ubuntu, Rust 1.99.0) | The same two Clippy and two test commands above, using `cargo +1.99.0` |
 | Python Bindings (Rust 1.99.0) | clippy on the excluded crate, then `maturin develop` and `pytest` |
 | Cargo Deny (Rust 1.99.0) | `cargo +1.99.0 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
+| CodeQL | Rust, Python, and Actions analyses through the reusable CodeQL workflow and existing query configuration |
+| CI OK | Always evaluates the independent required-job inventory; every required job must succeed |
 
-**The OS matrix is conditional.** Anything targeting `main` runs on Ubuntu, macOS and
-Windows. Everything else — including PRs into `dev` — runs Ubuntu only. So a PR showing a
-single green `Test (ubuntu-latest)` has not been checked on the other two; that happens
-when the change reaches `main`. Platform-sensitive work (paths, line endings, timing)
-deserves a local check on your own OS before you rely on the matrix.
+**The Rust test OS matrix is conditional.** Pushes to `main` and PRs targeting `main`
+run on Ubuntu, macOS and Windows. Pushes to `dev` and PRs targeting `dev` run Ubuntu
+only. Retargeting a PR triggers a new run for its current base branch. The other jobs
+run on Ubuntu. A green dev run does not qualify the other operating systems.
+
+`CI OK` requires the reusable CodeQL analysis and upload jobs to complete successfully.
+GitHub separately evaluates alert severity in `Code scanning results / CodeQL`, which
+can fail after those jobs succeed. Delivery must inspect that separate check when
+present; `CI OK` does not prove there are no blocking alerts. See
+[GitHub's code scanning results documentation](https://docs.github.com/en/code-security/how-tos/manage-security-alerts/manage-code-scanning-alerts/triage-alerts-in-pull-requests).
+
+Missing, failed, cancelled, or skipped required jobs fail the workflow-job aggregate. CodeQL retains
+its standalone weekly and manual runs; the separate Audit workflow retains its daily
+and manual checks. Those scheduled checks are outside a PR's aggregate. This workflow
+defines the canonical workflow-job result; repository branch-protection configuration is separate.
 
 The Clippy job excludes the PyO3 crate and the Python job lints it instead, so the
 exclusion is about *where* the lint runs, not *whether* it runs. Note that
