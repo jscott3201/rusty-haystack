@@ -34,8 +34,10 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          rust-toolchain: "1.99.0"
+          maturin-version: "v1.15.0"
           target: ${{ matrix.target }}
-          args: --release --out dist -m rusty-haystack/Cargo.toml -i 3.11 3.12 3.13
+          args: --locked --release --out dist -m rusty-haystack/Cargo.toml -i 3.11 3.12 3.13
           manylinux: auto
           sccache: true
         env:
@@ -55,6 +57,8 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
+          rust-toolchain: "1.99.0"
+          maturin-version: "v1.15.0"
           command: sdist
           args: --out dist -m rusty-haystack/Cargo.toml
 

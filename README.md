@@ -42,14 +42,14 @@ See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
 
 ### Prerequisites
 
-- Rust 1.97 (edition 2024). Normal commands use the repository-pinned Rust 1.97.1;
-  CI also verifies exact current stable Rust 1.98.1.
+- Rust 1.99 (edition 2024). Normal commands use the repository-pinned Rust 1.99.0;
+  CI also verifies exact current stable Rust 1.99.0.
 - cargo
 
 ### Build
 
 ```sh
-cargo build --workspace --exclude rusty-haystack
+cargo build --locked --workspace --exclude rusty-haystack
 ```
 
 `--exclude rusty-haystack` skips the PyO3 extension module, which cannot be linked without
@@ -63,14 +63,14 @@ flag and how the crate is built and tested instead.
 to DST-aware UTC offsets:
 
 ```sh
-cargo build -p rusty-haystack-core --features chrono-tz
+cargo build --locked -p rusty-haystack-core --features chrono-tz
 ```
 
 ### Run Tests
 
 ```sh
-cargo test --workspace --exclude rusty-haystack
-# ~970 tests across all crates
+cargo test --locked --workspace --exclude rusty-haystack
+# Includes unit tests, integration tests and doctests
 ```
 
 ### Start a Demo Server

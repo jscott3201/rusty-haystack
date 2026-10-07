@@ -25,9 +25,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.0"
           components: rustfmt
-      - run: cargo +1.97.1 fmt --all --check
+      - run: cargo +1.99.0 fmt --all --check
 
   clippy:
     name: Clippy
@@ -36,11 +36,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +1.97.1 clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings
-      - run: cargo +1.97.1 clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
+      - run: cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings
+      - run: cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
 
   # Anything targeting main runs the full three-OS matrix. Everything else
   # (dev PRs, dev pushes) tests on ubuntu alone. Jobs run in parallel, so the
@@ -58,33 +58,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
-      - run: cargo +1.97.1 test --workspace --exclude rusty-haystack
-      - run: cargo +1.97.1 test -p rusty-haystack-core --features chrono-tz
+      - run: cargo +1.99.0 test --locked --workspace --exclude rusty-haystack
+      - run: cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz
 
   # Keep one exact current-stable lane separate from the conditional OS matrix:
   # compatibility coverage should not multiply platform jobs.
   current-stable:
-    name: Current stable (Rust 1.98.1)
+    name: Current stable (Rust 1.99.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.98.1"
+          toolchain: "1.99.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: current-stable-1.98.1
-      - run: cargo +1.98.1 clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings
-      - run: cargo +1.98.1 clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
-      - run: cargo +1.98.1 test --workspace --exclude rusty-haystack
-      - run: cargo +1.98.1 test -p rusty-haystack-core --features chrono-tz
+          key: current-stable-1.99.0
+      - run: cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings
+      - run: cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
+      - run: cargo +1.99.0 test --locked --workspace --exclude rusty-haystack
+      - run: cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz
 
-  # The PyO3 crate is excluded from `cargo test --workspace`, so nothing above
+  # The PyO3 crate is excluded from `cargo test --locked --workspace`, so nothing above
   # covers it. Without this job the Python suite rots unnoticed — 11 of its tests
   # spent four months failing against APIs removed in v0.8.0.
   python:
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -107,20 +107,20 @@ jobs:
       # without abi3, making every build interpreter-specific.
       - run: uv venv --python 3.12
       - run: uv pip install maturin==1.15.0 pytest
-      # The Clippy job above excludes this crate because `cargo clippy --workspace`
+      # The Clippy job above excludes this crate because `cargo clippy --locked --workspace`
       # needs an interpreter to resolve the pyo3 build script. This job has one, so
       # the exclusion is about where the lint runs, not whether it runs.
       - name: Clippy
         run: |
           source .venv/bin/activate
-          cargo +1.97.1 clippy -p rusty-haystack --all-targets -- -D warnings
+          cargo +1.99.0 clippy --locked -p rusty-haystack --all-targets -- -D warnings
       # Activate rather than `uv run`, and reach the crate with -m. `uv run`
       # inside rusty-haystack/ sees its pyproject.toml, builds a second .venv
       # for that project, and then cannot find the maturin installed here.
       - name: Build and install the extension
         run: |
           source .venv/bin/activate
-          maturin develop --release -m rusty-haystack/Cargo.toml
+          maturin develop --locked --release -m rusty-haystack/Cargo.toml
       - name: Run Python tests
         run: |
           source .venv/bin/activate
@@ -132,3 +132,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.99.0"
+          arguments: --locked --all-features
