@@ -7,9 +7,7 @@ use crate::error::ClientError;
 /// How the client authenticates to the Haystack HTTP API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthMode {
-    /// The first-party server's two-request SCRAM SHA-256 profile.
-    /// Client-first data is sent in HELLO using padded standard base64.
-    /// The published three-request Haystack/base64url flow is not yet supported.
+    /// Published three-request Haystack SCRAM SHA-256 with unpadded base64url data.
     #[default]
     Scram,
     /// HTTP Basic on every request (`Authorization: Basic …`).

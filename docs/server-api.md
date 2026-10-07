@@ -283,49 +283,25 @@ Watches associated with a WebSocket connection are automatically cleaned up when
 
 ## SCRAM Authentication
 
-The server implements SCRAM SHA-256 via the `/api/about` endpoint.
+The server implements the [published Haystack SCRAM SHA-256 exchange](https://project-haystack.org/doc/docHaystack/Auth) through three GETs to `/api/about`. Outer username/data fields use unpadded base64url; inner salt, proof, and verifier use standard padded Base64. Stored password hash encodings remain unchanged.
 
-### Phase 1: HELLO
+1. Send `Authorization: HELLO username=<base64url(username)>`. The 401 response contains `WWW-Authenticate: SCRAM hash=SHA-256, handshakeToken=<first-token>` and no data.
+2. Send `Authorization: SCRAM handshakeToken=<first-token>, data=<client-first>`. The client-first decoded username must match HELLO. The 401 response contains `WWW-Authenticate: SCRAM hash=SHA-256, handshakeToken=<next-token>, data=<server-first>`.
+3. Send `Authorization: SCRAM handshakeToken=<next-token>, data=<client-final>`. Successful proof verification and registered-user admission return 200 with `Authentication-Info: authToken=<bearer>, hash=SHA-256, data=<server-final>`. The client must verify the server signature before using the bearer.
 
-```
-GET /api/about
-Authorization: HELLO username=<base64(username)>
-```
+The server always issues a handshake token, rotates it after client-first, and requires the most recently issued value. Each token is consumed once; concurrent or replayed final proofs cannot issue another bearer. Subsequent requests use `Authorization: BEARER authToken=<bearer>`.
 
-Response: `401 Unauthorized`
-```
-WWW-Authenticate: SCRAM handshakeToken=<token> hash=SHA-256 data=<server_first_b64>
-```
-
-### Phase 2: SCRAM
-
-```
-GET /api/about
-Authorization: SCRAM handshakeToken=<token> data=<client_final_b64>
-```
-
-Response: `200 OK`
-```
-Authentication-Info: authToken=<token> data=<server_final_b64>
-```
-
-The client should verify the server signature from `data` to prevent MITM attacks.
-
-### Phase 3: Subsequent Requests
-
-```
-POST /api/read
-Authorization: BEARER authToken=<token>
-```
+Malformed authentication, wrong-stage messages, expired handshakes, wrong identities and invalid credentials return 403 without echoing submitted fields. Missing authentication prompts with 401. Invalid or expired bearer tokens return 401. Admission capacity exhaustion returns 503.
 
 ### Security Details
 
-- PBKDF2 with 100,000 iterations
-- Constant-time credential comparison (prevents timing attacks)
-- Fake SCRAM challenge for unknown users (prevents username enumeration)
-- Handshake timeout: 60 seconds
-- Token lifetime: 3,600 seconds (configurable)
-- Periodic auth token cleanup
+- New stored credentials use PBKDF2-HMAC-SHA-256 with 100,000 iterations; loaded credentials require valid key lengths, nonempty bounded salt, and 1–1,000,000 iterations.
+- Proofs and server signatures use constant-time equality. Username normalization is not introduced.
+- Unknown usernames receive secret-derived plausible challenges without a password derivation on the request thread. Even a correct decoy proof cannot issue a bearer. This reduces straightforward enumeration; it does not claim complete timing or identity-provider qualification.
+- Default capacity is 1,024 in-flight handshakes and 4,096 active bearer tokens, configurable with `AuthLimits`. Admission, cleanup, and transitions share one lock.
+- The 60-second handshake lifetime starts at HELLO and is preserved through rotation. Bearers expire after 3,600 seconds by default, configurable with `with_token_ttl`.
+- Every auth-state operation sweeps expired entries before admission or lookup, including when abandoned clients never return. State stays bounded even without a background timer. These controls do not replace deployment rate limits.
+- Auth headers are limited to 8 KiB, decoded data to 4 KiB, usernames and combined nonces to 1 KiB. Malformed encodings, duplicate fields, nonce mismatches, and incorrect proof lengths are rejected.
 
 ## Permission Model
 

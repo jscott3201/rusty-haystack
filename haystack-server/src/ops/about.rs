@@ -40,67 +40,64 @@ pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Res
         return respond_about_grid(accept);
     }
 
-    let auth_header = headers.get("Authorization").and_then(|v| v.to_str().ok());
-
-    match auth_header {
-        None => {
-            // No auth header: return 401 prompting for HELLO
-            (
-                StatusCode::UNAUTHORIZED,
-                [("WWW-Authenticate", "HELLO")],
-                "Authentication required",
-            )
-                .into_response()
-        }
-        Some(header) => match parse_auth_header(header) {
-            Ok(AuthHeader::Hello { username, data }) => {
-                match state.auth.handle_hello(&username, data.as_deref()) {
-                    Ok(www_auth) => (
-                        StatusCode::UNAUTHORIZED,
-                        [("WWW-Authenticate", www_auth.as_str())],
-                        "",
-                    )
-                        .into_response(),
-                    Err(e) => {
-                        log::warn!("HELLO failed for {username}: {e}");
-                        let grid = error_grid(&format!("authentication failed: {e}"));
-                        respond_error_grid(&grid, accept, StatusCode::FORBIDDEN)
-                    }
-                }
-            }
-            Ok(AuthHeader::Scram {
-                handshake_token,
-                data,
-            }) => match state.auth.handle_scram(&handshake_token, &data) {
-                Ok((_auth_token, auth_info)) => (
-                    StatusCode::OK,
-                    [("Authentication-Info", auth_info.as_str())],
-                    "",
-                )
-                    .into_response(),
-                Err(e) => {
-                    log::warn!("SCRAM verification failed: {e}");
-                    let grid = error_grid("authentication failed");
-                    respond_error_grid(&grid, accept, StatusCode::FORBIDDEN)
-                }
-            },
-            Ok(AuthHeader::Bearer { auth_token }) => match state.auth.validate_token(&auth_token) {
-                Some(_user) => respond_about_grid(accept),
-                None => {
-                    let grid = error_grid("invalid or expired auth token");
-                    respond_error_grid(&grid, accept, StatusCode::UNAUTHORIZED)
-                }
-            },
-            Err(e) => {
-                log::warn!("Invalid Authorization header: {e}");
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid Authorization header: {e}"),
-                )
-                    .into_response()
-            }
-        },
+    if headers.get_all("Authorization").iter().count() > 1 {
+        return auth_failure(crate::auth::AuthFailure::Rejected, accept);
     }
+    let Some(value) = headers.get("Authorization") else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("WWW-Authenticate", "HELLO")],
+            "Authentication required",
+        )
+            .into_response();
+    };
+    let parsed = value.to_str().ok().and_then(|v| parse_auth_header(v).ok());
+    match parsed {
+        Some(AuthHeader::Hello { username }) => match state.auth.handle_hello(&username) {
+            Ok(challenge) => (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", challenge)],
+                "",
+            )
+                .into_response(),
+            Err(error) => auth_failure(error, accept),
+        },
+        Some(AuthHeader::Scram {
+            handshake_token,
+            data,
+        }) => match state.auth.handle_scram(handshake_token.as_deref(), &data) {
+            Ok(crate::auth::ScramResponse::Challenge(challenge)) => (
+                StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", challenge)],
+                "",
+            )
+                .into_response(),
+            Ok(crate::auth::ScramResponse::Authenticated(info)) => {
+                (StatusCode::OK, [("Authentication-Info", info)], "").into_response()
+            }
+            Err(error) => auth_failure(error, accept),
+        },
+        Some(AuthHeader::Bearer { auth_token }) => match state.auth.validate_token(&auth_token) {
+            Some(_) => respond_about_grid(accept),
+            None => respond_error_grid(
+                &error_grid("invalid or expired auth token"),
+                accept,
+                StatusCode::UNAUTHORIZED,
+            ),
+        },
+        None => auth_failure(crate::auth::AuthFailure::Rejected, accept),
+    }
+}
+
+fn auth_failure(failure: crate::auth::AuthFailure, accept: &str) -> Response {
+    let (status, message) = match failure {
+        crate::auth::AuthFailure::Rejected => (StatusCode::FORBIDDEN, "authentication failed"),
+        crate::auth::AuthFailure::Capacity => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authentication capacity exceeded",
+        ),
+    };
+    respond_error_grid(&error_grid(message), accept, status)
 }
 
 /// POST /api/close — revoke the bearer token (logout).

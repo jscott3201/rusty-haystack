@@ -64,19 +64,12 @@ with the server. SCRAM construction completes authentication before returning.
 API URLs must use HTTP or HTTPS and cannot contain userinfo, a query, or a fragment.
 Operation names are single alphanumeric/underscore/hyphen segments.
 
-The currently qualified SCRAM profile is the one implemented by this repository's
-server: client-first data travels in `HELLO`, the server returns server-first data
-and a handshake token immediately, and the next request supplies the proof.
-Outer username/data fields use padded standard base64. This differs from the
-[published Haystack authentication exchange](https://project-haystack.org/doc/docHaystack/Auth),
-which separates HELLO discovery from client-first, uses unpadded base64url and
-allows an omitted handshake token. That three-request profile is not supported
-by this client yet, so these tests do not establish interoperability with arbitrary
-Haystack servers. Challenge `hash` is required and must be SHA-256. A final `hash`
-may be omitted for this first-party profile; when present it must still be SHA-256.
+The client follows the [published Haystack authentication exchange](https://project-haystack.org/doc/docHaystack/Auth): `HELLO` sends only the username, the second GET sends SCRAM client-first data, and the third GET sends the proof. Both intermediate responses must be 401; the final response must be 200 and include a verified server signature, bearer token, and `hash=SHA-256`. Outer username/data fields use unpadded base64url. Salt, proof, and verifier inside SCRAM messages use standard padded Base64.
+
+An optional `handshakeToken` belongs to the response that contains it. The client echoes only the immediately preceding response's value, including when a server introduces, removes, or rotates it. Received SCRAM transcript bytes are preserved exactly. SHA-512, PLAINTEXT, and the former two-request wire profile are unsupported.
 
 The default per-request `timeout` and total SCRAM `auth_timeout` are each 30
-seconds. The total authentication budget covers both requests, waiting for a
+seconds. The total authentication budget covers all three requests, waiting for a
 crypto worker, and proof derivation. The client accepts only SHA-256, rejects
 malformed/duplicate/empty fields, limits authentication headers to 8 KiB and 16
 values, limits decoded SCRAM data to 4 KiB, and caps PBKDF2 at 1,000,000 iterations.
