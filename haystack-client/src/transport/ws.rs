@@ -1,368 +1,522 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+//! Bounded, text-only watch operations over the server's JSON v3 protocol.
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex as StateMutex};
 use std::time::Duration;
 
-use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{Mutex, oneshot};
-use tokio_tungstenite::{connect_async, tungstenite};
+use haystack_core::{
+    codecs::json::v3,
+    data::{HCol, HDict, HGrid},
+    kinds::Kind,
+};
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{self, client::IntoClientRequest},
+};
+use tokio_util::sync::CancellationToken;
 
-use crate::error::ClientError;
-use crate::transport::Transport;
-use haystack_core::codecs::codec_for;
-use haystack_core::data::HGrid;
-use haystack_core::kinds::Kind;
+use crate::{error::ClientError, transport::Transport};
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// Default timeout for a single WS request-response round-trip.
+type Writer = Arc<Mutex<Option<futures_util::stream::SplitSink<WsStream, tungstenite::Message>>>>;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Maximum number of concurrent in-flight requests.
 const MAX_PENDING_REQUESTS: usize = 1024;
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const PUSH_CAPACITY: usize = 64;
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// WebSocket transport for communicating with a Haystack server.
-///
-/// Uses a JSON envelope with Zinc-encoded grid bodies:
-/// - Request:  `{"id": "<counter>", "op": "<op_name>", "body": "<zinc_grid>"}`
-/// - Response: `{"id": "<counter>", "body": "<zinc_grid>"}`
-///
-/// Supports concurrent in-flight requests by matching response IDs to pending
-/// oneshot channels via a background reader task.
-pub struct WsTransport {
-    writer: Mutex<futures_util::stream::SplitSink<WsStream, tungstenite::Message>>,
-    pending: Arc<DashMap<u64, oneshot::Sender<Result<HGrid, ClientError>>>>,
-    next_id: AtomicU64,
-    /// Per-request timeout duration.
-    request_timeout: Duration,
-    /// Handle to the background reader task (kept alive for the transport's lifetime).
-    _reader_handle: tokio::task::JoinHandle<()>,
-    /// Cancellation token for graceful shutdown of the reader task.
-    shutdown: tokio_util::sync::CancellationToken,
+/// An unsolicited change notification, separate from correlated call responses.
+#[derive(Debug)]
+pub struct WatchPush {
+    pub watch_id: String,
+    pub grid: HGrid,
 }
 
-impl WsTransport {
-    /// Connect to a Haystack server via WebSocket.
-    ///
-    /// `url` should be a `ws://` or `wss://` URL to the server's WebSocket endpoint.
-    /// `auth_token` is the bearer token obtained from SCRAM authentication.
-    pub async fn connect(url: &str, auth_token: &str) -> Result<Self, ClientError> {
-        let request = tungstenite::http::Request::builder()
-            .uri(url)
-            .header("Authorization", format!("BEARER authToken={}", auth_token))
-            .header(
-                "Sec-WebSocket-Key",
-                tungstenite::handshake::client::generate_key(),
-            )
-            .header("Sec-WebSocket-Version", "13")
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Host", extract_host(url).unwrap_or_default())
-            .body(())
-            .map_err(|e| ClientError::Transport(e.to_string()))?;
-
-        let (ws_stream, _response) =
-            tokio::time::timeout(Duration::from_secs(15), connect_async(request))
-                .await
-                .map_err(|_| ClientError::Transport("WebSocket connect timed out".to_string()))?
-                .map_err(|e| ClientError::Transport(format!("WebSocket connect failed: {}", e)))?;
-
-        let (writer, reader) = ws_stream.split();
-        let pending: Arc<DashMap<u64, oneshot::Sender<Result<HGrid, ClientError>>>> =
-            Arc::new(DashMap::new());
-
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let reader_handle = spawn_reader_task(reader, Arc::clone(&pending), shutdown.child_token());
-
-        Ok(Self {
-            writer: Mutex::new(writer),
-            pending,
-            next_id: AtomicU64::new(1),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            _reader_handle: reader_handle,
-            shutdown,
-        })
+#[derive(Clone, Copy)]
+enum Terminal {
+    Closed,
+    Protocol,
+    Io,
+    Overload,
+}
+impl Terminal {
+    fn error(self) -> ClientError {
+        match self {
+            Self::Closed => ClientError::ConnectionClosed,
+            Self::Protocol => ClientError::Transport("invalid WebSocket message".into()),
+            Self::Io => {
+                ClientError::Transport("WebSocket I/O failed (delivery may have occurred)".into())
+            }
+            Self::Overload => {
+                ClientError::Transport("WebSocket push queue capacity exceeded".into())
+            }
+        }
     }
+}
+#[derive(Clone)]
+enum Expected {
+    Subscribe,
+    Poll(String),
+    Unsubscribe(Option<String>),
+}
+struct Pending {
+    sender: oneshot::Sender<Result<HGrid, ClientError>>,
+    expected: Expected,
+}
+struct State {
+    terminal: Option<Terminal>,
+    next_id: u64,
+    pending: HashMap<String, Pending>,
+}
+struct Shared {
+    state: StateMutex<State>,
+    stopped: CancellationToken,
+}
+impl Shared {
+    fn terminate(&self, reason: Terminal) {
+        let pending = {
+            let mut state = self.state.lock().unwrap();
+            if state.terminal.is_some() {
+                return;
+            }
+            state.terminal = Some(reason);
+            std::mem::take(&mut state.pending)
+        };
+        self.stopped.cancel();
+        for (_, pending) in pending {
+            let _ = pending.sender.send(Err(reason.error()));
+        }
+    }
+    fn error(&self) -> ClientError {
+        self.state
+            .lock()
+            .unwrap()
+            .terminal
+            .unwrap_or(Terminal::Closed)
+            .error()
+    }
+    fn admit(
+        self: &Arc<Self>,
+        expected: Expected,
+    ) -> Result<(PendingGuard, oneshot::Receiver<Result<HGrid, ClientError>>), ClientError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(reason) = state.terminal {
+            return Err(reason.error());
+        }
+        if state.pending.len() >= MAX_PENDING_REQUESTS {
+            return Err(ClientError::TooManyRequests);
+        }
+        let next = state
+            .next_id
+            .checked_add(1)
+            .ok_or(ClientError::TooManyRequests)?;
+        let id = state.next_id.to_string();
+        state.next_id = next;
+        let (sender, receiver) = oneshot::channel();
+        state
+            .pending
+            .insert(id.clone(), Pending { sender, expected });
+        Ok((
+            PendingGuard {
+                shared: self.clone(),
+                id,
+                sending: false,
+            },
+            receiver,
+        ))
+    }
+}
+/// Removing a waiting call is safe; cancelling a sink write has unknown delivery.
+struct PendingGuard {
+    shared: Arc<Shared>,
+    id: String,
+    sending: bool,
+}
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.shared.state.lock().unwrap().pending.remove(&self.id);
+        if self.sending {
+            self.shared.terminate(Terminal::Io);
+        }
+    }
+}
+struct ReaderExit(Arc<Shared>);
+impl Drop for ReaderExit {
+    fn drop(&mut self) {
+        self.0.terminate(Terminal::Closed);
+    }
+}
 
-    /// Connect with a custom request timeout.
+/// Text-only `watchSub`, `watchPoll`, and `watchUnsub` transport.
+///
+/// Requests carry a string `reqId`; response rows use Haystack JSON v3 values.
+/// Frames and reassembled messages are limited to 1 MiB. Binary/compressed
+/// application messages and generic Haystack operations are unsupported.
+pub struct WsTransport {
+    writer: Writer,
+    shared: Arc<Shared>,
+    request_timeout: Duration,
+    reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pushes: Mutex<mpsc::Receiver<WatchPush>>,
+}
+impl WsTransport {
+    /// Connect using a bearer token obtained through HTTP authentication.
+    pub async fn connect(url: &str, auth_token: &str) -> Result<Self, ClientError> {
+        Self::connect_with_timeout(url, auth_token, DEFAULT_REQUEST_TIMEOUT).await
+    }
+    /// Connect with a whole-call deadline covering admission, writing, and response.
     pub async fn connect_with_timeout(
         url: &str,
         auth_token: &str,
         timeout: Duration,
     ) -> Result<Self, ClientError> {
-        let mut transport = Self::connect(url, auth_token).await?;
-        transport.request_timeout = timeout;
-        Ok(transport)
-    }
-}
-
-/// Spawn a background task that reads WS messages and dispatches responses
-/// to the appropriate pending oneshot channel by matching the response `id`.
-fn spawn_reader_task(
-    mut reader: futures_util::stream::SplitStream<WsStream>,
-    pending: Arc<DashMap<u64, oneshot::Sender<Result<HGrid, ClientError>>>>,
-    shutdown: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let codec = codec_for("text/zinc");
-
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    drain_pending(&pending, ClientError::ConnectionClosed);
-                    break;
-                }
-                msg = reader.next() => {
-                    let Some(msg) = msg else { break };
-                    match msg {
-                        Ok(tungstenite::Message::Text(text)) => {
-                            handle_text_message(&text, codec, &pending);
-                        }
-                        Ok(tungstenite::Message::Binary(data)) => {
-                            // Compressed message: deflate-compressed JSON envelope.
-                            if let Ok(decompressed) = decompress_deflate(&data) {
-                                handle_text_message(&decompressed, codec, &pending);
-                            }
-                        }
-                        Ok(tungstenite::Message::Close(_)) => {
-                            drain_pending(&pending, ClientError::ConnectionClosed);
-                            break;
-                        }
-                        Err(e) => {
-                            drain_pending(&pending, ClientError::Transport(e.to_string()));
-                            break;
-                        }
-                        _ => continue, // ping/pong handled by tungstenite
-                    }
-                }
-            }
-        }
-    })
-}
-
-/// Process a text (or decompressed) JSON envelope and dispatch to the pending channel.
-fn handle_text_message(
-    text: &str,
-    codec: Option<&'static dyn haystack_core::codecs::Codec>,
-    pending: &DashMap<u64, oneshot::Sender<Result<HGrid, ClientError>>>,
-) {
-    let resp: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
-    let resp_id: u64 = match resp.get("id").and_then(|v| {
-        v.as_str()
-            .and_then(|s| s.parse().ok())
-            .or_else(|| v.as_u64())
-    }) {
-        Some(id) => id,
-        None => return,
-    };
-
-    let result = match (codec, resp.get("body").and_then(|v| v.as_str())) {
-        (Some(c), Some(body)) => match c.decode_grid(body) {
-            Ok(grid) => {
-                if grid.is_err() {
-                    let dis = grid
-                        .meta
-                        .get("dis")
-                        .and_then(|k| {
-                            if let Kind::Str(s) = k {
-                                Some(s.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or("unknown server error");
-                    Err(ClientError::ServerError(dis.to_string()))
-                } else {
-                    Ok(grid)
-                }
-            }
-            Err(e) => Err(ClientError::Codec(e.to_string())),
-        },
-        _ => Err(ClientError::Codec(
-            "response missing 'body' field".to_string(),
-        )),
-    };
-
-    if let Some((_, sender)) = pending.remove(&resp_id) {
-        let _ = sender.send(result);
-    }
-}
-
-/// Notify all pending requests with the given error and clear the map.
-fn drain_pending(
-    pending: &DashMap<u64, oneshot::Sender<Result<HGrid, ClientError>>>,
-    error: ClientError,
-) {
-    let keys: Vec<u64> = pending.iter().map(|r| *r.key()).collect();
-    for key in keys {
-        if let Some((_, sender)) = pending.remove(&key) {
-            let _ = sender.send(Err(ClientError::Transport(error.to_string())));
-        }
-    }
-}
-
-/// Compress data with deflate (flate2).
-fn compress_deflate(data: &[u8]) -> Vec<u8> {
-    use flate2::Compression;
-    use flate2::write::DeflateEncoder;
-    use std::io::Write;
-
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
-    let _ = encoder.write_all(data);
-    encoder.finish().unwrap_or_else(|_| data.to_vec())
-}
-
-/// Maximum decompressed payload size (10 MB) to prevent zip bomb attacks.
-const MAX_DECOMPRESSED_SIZE: u64 = 10 * 1024 * 1024;
-
-/// Decompress deflate-compressed data.
-fn decompress_deflate(data: &[u8]) -> Result<String, std::io::Error> {
-    use flate2::read::DeflateDecoder;
-    use std::io::Read;
-
-    let decoder = DeflateDecoder::new(data);
-    let mut limited = decoder.take(MAX_DECOMPRESSED_SIZE);
-    let mut output = String::new();
-    limited.read_to_string(&mut output)?;
-    Ok(output)
-}
-
-/// Minimum payload size (bytes) to consider compressing with deflate.
-const COMPRESSION_THRESHOLD: usize = 512;
-
-/// Extract the host (with optional port) from a URL string.
-fn extract_host(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    let host = parsed.host_str()?.to_string();
-    match parsed.port() {
-        Some(port) => Some(format!("{}:{}", host, port)),
-        None => Some(host),
-    }
-}
-
-impl Transport for WsTransport {
-    async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
-        // Bounded pending map check.
-        if self.pending.len() >= MAX_PENDING_REQUESTS {
-            return Err(ClientError::TooManyRequests);
-        }
-
-        let codec = codec_for("text/zinc")
-            .ok_or_else(|| ClientError::Codec("zinc codec not available".to_string()))?;
-
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-        let body = codec
-            .encode_grid(req)
-            .map_err(|e| ClientError::Codec(e.to_string()))?;
-
-        let envelope = serde_json::json!({
-            "id": id.to_string(),
-            "op": op,
-            "body": body,
+        crate::ensure_crypto_provider();
+        let mut request = url
+            .into_client_request()
+            .map_err(|_| ClientError::Connection("invalid WebSocket URL".into()))?;
+        request.headers_mut().insert(
+            "Authorization",
+            format!("BEARER authToken={auth_token}")
+                .parse()
+                .map_err(|_| ClientError::Connection("invalid WebSocket credentials".into()))?,
+        );
+        let config = tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE_SIZE))
+            .max_frame_size(Some(MAX_MESSAGE_SIZE))
+            .max_write_buffer_size(MAX_MESSAGE_SIZE * 2);
+        let (stream, _) = tokio::time::timeout(
+            Duration::from_secs(15),
+            connect_async_with_config(request, Some(config), false),
+        )
+        .await
+        .map_err(|_| ClientError::Connection("WebSocket connect timed out".into()))?
+        .map_err(|_| ClientError::Connection("WebSocket connect failed".into()))?;
+        let (writer, reader) = stream.split();
+        let writer = Arc::new(Mutex::new(Some(writer)));
+        let shared = Arc::new(Shared {
+            state: StateMutex::new(State {
+                terminal: None,
+                next_id: 1,
+                pending: HashMap::new(),
+            }),
+            stopped: CancellationToken::new(),
         });
-
-        let msg_text =
-            serde_json::to_string(&envelope).map_err(|e| ClientError::Codec(e.to_string()))?;
-
-        // Compress large payloads and send as binary frame.
-        let ws_msg = if msg_text.len() >= COMPRESSION_THRESHOLD {
-            let compressed = compress_deflate(msg_text.as_bytes());
-            if compressed.len() < msg_text.len() {
-                tungstenite::Message::Binary(compressed.into())
-            } else {
-                tungstenite::Message::Text(msg_text.into())
-            }
-        } else {
-            tungstenite::Message::Text(msg_text.into())
-        };
-
-        // Register a oneshot channel for this request.
-        let (tx, rx) = oneshot::channel();
-        self.pending.insert(id, tx);
-
-        // Send the request.
-        {
-            let mut writer = self.writer.lock().await;
-            if let Err(e) = writer.send(ws_msg).await {
-                self.pending.remove(&id);
-                return Err(ClientError::Transport(e.to_string()));
-            }
-        }
-
-        // Await the response with a timeout.
-        let timeout = self.request_timeout;
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(ClientError::Transport(
-                "response channel closed unexpectedly".to_string(),
-            )),
-            Err(_) => {
-                self.pending.remove(&id);
-                Err(ClientError::Timeout(timeout))
-            }
+        let (push_tx, push_rx) = mpsc::channel(PUSH_CAPACITY);
+        let task = spawn_reader(reader, writer.clone(), shared.clone(), push_tx);
+        Ok(Self {
+            writer,
+            shared,
+            request_timeout: timeout,
+            reader: Mutex::new(Some(task)),
+            pushes: Mutex::new(push_rx),
+        })
+    }
+    /// Whether this connection has entered its permanent terminal state.
+    pub fn is_closed(&self) -> bool {
+        self.shared.stopped.is_cancelled()
+    }
+    /// Wait for the next unsolicited push. Overflow terminates the connection.
+    pub async fn next_push(&self) -> Result<WatchPush, ClientError> {
+        tokio::select! {
+            biased;
+            _ = self.shared.stopped.cancelled() => Err(self.shared.error()),
+            push = async { self.pushes.lock().await.recv().await } => push.ok_or_else(|| self.shared.error()),
         }
     }
+    async fn call_until(
+        &self,
+        op: &str,
+        req: &HGrid,
+        deadline: tokio::time::Instant,
+    ) -> Result<HGrid, ClientError> {
+        check_deadline(deadline, self.request_timeout)?;
+        let (mut envelope, expected) = encode_request(op, req)?;
+        check_deadline(deadline, self.request_timeout)?;
+        let (mut guard, receiver) = self.shared.admit(expected)?;
+        envelope["reqId"] = Value::String(guard.id.clone());
+        let text = envelope.to_string();
+        if text.len() > MAX_MESSAGE_SIZE {
+            return Err(invalid_request());
+        }
+        let work = async {
+            let mut writer = self.writer.lock().await;
+            if self.is_closed() {
+                return Err(self.shared.error());
+            }
+            // timeout_at polls its inner future first. A ready writer must not
+            // turn an expired call into a server-side effect.
+            check_deadline(deadline, self.request_timeout)?;
+            let sink = writer.as_mut().ok_or(ClientError::ConnectionClosed)?;
+            guard.sending = true;
+            if sink
+                .send(tungstenite::Message::Text(text.into()))
+                .await
+                .is_err()
+            {
+                self.shared.terminate(Terminal::Io);
+                return Err(self.shared.error());
+            }
+            guard.sending = false;
+            drop(writer);
+            receiver.await.unwrap_or_else(|_| Err(self.shared.error()))
+        };
+        tokio::select! {
+            biased;
+            _ = self.shared.stopped.cancelled() => Err(self.shared.error()),
+            result = tokio::time::timeout_at(deadline, work) => result.unwrap_or(Err(ClientError::Timeout(self.request_timeout))),
+        }
+    }
+}
 
-    async fn close(&self) -> Result<(), ClientError> {
-        self.shutdown.cancel();
-        let mut writer = self.writer.lock().await;
-        writer
-            .send(tungstenite::Message::Close(None))
-            .await
-            .map_err(|e| ClientError::Transport(e.to_string()))?;
+fn request_deadline(timeout: Duration) -> Result<tokio::time::Instant, ClientError> {
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| {
+            ClientError::Connection("WebSocket request timeout exceeds the clock range".into())
+        })
+}
+fn check_deadline(deadline: tokio::time::Instant, timeout: Duration) -> Result<(), ClientError> {
+    if tokio::time::Instant::now() >= deadline {
+        Err(ClientError::Timeout(timeout))
+    } else {
         Ok(())
     }
 }
 
-impl Drop for WsTransport {
-    fn drop(&mut self) {
-        self.shutdown.cancel();
+fn invalid_request() -> ClientError {
+    ClientError::Transport("unsupported WebSocket operation or arguments".into())
+}
+fn valid_watch_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128
+}
+fn encode_request(op: &str, grid: &HGrid) -> Result<(Value, Expected), ClientError> {
+    let watch = match op {
+        "watchSub" if grid.meta.is_empty() => None,
+        "watchPoll" | "watchUnsub" if grid.meta.len() == 1 => match grid.meta.get("watchId") {
+            Some(Kind::Str(id)) if valid_watch_id(id) => Some(id.clone()),
+            _ => return Err(invalid_request()),
+        },
+        _ => return Err(invalid_request()),
+    };
+    if op == "watchPoll" {
+        if !grid.rows.is_empty() || !grid.cols.is_empty() {
+            return Err(invalid_request());
+        }
+        let watch = watch.unwrap();
+        return Ok((json!({"op":op,"watchId":watch}), Expected::Poll(watch)));
+    }
+    if grid.rows.len() > 1000
+        || (op == "watchSub" && grid.rows.is_empty())
+        || grid.cols.len() != 1
+        || grid.cols[0].name != "id"
+        || !grid.cols[0].meta.is_empty()
+    {
+        return Err(invalid_request());
+    }
+    let mut ids = Vec::with_capacity(grid.rows.len());
+    for row in &grid.rows {
+        if row.len() != 1 {
+            return Err(invalid_request());
+        }
+        let Some(Kind::Ref(id)) = row.get("id") else {
+            return Err(invalid_request());
+        };
+        let normalized = id.val.strip_prefix('@').unwrap_or(&id.val);
+        if normalized.is_empty() || normalized.len() > 1024 {
+            return Err(invalid_request());
+        }
+        // The server owns the single optional-prefix normalization. Preserve
+        // spelling here so @@point selects @point just as a raw request does.
+        ids.push(id.val.as_str());
+    }
+    if op == "watchSub" {
+        Ok((json!({"op":op,"ids":ids}), Expected::Subscribe))
+    } else {
+        Ok((
+            json!({"op":op,"watchId":watch,"ids":ids}),
+            Expected::Unsubscribe(if ids.is_empty() { None } else { watch }),
+        ))
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reconnecting transport wrapper
-// ---------------------------------------------------------------------------
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Envelope {
+    #[serde(rename = "reqId")]
+    req_id: Option<String>,
+    #[serde(rename = "watchId")]
+    watch_id: Option<String>,
+    rows: Option<Vec<Value>>,
+    error: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+fn decode_rows(rows: Vec<Value>, watch: Option<&str>) -> Result<HGrid, Terminal> {
+    let mut cols = BTreeSet::new();
+    let mut decoded = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Value::Object(tags) = row else {
+            return Err(Terminal::Protocol);
+        };
+        let mut dict = HDict::new();
+        for (name, value) in tags {
+            cols.insert(name.clone());
+            dict.set(
+                name,
+                v3::decode_kind(&value).map_err(|_| Terminal::Protocol)?,
+            );
+        }
+        decoded.push(dict);
+    }
+    let mut meta = HDict::new();
+    if let Some(watch) = watch {
+        meta.set("watchId", Kind::Str(watch.into()));
+    }
+    Ok(HGrid::from_parts(
+        meta,
+        cols.into_iter().map(HCol::new).collect(),
+        decoded,
+    ))
+}
+fn dispatch(text: &str, shared: &Shared, pushes: &mpsc::Sender<WatchPush>) -> Result<(), Terminal> {
+    let message: Envelope = serde_json::from_str(text).map_err(|_| Terminal::Protocol)?;
+    if message
+        .watch_id
+        .as_deref()
+        .is_some_and(|id| !valid_watch_id(id))
+    {
+        return Err(Terminal::Protocol);
+    }
+    if let Some(kind) = message.kind {
+        if kind != "push" || message.req_id.is_some() || message.error.is_some() {
+            return Err(Terminal::Protocol);
+        }
+        let watch_id = message.watch_id.ok_or(Terminal::Protocol)?;
+        let grid = decode_rows(message.rows.ok_or(Terminal::Protocol)?, Some(&watch_id))?;
+        return pushes
+            .try_send(WatchPush { watch_id, grid })
+            .map_err(|_| Terminal::Overload);
+    }
+    let id = message
+        .req_id
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .ok_or(Terminal::Protocol)?;
+    let result = if message.error.is_some() {
+        if message.rows.is_some() || message.watch_id.is_some() {
+            return Err(Terminal::Protocol);
+        }
+        Err(ClientError::ServerError(
+            "WebSocket watch operation rejected".into(),
+        ))
+    } else {
+        Ok(decode_rows(
+            message.rows.ok_or(Terminal::Protocol)?,
+            message.watch_id.as_deref(),
+        )?)
+    };
+    let mut state = shared.state.lock().unwrap();
+    // Valid late, duplicate, or unknown IDs cannot complete another request.
+    let Some(pending) = state.pending.get(&id) else {
+        return Ok(());
+    };
+    if let Ok(grid) = &result {
+        let valid = match &pending.expected {
+            Expected::Subscribe => message.watch_id.is_some(),
+            Expected::Poll(watch) => message.watch_id.as_ref() == Some(watch),
+            Expected::Unsubscribe(watch) => message.watch_id == *watch && grid.rows.is_empty(),
+        };
+        if !valid {
+            return Err(Terminal::Protocol);
+        }
+    }
+    let pending = state.pending.remove(&id).unwrap();
+    drop(state);
+    let _ = pending.sender.send(result);
+    Ok(())
+}
+fn spawn_reader(
+    mut reader: futures_util::stream::SplitStream<WsStream>,
+    writer: Writer,
+    shared: Arc<Shared>,
+    pushes: mpsc::Sender<WatchPush>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let _exit = ReaderExit(shared.clone());
+        let reason = loop {
+            tokio::select! {
+                biased;
+                _ = shared.stopped.cancelled() => break Terminal::Closed,
+                message = reader.next() => match message {
+                    Some(Ok(tungstenite::Message::Text(text))) => if let Err(reason) = dispatch(&text, &shared, &pushes) { break reason; },
+                    Some(Ok(tungstenite::Message::Ping(_))) => {
+                        // Tungstenite queues the mandatory pong while reading.
+                        let flush = async { let mut writer = writer.lock().await; match writer.as_mut() { Some(sink) => sink.flush().await.is_ok(), None => false } };
+                        tokio::select! { _ = shared.stopped.cancelled() => break Terminal::Closed, result = tokio::time::timeout(CLOSE_TIMEOUT, flush) => if !matches!(result, Ok(true)) { break Terminal::Io; } }
+                    },
+                    Some(Ok(tungstenite::Message::Pong(_))) => {},
+                    Some(Ok(tungstenite::Message::Close(_))) | None => break Terminal::Closed,
+                    Some(Ok(_)) => break Terminal::Protocol,
+                    Some(Err(_)) => break Terminal::Io,
+                }
+            }
+        };
+        shared.terminate(reason);
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT / 2, async {
+            if let Some(mut sink) = writer.lock().await.take() {
+                let _ = sink.send(tungstenite::Message::Close(None)).await;
+            }
+        })
+        .await;
+    })
+}
+impl Transport for WsTransport {
+    async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
+        self.call_until(op, req, request_deadline(self.request_timeout)?)
+            .await
+    }
+    async fn close(&self) -> Result<(), ClientError> {
+        self.shared.terminate(Terminal::Closed);
+        // Keep the handle stored while awaiting: cancellation of close leaves it joinable.
+        let mut reader = self.reader.lock().await;
+        if let Some(task) = reader.as_mut()
+            && tokio::time::timeout(CLOSE_TIMEOUT, &mut *task)
+                .await
+                .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+        reader.take();
+        self.writer.lock().await.take();
+        Ok(())
+    }
+}
+impl Drop for WsTransport {
+    fn drop(&mut self) {
+        self.shared.terminate(Terminal::Closed);
+        if let Some(task) = self.reader.get_mut().take() {
+            task.abort();
+        }
+    }
+}
 
-/// Initial backoff delay before the first reconnection attempt.
-const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
-/// Maximum backoff delay between reconnection attempts.
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// Maximum number of consecutive reconnection attempts before giving up.
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// A WebSocket transport that automatically reconnects on connection loss.
-///
-/// Uses exponential backoff with jitter between reconnection attempts.
-/// Requests that arrive during reconnection are queued and retried once the
-/// connection is re-established.
+/// Reconnects only before a new call when a previous connection is terminal.
+/// A dispatched call is never replayed. Explicit close permanently disables reconnect.
 pub struct ReconnectingWsTransport {
     url: String,
     auth_token: zeroize::Zeroizing<String>,
     request_timeout: Duration,
     inner: Mutex<Option<Arc<WsTransport>>>,
+    stopped: CancellationToken,
+    admission: Semaphore,
 }
-
 impl ReconnectingWsTransport {
-    /// Create a new reconnecting transport.  An initial connection is
-    /// established immediately; use [`Self::connect`] for the async builder.
     pub async fn connect(url: &str, auth_token: &str) -> Result<Self, ClientError> {
-        let transport = WsTransport::connect(url, auth_token).await?;
-        Ok(Self {
-            url: url.to_string(),
-            auth_token: zeroize::Zeroizing::new(auth_token.to_string()),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            inner: Mutex::new(Some(Arc::new(transport))),
-        })
+        Self::connect_with_timeout(url, auth_token, DEFAULT_REQUEST_TIMEOUT).await
     }
-
-    /// Create a new reconnecting transport with a custom request timeout.
     pub async fn connect_with_timeout(
         url: &str,
         auth_token: &str,
@@ -370,106 +524,236 @@ impl ReconnectingWsTransport {
     ) -> Result<Self, ClientError> {
         let transport = WsTransport::connect_with_timeout(url, auth_token, timeout).await?;
         Ok(Self {
-            url: url.to_string(),
-            auth_token: zeroize::Zeroizing::new(auth_token.to_string()),
+            url: url.into(),
+            auth_token: zeroize::Zeroizing::new(auth_token.into()),
             request_timeout: timeout,
             inner: Mutex::new(Some(Arc::new(transport))),
+            stopped: CancellationToken::new(),
+            admission: Semaphore::new(MAX_PENDING_REQUESTS),
         })
     }
-
-    /// Try to reconnect using exponential backoff with jitter.
-    /// Returns `Ok(())` when a new connection is established, or `Err` after
-    /// exhausting all attempts.
-    async fn reconnect(&self) -> Result<(), ClientError> {
-        use rand::RngExt;
-
-        let mut backoff = INITIAL_BACKOFF;
-
-        for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-            // Add random jitter: ±25% of current backoff.
-            let jitter_range = backoff.as_millis() as u64 / 4;
-            let jitter = if jitter_range > 0 {
-                let offset = rand::rng().random_range(0..jitter_range * 2);
-                Duration::from_millis(offset)
-            } else {
-                Duration::ZERO
+    pub async fn next_push(&self) -> Result<WatchPush, ClientError> {
+        let work = async {
+            let transport = self
+                .inner
+                .lock()
+                .await
+                .as_ref()
+                .cloned()
+                .ok_or(ClientError::ConnectionClosed)?;
+            transport.next_push().await
+        };
+        tokio::select! { biased; _ = self.stopped.cancelled() => Err(ClientError::ConnectionClosed), result = work => result }
+    }
+}
+impl Transport for ReconnectingWsTransport {
+    async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
+        let deadline = request_deadline(self.request_timeout)?;
+        check_deadline(deadline, self.request_timeout)?;
+        encode_request(op, req)?;
+        check_deadline(deadline, self.request_timeout)?;
+        let _permit = self
+            .admission
+            .try_acquire()
+            .map_err(|_| ClientError::TooManyRequests)?;
+        let work = async {
+            let transport = {
+                let mut inner = self.inner.lock().await;
+                check_deadline(deadline, self.request_timeout)?;
+                if inner.as_ref().is_none_or(|transport| transport.is_closed()) {
+                    inner.take();
+                    let transport = WsTransport::connect_with_timeout(
+                        &self.url,
+                        &self.auth_token,
+                        self.request_timeout,
+                    )
+                    .await?;
+                    if self.stopped.is_cancelled() {
+                        return Err(ClientError::ConnectionClosed);
+                    }
+                    *inner = Some(Arc::new(transport));
+                }
+                inner.as_ref().unwrap().clone()
             };
-            let delay = backoff
-                .saturating_add(jitter)
-                .saturating_sub(Duration::from_millis(jitter_range));
-            tokio::time::sleep(delay).await;
-
-            match WsTransport::connect_with_timeout(
-                &self.url,
-                &self.auth_token,
-                self.request_timeout,
-            )
-            .await
-            {
-                Ok(transport) => {
-                    *self.inner.lock().await = Some(Arc::new(transport));
-                    return Ok(());
-                }
-                Err(_) if attempt < MAX_RECONNECT_ATTEMPTS => {
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
-                    continue;
-                }
-                Err(e) => {
-                    return Err(ClientError::Transport(format!(
-                        "reconnection failed after {MAX_RECONNECT_ATTEMPTS} attempts: {e}"
-                    )));
-                }
-            }
+            transport.call_until(op, req, deadline).await
+        };
+        tokio::select! {
+            biased;
+            _ = self.stopped.cancelled() => Err(ClientError::ConnectionClosed),
+            result = tokio::time::timeout_at(deadline, work) => result.unwrap_or(Err(ClientError::Timeout(self.request_timeout))),
         }
-
-        Err(ClientError::Transport(
-            "reconnection failed: max attempts exhausted".to_string(),
-        ))
+    }
+    async fn close(&self) -> Result<(), ClientError> {
+        self.stopped.cancel();
+        let transport = self.inner.lock().await.take();
+        if let Some(transport) = transport {
+            transport.close().await?;
+        }
+        Ok(())
+    }
+}
+impl Drop for ReconnectingWsTransport {
+    fn drop(&mut self) {
+        self.stopped.cancel();
     }
 }
 
-impl Transport for ReconnectingWsTransport {
-    async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
-        // Fast path: clone the Arc out of the lock, then drop the lock before calling.
-        let transport = {
-            let guard = self.inner.lock().await;
-            guard.as_ref().cloned()
-        };
-        if let Some(transport) = transport {
-            match transport.call(op, req).await {
-                Ok(grid) => return Ok(grid),
-                Err(ClientError::Timeout(d)) => return Err(ClientError::Timeout(d)),
-                Err(ClientError::ServerError(e)) => return Err(ClientError::ServerError(e)),
-                Err(ClientError::TooManyRequests) => {
-                    return Err(ClientError::TooManyRequests);
-                }
-                Err(_) => {
-                    // Connection-level error; fall through to reconnect.
-                }
-            }
-        }
-
-        // Drop current transport and reconnect.
-        *self.inner.lock().await = None;
-        self.reconnect().await?;
-
-        // Retry the request on the new connection.
-        let transport = {
-            let guard = self.inner.lock().await;
-            guard.as_ref().cloned()
-        };
-        match transport {
-            Some(transport) => transport.call(op, req).await,
-            None => Err(ClientError::ConnectionClosed),
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn shared() -> Arc<Shared> {
+        Arc::new(Shared {
+            state: StateMutex::new(State {
+                terminal: None,
+                next_id: 1,
+                pending: HashMap::new(),
+            }),
+            stopped: CancellationToken::new(),
+        })
     }
-
-    async fn close(&self) -> Result<(), ClientError> {
-        let transport = self.inner.lock().await.take();
-        if let Some(transport) = transport {
-            transport.close().await
+    #[test]
+    fn admission_is_atomic_bounded_and_cancellation_reclaims_slots() {
+        let shared = shared();
+        let calls = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let shared = shared.clone();
+                    scope.spawn(move || {
+                        (0..256)
+                            .filter_map(|_| shared.admit(Expected::Subscribe).ok())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(calls.len(), MAX_PENDING_REQUESTS);
+        assert_eq!(
+            shared.state.lock().unwrap().pending.len(),
+            MAX_PENDING_REQUESTS
+        );
+        assert!(matches!(
+            shared.admit(Expected::Subscribe),
+            Err(ClientError::TooManyRequests)
+        ));
+        drop(calls);
+        assert!(shared.state.lock().unwrap().pending.is_empty());
+        let (guard, mut receiver) = shared.admit(Expected::Subscribe).unwrap();
+        shared.terminate(Terminal::Closed);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Err(ClientError::ConnectionClosed))
+        ));
+        assert!(shared.state.lock().unwrap().pending.is_empty());
+        assert!(matches!(
+            shared.admit(Expected::Subscribe),
+            Err(ClientError::ConnectionClosed)
+        ));
+        drop(guard);
+    }
+    #[tokio::test]
+    async fn writer_queue_wait_obeys_whole_call_deadline_and_close_joins_reader() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            assert!(ws.next().await.unwrap().unwrap().is_close());
+        });
+        let transport = WsTransport::connect_with_timeout(&url, "token", Duration::from_millis(30))
+            .await
+            .unwrap();
+        let held = transport.writer.lock().await;
+        let mut row = HDict::new();
+        row.set("id", Kind::Ref(haystack_core::kinds::HRef::from_val("p")));
+        let grid = HGrid::from_parts(HDict::new(), vec![HCol::new("id")], vec![row]);
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            transport.call("watchSub", &grid),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(ClientError::Timeout(_))));
+        assert!(transport.shared.state.lock().unwrap().pending.is_empty());
+        assert!(!transport.is_closed());
+        // Cancellation before the writer is available also unregisters promptly.
+        let mut call = Box::pin(transport.call("watchSub", &grid));
+        tokio::select! { _ = &mut call => panic!("writer is held"), _ = tokio::time::sleep(Duration::from_millis(1)) => {} }
+        assert_eq!(transport.shared.state.lock().unwrap().pending.len(), 1);
+        drop(call);
+        assert!(transport.shared.state.lock().unwrap().pending.is_empty());
+        drop(held);
+        transport.close().await.unwrap();
+        assert!(transport.reader.lock().await.is_none());
+        assert!(transport.shared.state.lock().unwrap().pending.is_empty());
+        tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    async fn check_expired_deadline(before_admission: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            assert!(
+                ws.next().await.unwrap().unwrap().is_close(),
+                "expired call reached the wire"
+            );
+        });
+        let transport = WsTransport::connect(&url, "token").await.unwrap();
+        let mut row = HDict::new();
+        row.set("id", Kind::Ref(haystack_core::kinds::HRef::from_val("p")));
+        let grid = HGrid::from_parts(HDict::new(), vec![HCol::new("id")], vec![row]);
+        let result = if before_admission {
+            let expired = tokio::time::Instant::now() - Duration::from_secs(1);
+            transport.call_until("watchSub", &grid, expired).await
         } else {
-            Ok(())
-        }
+            let held = transport.writer.lock().await;
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+            let mut waiting = Box::pin(transport.call_until("watchSub", &grid, deadline));
+            assert!(futures_util::poll!(&mut waiting).is_pending());
+            // Poll the call only after both its writer and timer become ready.
+            tokio::time::sleep_until(deadline + Duration::from_millis(1)).await;
+            drop(held);
+            waiting.await
+        };
+        let (next_id, pending) = {
+            let state = transport.shared.state.lock().unwrap();
+            (state.next_id, state.pending.len())
+        };
+        let still_open = !transport.is_closed();
+        transport.close().await.unwrap();
+        assert!(matches!(result, Err(ClientError::Timeout(_))));
+        assert_eq!(next_id, if before_admission { 1 } else { 2 });
+        assert_eq!(pending, 0);
+        assert!(still_open);
+        tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn expired_deadlines_before_admission_do_not_allocate_or_send() {
+        check_expired_deadline(true).await;
+    }
+    #[tokio::test]
+    async fn expired_deadlines_after_writer_wait_do_not_send_or_leak() {
+        check_expired_deadline(false).await;
+    }
+    #[test]
+    fn cancellation_during_write_seals_connection_and_settles_other_calls() {
+        let shared = shared();
+        let (mut writing, _) = shared.admit(Expected::Subscribe).unwrap();
+        let (_other, mut receiver) = shared.admit(Expected::Subscribe).unwrap();
+        writing.sending = true;
+        drop(writing);
+        assert!(shared.stopped.is_cancelled());
+        assert!(receiver.try_recv().unwrap().is_err());
+        assert!(shared.state.lock().unwrap().pending.is_empty());
     }
 }

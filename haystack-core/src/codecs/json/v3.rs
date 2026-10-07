@@ -202,8 +202,7 @@ fn decode_kind_depth(val: &Value, depth: usize) -> Result<Kind, CodecError> {
 /// Decode a type-prefixed string (e.g., `"m:"`, `"n:72 °F"`, `"s:text"`).
 fn decode_prefixed_string(s: &str) -> Result<Kind, CodecError> {
     // Check for 2-char prefix patterns (x:)
-    if s.len() >= 2 {
-        let prefix = &s[..2];
+    if let Some(prefix) = s.get(..2) {
         let rest = &s[2..];
         match prefix {
             "m:" if rest.is_empty() => return Ok(Kind::Marker),
@@ -512,6 +511,16 @@ mod tests {
         let codec = Json3Codec;
         let encoded = codec.encode_scalar(&kind).unwrap();
         codec.decode_scalar(&encoded).unwrap()
+    }
+
+    #[test]
+    fn unprefixed_multibyte_strings_preserve_plain_string_fallback() {
+        for text in ["工程", "😀value", "é", "", "x"] {
+            assert_eq!(
+                decode_kind(&Value::String(text.into())).unwrap(),
+                Kind::Str(text.into())
+            );
+        }
     }
 
     // ── Null ──

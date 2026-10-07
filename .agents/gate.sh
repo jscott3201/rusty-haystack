@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The repo's gate: everything CI enforces, runnable before a commit.
+# The repo's local gate: the selected checks on this host, before a commit.
+# Hosted CodeQL, other operating systems, and release artifacts are separate.
 #
 # Discovered by the toolkit's probe order:
 #   .agents/gate.sh -> .claude/gate.sh -> make gate -> the gate section of AGENTS.md
@@ -12,17 +13,16 @@
 # Exit status is the contract, and it has three values because "passed" and
 # "everything I could run passed" are different claims:
 #
-#   0  every CI check ran and passed        <- the only one that predicts CI
+#   0  every check in the full local profile ran and passed
 #   1  something failed
-#   2  what ran was green, but the run was not CI-equivalent
+#   2  what ran was green, but the local profile was incomplete
 #
 # Exit 2 exists because this script used to print "gate passed" after skipping the
 # Python bindings entirely when no .venv was present (issue #47). A caller reading
 # only $? could not tell the difference, which is the same silent-pass failure this
 # gate is meant to catch in the code.
 #
-# Note for lanes: .agents/ is read-only inside the sandbox, so a lane can run this
-# but cannot edit it.
+# See docs/support-matrix.md for the exact local and hosted coverage boundaries.
 
 set -o pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -55,7 +55,8 @@ skip() {
 
 # Keep the flags identical to CI's — a gate that lints a different target set than
 # CI is worse than no gate, because it reports green on what CI is about to reject.
-# Each block below cites the CI line it mirrors so drift is visible in review.
+# Each block below cites the CI job it mirrors so drift is visible in review.
+run "CI policy and workflow wiring" python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v  # ci.yml: jobs.ci-policy
 run "rustfmt (MSRV 1.99.0)" cargo +1.99.0 fmt --all --check  # ci.yml: jobs.fmt
 run "clippy (MSRV 1.99.0)" \
   cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.clippy
@@ -68,6 +69,17 @@ run "clippy (MSRV 1.99.0, chrono-tz)" \
   cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml: jobs.clippy
 run "tests (MSRV 1.99.0, chrono-tz)" \
   cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz  # ci.yml: jobs.test
+
+# Separate Cargo invocations qualify core without workspace feature unification.
+# Default is currently empty, but both contracts must survive future changes.
+run "clippy (core minimal, MSRV 1.99.0)" \
+  cargo +1.99.0 clippy --locked -p rusty-haystack-core --no-default-features --all-targets -- -D warnings  # ci.yml: jobs.core-features
+run "tests (core minimal, MSRV 1.99.0)" \
+  cargo +1.99.0 test --locked -p rusty-haystack-core --no-default-features  # ci.yml: jobs.core-features
+run "clippy (core default, MSRV 1.99.0)" \
+  cargo +1.99.0 clippy --locked -p rusty-haystack-core --all-targets -- -D warnings  # ci.yml: jobs.core-features
+run "tests (core default, MSRV 1.99.0)" \
+  cargo +1.99.0 test --locked -p rusty-haystack-core  # ci.yml: jobs.core-features
 
 # The root toolchain keeps normal development on the MSRV lane. CI also carries
 # one exact current-stable Ubuntu lane, mirrored here without multiplying OSes.
@@ -170,8 +182,7 @@ else
   skip "clippy (pyo3)" "needs the venv above"
 fi
 
-# Network-dependent and slow, so opt-in. CI runs it on every PR and nightly, which
-# is where a newly-published advisory will surface; locally it mostly costs time.
+# Network-dependent, so opt-in locally. CI runs it on every dev/main push and PR.
 if (( FULL )); then
   # cargo-deny-action@v2 runs `check` with `--locked --all-features` and the root
   # manifest. A bare `cargo deny check` inspects a narrower graph, so a crate
@@ -190,16 +201,16 @@ if (( status )); then
 fi
 if (( ${#skipped[@]} )); then
   # Deliberately not "passed", and deliberately not 0. Exit 2 means the checks
-  # that ran were green but the run was not CI-equivalent, so a caller cannot
-  # treat it as evidence CI will pass.
+  # that ran were green but the full local profile was incomplete.
   # `${skipped[*]}` joins on the FIRST character of IFS only, so `IFS=', '`
   # renders "a,b" rather than "a, b". Built explicitly instead.
   joined="${skipped[0]}"
   for s in "${skipped[@]:1}"; do joined+=", $s"; done
   printf '\033[33mgate incomplete\033[0m — %d check(s) did not run: %s\n' \
     "${#skipped[@]}" "$joined"
-  printf 'Everything that ran passed. For a CI-equivalent run: create the venv, then --full\n'
+  printf 'Everything that ran passed. To complete the local profile: create the venv, then --full\n'
   exit 2
 fi
-printf '\033[32mgate passed\033[0m — every CI check ran\n'
+printf '\033[32mlocal gate passed\033[0m — every full local-profile check ran on this host\n'
+printf 'Hosted CodeQL, other operating systems, and release artifacts require separate evidence.\n'
 exit 0

@@ -38,6 +38,7 @@ futures-util.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+tokio-tungstenite.workspace = true
 criterion = { workspace = true, features = ["html_reports"] }
 # `util` carries ServiceExt::oneshot, which drives the router's middleware
 # stack without binding a socket. Test-only: axum and tower-http bring their
