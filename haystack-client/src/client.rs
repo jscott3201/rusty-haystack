@@ -121,12 +121,17 @@ impl HaystackClient<WsTransport> {
     ) -> Result<Self, ClientError> {
         crate::ensure_crypto_provider();
         // Authenticate via HTTP first to get the token
-        let client = reqwest::Client::new();
+        let client = ClientConfig::default().build_reqwest_client()?;
         let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
 
         // Connect WebSocket with the token
         let transport = WsTransport::connect(ws_url, &auth_token).await?;
         Ok(Self { transport })
+    }
+
+    /// Receive the next unsolicited WebSocket watch change notification.
+    pub async fn next_watch_push(&self) -> Result<crate::transport::ws::WatchPush, ClientError> {
+        self.transport.next_push().await
     }
 }
 
@@ -242,7 +247,8 @@ impl<T: Transport> HaystackClient<T> {
     /// `ids` are ref value strings (e.g. `["@point-1", "@point-2"]`). `lease` is
     /// an optional duration string (e.g. `"1min"`, `"30sec"`, `"1hr"`) controlling
     /// how long the server keeps the watch alive without polls. Returns a grid
-    /// whose meta contains the assigned `watchId`.
+    /// whose meta contains the assigned `watchId`. WebSocket transport accepts
+    /// only `lease: None`; leases and watch display metadata are unsupported.
     pub async fn watch_sub(&self, ids: &[&str], lease: Option<&str>) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
@@ -274,8 +280,8 @@ impl<T: Transport> HaystackClient<T> {
     /// Call the `watchUnsub` op to remove entities from an active watch.
     ///
     /// `watch_id` identifies the watch. `ids` are the ref value strings to
-    /// unsubscribe (e.g. `["@point-1"]`). The watch is closed automatically
-    /// when all entities have been removed.
+    /// unsubscribe (e.g. `["@point-1"]`). Over WebSocket, an empty `ids` list
+    /// closes the watch; a nonempty list removes only those IDs, even if empty afterward.
     pub async fn watch_unsub(&self, watch_id: &str, ids: &[&str]) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
