@@ -200,9 +200,17 @@ fn bounded_headers<'a>(headers: &'a HeaderMap, name: &str) -> Result<Vec<&'a str
 
 fn scram_challenge(headers: &HeaderMap) -> Result<String, ClientError> {
     let mut result = None;
+    let mut empty_members = 0;
     for header in bounded_headers(headers, "www-authenticate")? {
         let mut selected = false;
         for part in challenge_parts(header)?.into_iter().map(str::trim) {
+            if part.is_empty() {
+                empty_members += 1;
+                if empty_members > auth::MAX_AUTH_EMPTY_MEMBERS {
+                    return Err(failed("too many empty auth list members"));
+                }
+                continue;
+            }
             // RFC 9110 permits a challenge containing only an auth-scheme.
             // A parameter with whitespace before '=' is still a parameter.
             let (scheme, rest) = part.split_once(char::is_whitespace).unwrap_or((part, ""));
@@ -215,7 +223,9 @@ fn scram_challenge(headers: &HeaderMap) -> Result<String, ClientError> {
                     result = Some(rest.to_string());
                 }
             } else if selected && let Some(result) = &mut result {
-                result.push(',');
+                if !result.is_empty() {
+                    result.push(',');
+                }
                 result.push_str(part);
             }
         }
@@ -354,13 +364,36 @@ mod tests {
 
     #[test]
     fn invalid_bare_segments_are_not_silently_discarded() {
-        for suffix in ["Invalid/Scheme", "Invalid@Scheme", ""] {
+        for suffix in ["Invalid/Scheme", "Invalid@Scheme"] {
             let mut headers = HeaderMap::new();
             let header = format!("SCRAM handshakeToken=token, hash=SHA-256, data=YQ, {suffix}");
             headers.insert("www-authenticate", HeaderValue::from_str(&header).unwrap());
             let selected = scram_challenge(&headers).unwrap();
             assert!(parameters(&selected).is_err());
         }
+    }
+
+    #[test]
+    fn empty_challenge_members_are_tolerated_but_bounded() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "www-authenticate",
+            HeaderValue::from_static(", SCRAM , hash=SHA-256, ,handshakeToken=token, "),
+        );
+        let selected = scram_challenge(&headers).unwrap();
+        let fields = parameters(&selected).unwrap();
+        assert_eq!(required(&fields, "hash").unwrap(), "SHA-256");
+        assert_eq!(required(&fields, "handshakeToken").unwrap(), "token");
+        assert!(required(&parameters(", ,").unwrap(), "hash").is_err());
+        headers.insert(
+            "www-authenticate",
+            HeaderValue::from_str(&format!(
+                "{}SCRAM hash=SHA-256",
+                ",".repeat(auth::MAX_AUTH_EMPTY_MEMBERS + 1)
+            ))
+            .unwrap(),
+        );
+        assert!(scram_challenge(&headers).is_err());
     }
 
     #[test]

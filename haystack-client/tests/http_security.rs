@@ -456,3 +456,39 @@ async fn handshake_tokens_are_response_scoped() {
         assert_eq!(server.state.lock().unwrap().requests.len(), 4);
     }
 }
+
+#[tokio::test]
+async fn empty_http_auth_list_members_are_tolerated_in_each_challenge() {
+    use support::EmptyMembers;
+    let certs = Certificates::new();
+    for empty in [
+        EmptyMembers::Leading,
+        EmptyMembers::Interior,
+        EmptyMembers::Trailing,
+    ] {
+        for discovery in [true, false] {
+            let options = if discovery {
+                Options {
+                    discovery_empty: empty,
+                    ..Options::default()
+                }
+            } else {
+                Options {
+                    challenge_empty: empty,
+                    ..Options::default()
+                }
+            };
+            let server = Server::start(&certs, false, options);
+            let client = HaystackClient::connect_with_config(
+                &server.url,
+                "user",
+                "password",
+                &config(TlsConfig::with_ca(certs.ca.clone())),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("empty={empty:?}, discovery={discovery}: {error}"));
+            client.read("site", None).await.unwrap();
+            assert_eq!(server.state.lock().unwrap().requests.len(), 4);
+        }
+    }
+}

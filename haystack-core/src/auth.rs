@@ -17,6 +17,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub const DEFAULT_ITERATIONS: u32 = 100_000;
 pub const MAX_CLIENT_ITERATIONS: u32 = 1_000_000;
 pub const MAX_AUTH_HEADER_BYTES: usize = 8192;
+/// Bound tolerated empty HTTP list members; decoded SCRAM remains strict.
+pub const MAX_AUTH_EMPTY_MEMBERS: usize = 16;
 pub const MAX_AUTH_DATA_BYTES: usize = 4096;
 pub const MAX_USERNAME_BYTES: usize = 1024;
 const MAX_NONCE_BYTES: usize = 1024;
@@ -448,9 +450,18 @@ pub fn parse_auth_parameters(input: &str) -> Result<HashMap<String, &str>, AuthE
         return Err(invalid("auth header exceeds limit"));
     }
     let mut values = HashMap::new();
-    for part in input.split(',') {
+    let mut empty_members = 0;
+    for part in input.split(',').map(str::trim) {
+        // HTTP #auth-param recipients tolerate reasonable empty list members.
+        // This parser is never used for decoded SCRAM transcripts.
+        if part.is_empty() {
+            empty_members += 1;
+            if empty_members > MAX_AUTH_EMPTY_MEMBERS {
+                return Err(invalid("too many empty auth list members"));
+            }
+            continue;
+        }
         let (key, value) = part
-            .trim()
             .split_once('=')
             .ok_or_else(|| invalid("malformed auth parameter"))?;
         let key = key.trim();

@@ -169,9 +169,29 @@ impl Tokens {
         }
     }
 }
+#[derive(Clone, Copy, Default, Debug)]
+pub enum EmptyMembers {
+    #[default]
+    None,
+    Leading,
+    Interior,
+    Trailing,
+}
+impl EmptyMembers {
+    fn apply(self, value: String) -> String {
+        match self {
+            Self::None => value,
+            Self::Leading => format!(", , {}", value.replacen("SCRAM ", "SCRAM , ", 1)),
+            Self::Interior => value.replacen(',', ", ,", 1),
+            Self::Trailing => format!("{value}, ,"),
+        }
+    }
+}
 #[derive(Default, Clone, Copy)]
 pub struct Options {
     pub challenge: Challenge,
+    pub discovery_empty: EmptyMembers,
+    pub challenge_empty: EmptyMembers,
     pub tokens: Tokens,
     pub final_message: Final,
     pub domain: Domain,
@@ -315,7 +335,12 @@ fn response(
             .unwrap_or_default();
         (
             401,
-            format!("WWW-Authenticate: SCRAM hash=SHA-256{token}\r\n"),
+            format!(
+                "WWW-Authenticate: {}\r\n",
+                options
+                    .discovery_empty
+                    .apply(format!("SCRAM hash=SHA-256{token}"))
+            ),
         )
     } else if authorization.starts_with("SCRAM ") && state.transcript.is_none() {
         assert_eq!(
@@ -369,6 +394,7 @@ fn response(
             Challenge::CombinedSchemes => format!("Basic realm=\"synthetic\", {valid}"),
             _ => valid,
         };
+        let challenge = options.challenge_empty.apply(challenge);
         let prefix = if matches!(options.challenge, Challenge::SeparateSchemes) {
             "WWW-Authenticate: Basic realm=synthetic\r\n"
         } else {

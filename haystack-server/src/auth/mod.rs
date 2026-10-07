@@ -144,11 +144,20 @@ impl AuthManager {
     }
     /// Admit HELLO without PBKDF2 or a client-first transcript.
     pub fn handle_hello(&self, username: &str) -> Result<String, AuthFailure> {
-        self.hello_at(username, Instant::now())
+        self.hello_with_clock(username, Instant::now)
     }
+    #[cfg(test)]
     fn hello_at(&self, username: &str, now: Instant) -> Result<String, AuthFailure> {
+        self.hello_with_clock(username, || now)
+    }
+    fn hello_with_clock(
+        &self,
+        username: &str,
+        clock: impl FnOnce() -> Instant,
+    ) -> Result<String, AuthFailure> {
         auth::validate_username(username).map_err(|_| AuthFailure::Rejected)?;
         let mut state = self.state.lock();
+        let now = clock();
         self.sweep(&mut state, now);
         if state.handshakes.len() >= self.limits.max_handshakes {
             return Err(AuthFailure::Capacity);
@@ -165,16 +174,28 @@ impl AuthManager {
         token: Option<&str>,
         data: &str,
     ) -> Result<ScramResponse, AuthFailure> {
-        self.scram_at(token, data, Instant::now())
+        self.scram_with_clock(token, data, Instant::now)
     }
+    #[cfg(test)]
     fn scram_at(
         &self,
         token: Option<&str>,
         data: &str,
         now: Instant,
     ) -> Result<ScramResponse, AuthFailure> {
+        self.scram_with_clock(token, data, || now)
+    }
+    fn scram_with_clock(
+        &self,
+        token: Option<&str>,
+        data: &str,
+        clock: impl FnOnce() -> Instant,
+    ) -> Result<ScramResponse, AuthFailure> {
         let token = token.ok_or(AuthFailure::Rejected)?;
         let mut state = self.state.lock();
+        // A call can wait across expiry. Time belongs to the locked decision,
+        // not the earlier attempt to acquire the state lock.
+        let now = clock();
         self.sweep(&mut state, now);
         let (phase, created) = state
             .handshakes
@@ -226,10 +247,19 @@ impl AuthManager {
         }
     }
     pub fn validate_token(&self, token: &str) -> Option<AuthUser> {
-        self.validate_at(token, Instant::now())
+        self.validate_with_clock(token, Instant::now)
     }
+    #[cfg(test)]
     fn validate_at(&self, token: &str, now: Instant) -> Option<AuthUser> {
+        self.validate_with_clock(token, || now)
+    }
+    fn validate_with_clock(
+        &self,
+        token: &str,
+        clock: impl FnOnce() -> Instant,
+    ) -> Option<AuthUser> {
         let mut state = self.state.lock();
+        let now = clock();
         self.sweep(&mut state, now);
         state.tokens.get(token).map(|(user, _)| user.clone())
     }
@@ -238,8 +268,8 @@ impl AuthManager {
     }
     #[doc(hidden)]
     pub fn inject_token(&self, token: String, user: AuthUser) {
-        let now = Instant::now();
         let mut state = self.state.lock();
+        let now = Instant::now();
         self.sweep(&mut state, now);
         if state.tokens.len() < self.limits.max_tokens {
             state.tokens.insert(token, (user, now));
@@ -455,6 +485,81 @@ mod tests {
         });
         assert_eq!(accepted, 2);
         assert_eq!(mgr.state.lock().handshakes.len(), 2);
+    }
+
+    #[test]
+    fn final_proof_waiting_on_state_lock_expires_before_admission() {
+        let ttl = Duration::from_millis(200);
+        let mgr = manager().with_limits(AuthLimits {
+            handshake_ttl: ttl,
+            ..AuthLimits::default()
+        });
+        let created = Instant::now();
+        let (token, first, server) = ready(&mgr, "user", created);
+        let (proof, _) = auth::client_final_message("pencil", &first, &server).unwrap();
+        let expires = created + ttl;
+        std::thread::scope(|scope| {
+            let guard = mgr.state.lock();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let mgr = &mgr;
+            let worker = scope.spawn(move || {
+                started_tx.send(Instant::now()).unwrap();
+                mgr.handle_scram(Some(&token), &proof)
+            });
+            let started = started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(
+                started < expires,
+                "caller must start while proof is eligible"
+            );
+            std::thread::sleep(
+                expires.saturating_duration_since(Instant::now()) + Duration::from_millis(50),
+            );
+            assert!(
+                !worker.is_finished(),
+                "public call must wait on the held state lock"
+            );
+            drop(guard);
+            assert_eq!(worker.join().unwrap().err(), Some(AuthFailure::Rejected));
+        });
+        assert!(mgr.state.lock().tokens.is_empty());
+    }
+
+    #[test]
+    fn bearer_waiting_on_state_lock_expires_before_validation() {
+        let ttl = Duration::from_millis(200);
+        let mgr = manager().with_token_ttl(ttl);
+        mgr.inject_token(
+            "waiting-token".into(),
+            AuthUser {
+                username: "user".into(),
+                permissions: vec!["read".into()],
+            },
+        );
+        std::thread::scope(|scope| {
+            let guard = mgr.state.lock();
+            let expires = guard.tokens["waiting-token"].1 + ttl;
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let mgr = &mgr;
+            let worker = scope.spawn(move || {
+                started_tx.send(Instant::now()).unwrap();
+                mgr.validate_token("waiting-token")
+            });
+            let started = started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(
+                started < expires,
+                "caller must start while bearer is eligible"
+            );
+            std::thread::sleep(
+                expires.saturating_duration_since(Instant::now()) + Duration::from_millis(50),
+            );
+            assert!(
+                !worker.is_finished(),
+                "public call must wait on the held state lock"
+            );
+            drop(guard);
+            assert!(worker.join().unwrap().is_none());
+        });
+        assert!(mgr.state.lock().tokens.is_empty());
     }
 
     #[test]

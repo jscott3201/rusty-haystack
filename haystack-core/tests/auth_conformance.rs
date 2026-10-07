@@ -110,3 +110,36 @@ fn proof_and_verifier_lengths_are_rejected_before_xor_or_comparison() {
         .is_err()
     );
 }
+
+#[test]
+fn empty_http_parameters_are_bounded_without_relaxing_scram_transcripts() {
+    for text in [
+        ", hash=SHA-256",
+        "hash=SHA-256, , data=YQ",
+        "hash=SHA-256, ",
+    ] {
+        assert_eq!(
+            auth::parse_auth_parameters(text).unwrap()["hash"],
+            "SHA-256"
+        );
+    }
+    for text in [
+        "hash=SHA-256, ,hash=SHA-256",
+        "hash=SHA-256, ,bad",
+        "hash=SHA-256, ,data=",
+    ] {
+        assert!(auth::parse_auth_parameters(text).is_err());
+    }
+    assert!(auth::parse_auth_parameters(&format!("{}hash=SHA-256", ",".repeat(64))).is_err());
+    assert!(auth::parse_auth_header("HELLO , ,").is_err());
+    assert!(auth::parse_auth_header("SCRAM , ,").is_err());
+    assert!(auth::parse_auth_header("BEARER , ,").is_err());
+    let first = URL_SAFE_NO_PAD.encode("n,,n=user,r=nonce");
+    for transcript in [
+        "r=nonceextra,,s=c2FsdA==,i=4096",
+        ",r=nonceextra,s=c2FsdA==,i=4096",
+        "r=nonceextra,s=c2FsdA==,i=4096,",
+    ] {
+        assert!(auth::validate_server_first(&first, &URL_SAFE_NO_PAD.encode(transcript)).is_err());
+    }
+}
