@@ -102,44 +102,22 @@ Codecs are registered in a static registry accessed via `codecs::codec_for(mime)
 
 ## Auth Flow (SCRAM SHA-256)
 
-The server implements [RFC 5802](https://tools.ietf.org/html/rfc5802) SCRAM-SHA-256 authentication:
+The HTTP profile follows [Haystack Auth](https://project-haystack.org/doc/docHaystack/Auth), using SCRAM-SHA-256 from [RFC 7677](https://www.rfc-editor.org/rfc/rfc7677.html). All three authentication requests use `/api/about`:
 
-```
-Client                              Server
-  |                                    |
-  |-- GET /api/about ----------------->|
-  |   Authorization: HELLO             |
-  |   username=<base64(user)>          |
-  |                                    |
-  |<--- 401 Unauthorized --------------|
-  |   WWW-Authenticate: SCRAM          |
-  |   handshakeToken=<tok>             |
-  |   hash=SHA-256                     |
-  |   data=<server_first_b64>          |
-  |                                    |
-  |-- GET /api/about ----------------->|
-  |   Authorization: SCRAM             |
-  |   handshakeToken=<tok>             |
-  |   data=<client_final_b64>          |
-  |                                    |
-  |<--- 200 OK ------------------------|
-  |   Authentication-Info:             |
-  |   authToken=<tok>                  |
-  |   data=<server_final_b64>          |
-  |                                    |
-  |-- POST /api/read ----------------->|
-  |   Authorization: BEARER            |
-  |   authToken=<tok>                  |
-  |                                    |
-  |<--- 200 OK ------------------------|
+```text
+Client                                       Server
+HELLO username=<base64url>                 -> admit AwaitFirst
+                                          <- 401 SCRAM hash=SHA-256, handshakeToken=A
+SCRAM handshakeToken=A, data=<first>       -> consume A, preserve exact first-bare
+                                          <- 401 SCRAM hash=SHA-256, handshakeToken=B, data=<server-first>
+SCRAM handshakeToken=B, data=<proof>       -> consume B, verify proof and registered identity
+                                          <- 200 Authentication-Info: authToken=C, hash=SHA-256, data=<verifier>
+BEARER authToken=C                         -> protected operation
 ```
 
-Security measures:
-- 100,000 PBKDF2 iterations
-- Constant-time credential comparison (`subtle` crate)
-- Fake challenge for unknown users (prevents enumeration)
-- 60s handshake TTL, configurable token TTL (default 3600s)
-- Periodic auth token cleanup
+Outer username/data use unpadded base64url; the inner salt/proof/verifier and stored credential records retain standard padded Base64. Client helpers preserve received transcript bytes, validate nonce extension and lengths, and verify the final signature before accepting the bearer. The independent fixture pins canonical RFC 7677 bytes: the Haystack page's illustration omits part of that RFC nonce and includes trailing LF in outer data, so it is not used as a complete cryptographic vector.
+
+The server keeps `AwaitFirst` and `AwaitFinal` phases and bearer records under one lock, with atomic sweep/admission and one-time consumption. Defaults cap handshakes at 1,024 for 60 seconds and bearer records at 4,096 for 3,600 seconds; rotation preserves HELLO's original deadline. Unknown-user decoys use domain-separated HMAC values without per-HELLO PBKDF2. A registered identity remains mandatory even after a valid decoy proof. These bounds do not constitute deployment rate limiting or exhaustive timing qualification.
 
 ## Server Request Lifecycle
 

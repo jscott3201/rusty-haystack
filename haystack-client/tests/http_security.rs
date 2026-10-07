@@ -26,10 +26,10 @@ async fn configured_tls_survives_scram_and_new_operation_connections() {
     client.about().await.expect("GET on a new TLS connection");
     let state = server.state.lock().unwrap();
     assert_eq!(state.domain, 2);
-    assert_eq!(state.requests.len(), 4);
-    assert!(state.requests[2].0.starts_with("POST /api/read "));
-    assert!(state.requests[3].0.starts_with("GET /api/about "));
-    for (_, auth) in &state.requests[2..] {
+    assert_eq!(state.requests.len(), 5);
+    assert!(state.requests[3].0.starts_with("POST /api/read "));
+    assert!(state.requests[4].0.starts_with("GET /api/about "));
+    for (_, auth) in &state.requests[3..] {
         assert_eq!(auth, "BEARER authToken=session-token");
     }
 }
@@ -124,6 +124,8 @@ async fn invalid_credentials_and_server_signatures_are_rejected() {
         ("wrong", Final::Valid),
         ("password", Final::WrongSignature),
         ("password", Final::WrongHash),
+        ("password", Final::MissingHash),
+        ("password", Final::ShortSignature),
         ("password", Final::DuplicateToken),
         ("password", Final::DuplicateHeader),
         ("password", Final::EmptyToken),
@@ -169,6 +171,8 @@ async fn malformed_negotiation_is_rejected_before_sending_a_proof() {
         Challenge::ZeroIterations,
         Challenge::ExcessiveIterations,
         Challenge::WrongNonce,
+        Challenge::NonExtendedNonce,
+        Challenge::InvalidUtf8,
         Challenge::MultipleScram,
     ] {
         let server = Server::start(
@@ -191,7 +195,7 @@ async fn malformed_negotiation_is_rejected_before_sending_a_proof() {
         };
         assert!(!message.contains(SENTINEL));
         let state = server.state.lock().unwrap();
-        assert_eq!(state.requests.len(), 1, "{challenge:?}");
+        assert_eq!(state.requests.len(), 2, "{challenge:?}");
         assert_eq!(state.domain, 0);
     }
 }
@@ -216,7 +220,7 @@ async fn scram_can_be_selected_from_multiple_auth_schemes() {
         )
         .await
         .unwrap();
-        assert_eq!(server.state.lock().unwrap().requests.len(), 2);
+        assert_eq!(server.state.lock().unwrap().requests.len(), 3);
     }
 }
 
@@ -241,13 +245,13 @@ async fn bare_alternative_after_scram_authenticates() {
     .expect("a bare alternative after SCRAM must not invalidate the supported challenge");
     client.about().await.unwrap();
     let state = server.state.lock().unwrap();
-    assert_eq!(state.requests.len(), 3);
+    assert_eq!(state.requests.len(), 4);
     assert_eq!(state.domain, 1);
-    assert_eq!(state.requests[2].1, "BEARER authToken=session-token");
+    assert_eq!(state.requests[3].1, "BEARER authToken=session-token");
 }
 
 #[tokio::test]
-async fn one_deadline_covers_both_handshake_requests() {
+async fn one_deadline_covers_all_three_handshake_requests() {
     let certs = Certificates::new();
     let server = Server::start(
         &certs,
@@ -257,7 +261,7 @@ async fn one_deadline_covers_both_handshake_requests() {
             ..Options::default()
         },
     );
-    let budget = Duration::from_millis(450);
+    let budget = Duration::from_millis(700);
     let config = ClientConfig {
         auth_timeout: budget,
         timeout: Duration::from_secs(5),
@@ -269,8 +273,8 @@ async fn one_deadline_covers_both_handshake_requests() {
     let state = server.state.lock().unwrap();
     assert_eq!(
         state.requests.len(),
-        2,
-        "both individual phases fit; their sum exceeds the budget"
+        3,
+        "individual phases fit; all three exceed the total budget"
     );
     assert_eq!(state.domain, 0);
 }
@@ -300,7 +304,7 @@ async fn rejected_bearer_is_not_refreshed_or_retried() {
     ));
     let state = server.state.lock().unwrap();
     assert_eq!(state.domain, 1);
-    assert_eq!(state.requests.len(), 3);
+    assert_eq!(state.requests.len(), 4);
 }
 
 #[tokio::test]
@@ -350,8 +354,8 @@ async fn lost_response_does_not_replay_an_effectful_post() {
     ));
     let state = server.state.lock().unwrap();
     assert_eq!(state.domain, 1, "server observed the effect exactly once");
-    assert_eq!(state.requests.len(), 3);
-    assert!(state.requests[2].0.starts_with("POST /api/pointWrite "));
+    assert_eq!(state.requests.len(), 4);
+    assert!(state.requests[3].0.starts_with("POST /api/pointWrite "));
 }
 
 #[tokio::test]
@@ -420,5 +424,35 @@ fn incomplete_identity_and_empty_ca_are_rejected_locally() {
             config(tls).build_reqwest_client(),
             Err(ClientError::Connection(_))
         ));
+    }
+}
+
+#[tokio::test]
+async fn handshake_tokens_are_response_scoped() {
+    let certs = Certificates::new();
+    for tokens in [
+        support::Tokens::Rotate,
+        support::Tokens::Absent,
+        support::Tokens::Introduce,
+        support::Tokens::Remove,
+    ] {
+        let server = Server::start(
+            &certs,
+            false,
+            Options {
+                tokens,
+                ..Options::default()
+            },
+        );
+        let client = HaystackClient::connect_with_config(
+            &server.url,
+            "user",
+            "password",
+            &config(TlsConfig::with_ca(certs.ca.clone())),
+        )
+        .await
+        .unwrap();
+        client.read("site", None).await.unwrap();
+        assert_eq!(server.state.lock().unwrap().requests.len(), 4);
     }
 }

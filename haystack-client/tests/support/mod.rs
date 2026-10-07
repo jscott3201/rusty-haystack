@@ -1,14 +1,18 @@
 //! Synthetic loopback server with no external services or certificate files.
 //! A dedicated runtime thread owns all sockets. Drop signals shutdown and joins
 //! that thread even if an assertion unwinds the test. Each response closes TLS.
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as OUTER},
+};
 use haystack_client::tls::TlsConfig;
-use haystack_core::auth;
+use hmac::{Hmac, KeyInit, Mac};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use sha2::{Digest, Sha256};
 use std::{
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -112,6 +116,8 @@ pub enum Challenge {
     ZeroIterations,
     ExcessiveIterations,
     WrongNonce,
+    NonExtendedNonce,
+    InvalidUtf8,
     MultipleScram,
     CombinedSchemes,
     SeparateSchemes,
@@ -123,6 +129,8 @@ pub enum Final {
     Valid,
     WrongSignature,
     WrongHash,
+    MissingHash,
+    ShortSignature,
     DuplicateToken,
     DuplicateHeader,
     EmptyToken,
@@ -139,16 +147,39 @@ pub enum Domain {
     ErrorGrid,
     InvalidGrid,
 }
+#[derive(Clone, Copy, Default)]
+pub enum Tokens {
+    #[default]
+    Rotate,
+    Absent,
+    Introduce,
+    Remove,
+}
+impl Tokens {
+    fn first(self) -> Option<&'static str> {
+        match self {
+            Self::Rotate | Self::Remove => Some("discovery-token"),
+            _ => None,
+        }
+    }
+    fn final_token(self) -> Option<&'static str> {
+        match self {
+            Self::Rotate | Self::Introduce => Some("proof-token"),
+            _ => None,
+        }
+    }
+}
 #[derive(Default, Clone, Copy)]
 pub struct Options {
     pub challenge: Challenge,
+    pub tokens: Tokens,
     pub final_message: Final,
     pub domain: Domain,
     pub auth_delay: Duration,
 }
 #[derive(Default)]
 pub struct State {
-    handshake: Option<auth::ScramHandshake>,
+    transcript: Option<String>,
     pub requests: Vec<(String, String)>,
     pub domain: usize,
 }
@@ -254,6 +285,8 @@ impl Server {
         }
     }
 }
+// Independent Python stdlib derivation: pbkdf2_hmac('sha256', b'password',
+// b'test-only-salt', 4096), then HMAC with b'Client Key' / b'Server Key'.
 fn field<'a>(header: &'a str, name: &str) -> &'a str {
     header
         .split([',', ' '])
@@ -274,30 +307,56 @@ fn response(
     state.requests.push((request.into(), authorization.into()));
     let mut body = GRID.to_string();
     let (status, extra) = if authorization.starts_with("HELLO ") {
-        let nonce = auth::extract_client_nonce(field(authorization, "data")).unwrap();
-        let credentials = auth::derive_credentials("password", b"test-only-salt", 4096);
-        let (handshake, mut data) = auth::server_first_message("user", &nonce, &credentials);
-        state.handshake = Some(handshake);
+        assert_eq!(authorization, "HELLO username=dXNlcg");
+        let token = options
+            .tokens
+            .first()
+            .map(|t| format!(", handshakeToken={t}"))
+            .unwrap_or_default();
+        (
+            401,
+            format!("WWW-Authenticate: SCRAM hash=SHA-256{token}\r\n"),
+        )
+    } else if authorization.starts_with("SCRAM ") && state.transcript.is_none() {
+        assert_eq!(
+            optional_field(authorization, "handshakeToken"),
+            options.tokens.first()
+        );
+        let first = String::from_utf8(OUTER.decode(field(authorization, "data")).unwrap()).unwrap();
+        let bare = first.strip_prefix("n,,").unwrap();
+        let nonce = bare.strip_prefix("n=user,r=").unwrap();
+        let server_first = format!("r={nonce}server-nonce,s=dGVzdC1vbmx5LXNhbHQ=,i=4096");
+        state.transcript = Some(format!(
+            "{bare},{server_first},c=biws,r={nonce}server-nonce"
+        ));
+        let mut data = OUTER.encode(server_first);
         data = match options.challenge {
-            Challenge::OversizedData => BASE64.encode("r=".to_string() + &"x".repeat(4200)),
+            Challenge::OversizedData => OUTER.encode("r=".to_string() + &"x".repeat(4200)),
             Challenge::DuplicateNonce => {
-                BASE64.encode(format!("r={nonce}extra,r={nonce}extra,s=c2FsdA==,i=4096"))
+                OUTER.encode(format!("r={nonce}extra,r={nonce}extra,s=c2FsdA==,i=4096"))
             }
-            Challenge::EmptySalt => BASE64.encode(format!("r={nonce}extra,s=,i=4096")),
-            Challenge::ZeroIterations => BASE64.encode(format!("r={nonce}extra,s=c2FsdA==,i=0")),
+            Challenge::EmptySalt => OUTER.encode(format!("r={nonce}extra,s=,i=4096")),
+            Challenge::ZeroIterations => OUTER.encode(format!("r={nonce}extra,s=c2FsdA==,i=0")),
             Challenge::ExcessiveIterations => {
-                BASE64.encode(format!("r={nonce}extra,s=c2FsdA==,i=1000001"))
+                OUTER.encode(format!("r={nonce}extra,s=c2FsdA==,i=1000001"))
             }
-            Challenge::WrongNonce => BASE64.encode("r=wrong,s=c2FsdA==,i=4096"),
+            Challenge::NonExtendedNonce => OUTER.encode(format!("r={nonce},s=c2FsdA==,i=4096")),
+            Challenge::InvalidUtf8 => OUTER.encode([255]),
+            Challenge::WrongNonce => OUTER.encode("r=wrong,s=c2FsdA==,i=4096"),
             _ => data,
         };
-        let valid = auth::format_www_authenticate("handshake", "SHA-256", &data);
+        let token = options
+            .tokens
+            .final_token()
+            .map(|t| format!(", handshakeToken={t}"))
+            .unwrap_or_default();
+        let valid = format!("SCRAM hash=SHA-256{token}, data={data}");
         let challenge = match options.challenge {
             Challenge::UnsupportedHash => valid.replace("SHA-256", "SHA-512"),
             Challenge::MissingHash => valid.replace("hash=SHA-256, ", ""),
             Challenge::DuplicateHash => format!("{valid}, hash=SHA-256"),
             Challenge::DuplicateToken => format!("{valid}, handshakeToken=duplicate"),
-            Challenge::EmptyToken => valid.replace("handshakeToken=handshake", "handshakeToken="),
+            Challenge::EmptyToken => valid.replace("handshakeToken=proof-token", "handshakeToken="),
             Challenge::Malformed => {
                 format!("SCRAM handshakeToken={SENTINEL}, hash=SHA-256, data=???")
             }
@@ -317,35 +376,48 @@ fn response(
         };
         (401, format!("{prefix}WWW-Authenticate: {challenge}\r\n"))
     } else if authorization.starts_with("SCRAM ") {
-        match auth::server_verify_final(
-            state.handshake.as_ref().unwrap(),
-            field(authorization, "data"),
-        ) {
-            Ok(sig) => {
-                let sig = if matches!(options.final_message, Final::WrongSignature) {
-                    vec![0; 32]
-                } else {
-                    sig
-                };
-                let data = BASE64.encode(format!("v={}", BASE64.encode(sig)));
-                let valid = auth::format_auth_info("session-token", &data);
-                let info = match options.final_message {
-                    Final::WrongHash => format!("{valid}, hash=SHA-512"),
-                    Final::DuplicateToken => format!("{valid}, authToken={SENTINEL}"),
-                    Final::DuplicateHeader => format!("{valid}\r\nAuthentication-Info: {valid}"),
-                    Final::EmptyToken => valid.replace("authToken=session-token", "authToken="),
-                    Final::Malformed => format!(
-                        "authToken={SENTINEL}, data={}",
-                        BASE64.encode(format!("v={SENTINEL}"))
-                    ),
-                    _ => valid,
-                };
-                (200, format!("Authentication-Info: {info}\r\n"))
-            }
-            Err(_) => {
-                body = SENTINEL.into();
-                (401, String::new())
-            }
+        assert_eq!(
+            optional_field(authorization, "handshakeToken"),
+            options.tokens.final_token()
+        );
+        let final_text =
+            String::from_utf8(OUTER.decode(field(authorization, "data")).unwrap()).unwrap();
+        let (without, proof) = final_text.rsplit_once(",p=").unwrap();
+        let transcript = state.transcript.as_ref().unwrap();
+        assert!(transcript.ends_with(without));
+        let proof = BASE64.decode(proof).unwrap();
+        let client_key = BASE64.decode(CLIENT_KEY).unwrap();
+        let stored = Sha256::digest(&client_key);
+        let signature = mac(&stored, transcript.as_bytes());
+        let expected: Vec<_> = client_key
+            .iter()
+            .zip(signature.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
+        if proof == expected {
+            let sig = match options.final_message {
+                Final::WrongSignature => vec![0; 32],
+                Final::ShortSignature => vec![0; 1],
+                _ => mac(&BASE64.decode(SERVER_KEY).unwrap(), transcript.as_bytes()),
+            };
+            let data = OUTER.encode(format!("v={}", BASE64.encode(sig)));
+            let valid = format!("authToken=session-token, hash=SHA-256, data={data}");
+            let info = match options.final_message {
+                Final::WrongHash => valid.replace("SHA-256", "SHA-512"),
+                Final::MissingHash => valid.replace("hash=SHA-256, ", ""),
+                Final::DuplicateToken => format!("{valid}, authToken={SENTINEL}"),
+                Final::DuplicateHeader => format!("{valid}\r\nAuthentication-Info: {valid}"),
+                Final::EmptyToken => valid.replace("authToken=session-token", "authToken="),
+                Final::Malformed => format!(
+                    "authToken={SENTINEL}, hash=SHA-256, data={}",
+                    OUTER.encode(format!("v={SENTINEL}"))
+                ),
+                _ => valid,
+            };
+            (200, format!("Authentication-Info: {info}\r\n"))
+        } else {
+            body = SENTINEL.into();
+            (403, String::new())
         }
     } else {
         state.domain += 1;
@@ -378,4 +450,21 @@ fn response(
         "HTTP/1.1 {status} Test\r\n{extra}Content-Type: text/zinc\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     ))
+}
+
+const CLIENT_KEY: &str = "miBLs3zHo+BuurNPsetfCUPwbVy1xni0Bd32xTiS3z4=";
+
+const SERVER_KEY: &str = "3a7YdMwBdzDbvbjbuV1MmTZ5BgUGyEfjMa4yz/c8e7w=";
+
+fn mac(key: &[u8], message: &[u8]) -> Vec<u8> {
+    let mut mac = <Hmac<Sha256>>::new_from_slice(key).unwrap();
+    mac.update(message);
+    mac.finalize().into_bytes().to_vec()
+}
+fn optional_field<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+    header.split([',', ' ']).find_map(|s| {
+        s.split_once('=')
+            .filter(|(k, _)| *k == name)
+            .map(|(_, v)| v)
+    })
 }

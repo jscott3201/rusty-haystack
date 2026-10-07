@@ -1,445 +1,474 @@
-//! Server-side authentication manager using SCRAM SHA-256.
-//!
-//! Manages user records, in-flight SCRAM handshakes, and active bearer
-//! tokens.
-
+//! Bounded three-request Haystack SCRAM SHA-256 authentication.
 pub mod users;
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as OUTER},
+};
+use haystack_core::auth::{self, DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake};
 use hmac::{Hmac, KeyInit, Mac};
-use parking_lot::RwLock;
-use sha2::Sha256;
+use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+use users::{UserRecord, load_users_from_str, load_users_from_toml};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use haystack_core::auth::{
-    DEFAULT_ITERATIONS, ScramCredentials, ScramHandshake, derive_credentials, extract_client_nonce,
-    format_auth_info, format_www_authenticate, generate_nonce, server_first_message,
-    server_verify_final,
-};
-
-use users::{UserRecord, load_users_from_str, load_users_from_toml};
-
-/// An authenticated user with associated permissions.
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub username: String,
     pub permissions: Vec<String>,
 }
 
-/// Time-to-live for in-flight SCRAM handshakes.
-const HANDSHAKE_TTL: Duration = Duration::from_secs(60);
-
-/// Server-side authentication manager.
-///
-/// Holds user credentials, in-flight SCRAM handshakes, and active
-/// bearer tokens.
-pub struct AuthManager {
-    /// Username -> pre-computed SCRAM credentials + permissions.
-    users: HashMap<String, UserRecord>,
-    /// In-flight SCRAM handshakes: handshake_token -> (ScramHandshake, created_at).
-    handshakes: RwLock<HashMap<String, (ScramHandshake, Instant)>>,
-    /// Active bearer tokens: auth_token -> (AuthUser, created_at).
-    tokens: RwLock<HashMap<String, (AuthUser, Instant)>>,
-    /// Time-to-live for bearer tokens.
-    token_ttl: Duration,
-    /// Secret used to derive fake SCRAM challenges for unknown users,
-    /// preventing username enumeration attacks.
-    server_secret: [u8; 32],
-    /// Counter used to periodically trigger bulk cleanup of expired tokens.
-    cleanup_counter: AtomicU64,
+/// Per-process admission bounds, not a replacement for deployment rate limits.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthLimits {
+    pub max_handshakes: usize,
+    pub max_tokens: usize,
+    pub handshake_ttl: Duration,
+}
+impl Default for AuthLimits {
+    fn default() -> Self {
+        Self {
+            max_handshakes: 1024,
+            max_tokens: 4096,
+            handshake_ttl: Duration::from_secs(60),
+        }
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuthFailure {
+    Rejected,
+    Capacity,
+}
+/// Challenge responses are 401; authenticated responses are 200.
+pub enum ScramResponse {
+    Challenge(String),
+    Authenticated(String),
+}
+impl std::fmt::Debug for ScramResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScramResponse { [REDACTED] }")
+    }
 }
 
+enum Phase {
+    AwaitFirst(String),
+    AwaitFinal(ScramHandshake),
+}
+#[derive(Default)]
+struct State {
+    handshakes: HashMap<String, (Phase, Instant)>,
+    tokens: HashMap<String, (AuthUser, Instant)>,
+}
+/// One lock makes sweep, admission, transition and final consumption atomic.
+/// Unknown identities use cheap secret-derived decoys and can never receive a bearer.
+pub struct AuthManager {
+    users: HashMap<String, UserRecord>,
+    state: Mutex<State>,
+    token_ttl: Duration,
+    limits: AuthLimits,
+    server_secret: [u8; 32],
+}
 impl Drop for AuthManager {
     fn drop(&mut self) {
         self.server_secret.zeroize();
     }
 }
-
 impl AuthManager {
-    /// Create a new AuthManager with the given user records and token TTL.
     pub fn new(users: HashMap<String, UserRecord>, token_ttl: Duration) -> Self {
-        let server_secret: [u8; 32] = rand::RngExt::random(&mut rand::rng());
         Self {
             users,
-            handshakes: RwLock::new(HashMap::new()),
-            tokens: RwLock::new(HashMap::new()),
+            state: Mutex::new(State::default()),
             token_ttl,
-            server_secret,
-            cleanup_counter: AtomicU64::new(0),
+            limits: AuthLimits::default(),
+            server_secret: rand::RngExt::random(&mut rand::rng()),
         }
     }
-
-    /// Create an AuthManager with no users (auth effectively disabled).
     pub fn empty() -> Self {
         Self::new(HashMap::new(), Duration::from_secs(3600))
     }
-
-    /// Builder method to configure the token TTL.
     pub fn with_token_ttl(mut self, duration: Duration) -> Self {
         self.token_ttl = duration;
         self
     }
-
-    /// Create an AuthManager from a TOML file.
+    pub fn with_limits(mut self, limits: AuthLimits) -> Self {
+        self.limits = limits;
+        self
+    }
     pub fn from_toml(path: &str) -> Result<Self, String> {
-        let users = load_users_from_toml(path)?;
-        Ok(Self::new(users, Duration::from_secs(3600)))
+        Ok(Self::new(
+            load_users_from_toml(path)?,
+            Duration::from_secs(3600),
+        ))
     }
-
-    /// Create an AuthManager from TOML content string.
     pub fn from_toml_str(content: &str) -> Result<Self, String> {
-        let users = load_users_from_str(content)?;
-        Ok(Self::new(users, Duration::from_secs(3600)))
+        Ok(Self::new(
+            load_users_from_str(content)?,
+            Duration::from_secs(3600),
+        ))
     }
-
-    /// Returns true if authentication is enabled (there are registered users).
     pub fn is_enabled(&self) -> bool {
         !self.users.is_empty()
     }
 
-    /// Derive deterministic fake SCRAM credentials for an unknown username.
-    ///
-    /// Uses HMAC(server_secret, username) so the same unknown username always
-    /// produces the same salt, making the response indistinguishable from a
-    /// real user's challenge to an outside observer.
-    fn fake_credentials(&self, username: &str) -> ScramCredentials {
+    fn fake_key(&self, domain: &[u8], username: &str) -> Vec<u8> {
         let mut mac = <Hmac<Sha256>>::new_from_slice(&self.server_secret)
             .expect("HMAC accepts keys of any size");
+        mac.update(domain);
+        mac.update(&[0]);
         mac.update(username.as_bytes());
-        let fake_salt = mac.finalize().into_bytes();
-
-        // Derive credentials using a throwaway password; the handshake will
-        // always fail at the `handle_scram` step because the attacker does
-        // not know a valid password, but the challenge itself looks normal.
-        derive_credentials("", &fake_salt, DEFAULT_ITERATIONS)
+        mac.finalize().into_bytes().to_vec()
     }
-
-    /// Handle a HELLO request: look up user, create SCRAM handshake.
-    ///
-    /// `client_first_b64` is the optional base64-encoded client-first-message
-    /// containing the client nonce. If absent, the server generates a nonce
-    /// (but the handshake will fail if the client expects its own nonce).
-    ///
-    /// Returns the `WWW-Authenticate` header value for the 401 response.
-    /// Unknown users receive a fake but plausible challenge to prevent
-    /// username enumeration.
-    pub fn handle_hello(
-        &self,
-        username: &str,
-        client_first_b64: Option<&str>,
-    ) -> Result<String, String> {
-        let owned_fake;
-        let credentials: &ScramCredentials = match self.users.get(username) {
-            Some(user_record) => &user_record.credentials,
-            None => {
-                owned_fake = self.fake_credentials(username);
-                &owned_fake
-            }
-        };
-
-        // Extract client nonce from client-first-message, or generate one
-        let client_nonce = match client_first_b64 {
-            Some(data) => {
-                extract_client_nonce(data).map_err(|e| format!("invalid client-first data: {e}"))?
-            }
-            None => generate_nonce(),
-        };
-
-        // Create server-first-message
-        let (handshake, server_first_b64) =
-            server_first_message(username, &client_nonce, credentials);
-
-        // Lazy cleanup: remove expired handshakes before inserting.
-        {
-            let now = Instant::now();
-            self.handshakes
-                .write()
-                .retain(|_, (_, created)| now.duration_since(*created) < HANDSHAKE_TTL);
+    fn fake_credentials(&self, username: &str) -> ScramCredentials {
+        let mut client_key = self.fake_key(b"client-key", username);
+        let stored_key = Sha256::digest(&client_key).to_vec();
+        client_key.zeroize();
+        ScramCredentials {
+            salt: self.fake_key(b"salt", username)[..16].to_vec(),
+            iterations: DEFAULT_ITERATIONS,
+            stored_key,
+            server_key: self.fake_key(b"server-key", username),
         }
-
-        // Store handshake with a unique token and timestamp.
-        let handshake_token = Uuid::new_v4().to_string();
-        self.handshakes
-            .write()
-            .insert(handshake_token.clone(), (handshake, Instant::now()));
-
-        // Format the WWW-Authenticate header
-        let www_auth = format_www_authenticate(&handshake_token, "SHA-256", &server_first_b64);
-        Ok(www_auth)
     }
-
-    /// Handle a SCRAM request: verify client proof, issue auth token.
-    ///
-    /// Returns `(auth_token, authentication_info_header_value)`.
+    fn sweep(&self, state: &mut State, now: Instant) {
+        state.handshakes.retain(|_, (_, created)| {
+            now.saturating_duration_since(*created) < self.limits.handshake_ttl
+        });
+        state
+            .tokens
+            .retain(|_, (_, created)| now.saturating_duration_since(*created) < self.token_ttl);
+    }
+    /// Admit HELLO without PBKDF2 or a client-first transcript.
+    pub fn handle_hello(&self, username: &str) -> Result<String, AuthFailure> {
+        self.hello_at(username, Instant::now())
+    }
+    fn hello_at(&self, username: &str, now: Instant) -> Result<String, AuthFailure> {
+        auth::validate_username(username).map_err(|_| AuthFailure::Rejected)?;
+        let mut state = self.state.lock();
+        self.sweep(&mut state, now);
+        if state.handshakes.len() >= self.limits.max_handshakes {
+            return Err(AuthFailure::Capacity);
+        }
+        let token = Uuid::new_v4().to_string();
+        state
+            .handshakes
+            .insert(token.clone(), (Phase::AwaitFirst(username.into()), now));
+        Ok(auth::format_www_authenticate(Some(&token), None))
+    }
+    /// Consume the issued token once. Client-first rotates it without extending TTL.
     pub fn handle_scram(
         &self,
-        handshake_token: &str,
+        token: Option<&str>,
         data: &str,
-    ) -> Result<(String, String), String> {
-        // Remove the handshake (one-time use) and check expiry.
-        let (handshake, created_at) = self
+    ) -> Result<ScramResponse, AuthFailure> {
+        self.scram_at(token, data, Instant::now())
+    }
+    fn scram_at(
+        &self,
+        token: Option<&str>,
+        data: &str,
+        now: Instant,
+    ) -> Result<ScramResponse, AuthFailure> {
+        let token = token.ok_or(AuthFailure::Rejected)?;
+        let mut state = self.state.lock();
+        self.sweep(&mut state, now);
+        let (phase, created) = state
             .handshakes
-            .write()
-            .remove(handshake_token)
-            .ok_or_else(|| "invalid or expired handshake token".to_string())?;
-        if created_at.elapsed() > HANDSHAKE_TTL {
-            return Err("handshake token expired".to_string());
-        }
-
-        let username = handshake.username.clone();
-
-        // Verify client proof
-        let server_sig = server_verify_final(&handshake, data)
-            .map_err(|e| format!("SCRAM verification failed: {e}"))?;
-
-        // Issue auth token
-        let auth_token = Uuid::new_v4().to_string();
-
-        // Look up permissions
-        let permissions = self
-            .users
-            .get(&username)
-            .map(|r| r.permissions.clone())
-            .unwrap_or_default();
-
-        // Store token -> (user, created_at) mapping
-        self.tokens.write().insert(
-            auth_token.clone(),
-            (
-                AuthUser {
-                    username,
-                    permissions,
-                },
-                Instant::now(),
-            ),
-        );
-
-        // Format the server-final data (v=<server_signature>)
-        let server_final_msg = format!("v={}", BASE64.encode(&server_sig));
-        let server_final_b64 = BASE64.encode(server_final_msg.as_bytes());
-        let auth_info = format_auth_info(&auth_token, &server_final_b64);
-
-        Ok((auth_token, auth_info))
-    }
-
-    /// Validate a bearer token and return the associated user.
-    ///
-    /// Returns `None` if the token is unknown or has expired. Expired
-    /// tokens are automatically removed under a single write lock to
-    /// avoid TOCTOU races.
-    pub fn validate_token(&self, token: &str) -> Option<AuthUser> {
-        // Periodically sweep all expired tokens to prevent unbounded growth.
-        let count = self.cleanup_counter.fetch_add(1, Ordering::Relaxed);
-        if count.is_multiple_of(100) {
-            let mut tokens = self.tokens.write();
-            let ttl = self.token_ttl;
-            tokens.retain(|_, (_, created)| created.elapsed() < ttl);
-        }
-
-        let mut tokens = self.tokens.write();
-        match tokens.get(token) {
-            Some((user, created_at)) => {
-                if created_at.elapsed() <= self.token_ttl {
-                    Some(user.clone())
+            .remove(token)
+            .ok_or(AuthFailure::Rejected)?;
+        match phase {
+            Phase::AwaitFirst(username) => {
+                let fake;
+                let credentials = if let Some(record) = self.users.get(&username) {
+                    &record.credentials
                 } else {
-                    // Token expired — remove immediately under the same lock.
-                    tokens.remove(token);
-                    None
-                }
+                    fake = self.fake_credentials(&username);
+                    &fake
+                };
+                let (handshake, data) = auth::server_first_message(&username, data, credentials)
+                    .map_err(|_| AuthFailure::Rejected)?;
+                let token = Uuid::new_v4().to_string();
+                state
+                    .handshakes
+                    .insert(token.clone(), (Phase::AwaitFinal(handshake), created));
+                Ok(ScramResponse::Challenge(auth::format_www_authenticate(
+                    Some(&token),
+                    Some(&data),
+                )))
             }
-            None => None,
+            Phase::AwaitFinal(handshake) => {
+                let signature = auth::server_verify_final(&handshake, data)
+                    .map_err(|_| AuthFailure::Rejected)?;
+                // Membership is required even if a decoy proof is cryptographically correct.
+                let record = self
+                    .users
+                    .get(&handshake.username)
+                    .ok_or(AuthFailure::Rejected)?;
+                if state.tokens.len() >= self.limits.max_tokens {
+                    return Err(AuthFailure::Capacity);
+                }
+                let token = Uuid::new_v4().to_string();
+                let user = AuthUser {
+                    username: handshake.username.clone(),
+                    permissions: record.permissions.clone(),
+                };
+                state.tokens.insert(token.clone(), (user, now));
+                let final_data = OUTER.encode(format!("v={}", BASE64.encode(signature)));
+                Ok(ScramResponse::Authenticated(auth::format_auth_info(
+                    &token,
+                    &final_data,
+                )))
+            }
         }
     }
-
-    /// Remove a bearer token (logout / close).
-    pub fn revoke_token(&self, token: &str) -> bool {
-        self.tokens.write().remove(token).is_some()
+    pub fn validate_token(&self, token: &str) -> Option<AuthUser> {
+        self.validate_at(token, Instant::now())
     }
-
-    /// Inject a token directly (for testing). The token is stamped with the
-    /// current instant so it will not be considered expired.
+    fn validate_at(&self, token: &str, now: Instant) -> Option<AuthUser> {
+        let mut state = self.state.lock();
+        self.sweep(&mut state, now);
+        state.tokens.get(token).map(|(user, _)| user.clone())
+    }
+    pub fn revoke_token(&self, token: &str) -> bool {
+        self.state.lock().tokens.remove(token).is_some()
+    }
     #[doc(hidden)]
     pub fn inject_token(&self, token: String, user: AuthUser) {
-        self.tokens.write().insert(token, (user, Instant::now()));
-    }
-
-    /// Check whether a user has a required permission.
-    pub fn check_permission(user: &AuthUser, required: &str) -> bool {
-        // Admin has all permissions
-        if user.permissions.contains(&"admin".to_string()) {
-            return true;
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        self.sweep(&mut state, now);
+        if state.tokens.len() < self.limits.max_tokens {
+            state.tokens.insert(token, (user, now));
         }
-        user.permissions.contains(&required.to_string())
+    }
+    pub fn check_permission(user: &AuthUser, required: &str) -> bool {
+        user.permissions
+            .iter()
+            .any(|p| p == "admin" || p == required)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::users::hash_password;
-
-    fn make_test_manager() -> AuthManager {
-        let hash = hash_password("s3cret");
-        let toml_str = format!(
-            r#"
-[users.admin]
-password_hash = "{hash}"
-permissions = ["read", "write", "admin"]
-
-[users.viewer]
-password_hash = "{hash}"
-permissions = ["read"]
-"#
-        );
-        AuthManager::from_toml_str(&toml_str).unwrap()
+    fn manager() -> AuthManager {
+        let credentials = auth::derive_credentials("pencil", b"synthetic-salt", 4096);
+        AuthManager::new(
+            HashMap::from([(
+                "user".into(),
+                UserRecord {
+                    credentials,
+                    permissions: vec!["read".into()],
+                },
+            )]),
+            Duration::from_secs(10),
+        )
     }
-
-    #[test]
-    fn empty_manager_is_disabled() {
-        let mgr = AuthManager::empty();
-        assert!(!mgr.is_enabled());
+    fn fields(header: &str) -> HashMap<String, &str> {
+        auth::parse_auth_parameters(header.strip_prefix("SCRAM ").unwrap_or(header)).unwrap()
     }
-
-    #[test]
-    fn manager_with_users_is_enabled() {
-        let mgr = make_test_manager();
-        assert!(mgr.is_enabled());
-    }
-
-    #[test]
-    fn hello_unknown_user_returns_fake_challenge() {
-        let mgr = make_test_manager();
-        // Unknown users now get a plausible SCRAM challenge instead of an
-        // error, preventing username enumeration.
-        let result = mgr.handle_hello("nonexistent", None);
-        assert!(result.is_ok());
-        let www_auth = result.unwrap();
-        assert!(www_auth.contains("SCRAM"));
-        assert!(www_auth.contains("SHA-256"));
-    }
-
-    #[test]
-    fn hello_known_user_succeeds() {
-        let mgr = make_test_manager();
-        let result = mgr.handle_hello("admin", None);
-        assert!(result.is_ok());
-        let www_auth = result.unwrap();
-        assert!(www_auth.contains("SCRAM"));
-        assert!(www_auth.contains("SHA-256"));
-    }
-
-    #[test]
-    fn hello_known_and_unknown_users_look_similar() {
-        let mgr = make_test_manager();
-        let known = mgr.handle_hello("admin", None).unwrap();
-        let unknown = mgr.handle_hello("nonexistent", None).unwrap();
-
-        // Both responses must have the same structural format so that an
-        // attacker cannot distinguish real from fake users.
-        assert!(known.starts_with("SCRAM handshakeToken="));
-        assert!(unknown.starts_with("SCRAM handshakeToken="));
-        assert!(known.contains("hash=SHA-256"));
-        assert!(unknown.contains("hash=SHA-256"));
-        assert!(known.contains("data="));
-        assert!(unknown.contains("data="));
-    }
-
-    #[test]
-    fn fake_challenge_is_deterministic_per_username() {
-        let mgr = make_test_manager();
-        // The fake salt must be deterministic so that repeated HELLO requests
-        // for the same unknown username produce consistent parameters.
-        let creds1 = mgr.fake_credentials("ghost");
-        let creds2 = mgr.fake_credentials("ghost");
-        assert_eq!(creds1.salt, creds2.salt);
-        assert_eq!(creds1.stored_key, creds2.stored_key);
-        assert_eq!(creds1.server_key, creds2.server_key);
-
-        // Different usernames produce different fake salts.
-        let creds3 = mgr.fake_credentials("phantom");
-        assert_ne!(creds1.salt, creds3.salt);
-    }
-
-    #[test]
-    fn validate_token_returns_none_for_unknown() {
-        let mgr = make_test_manager();
-        assert!(mgr.validate_token("nonexistent-token").is_none());
-    }
-
-    #[test]
-    fn check_permission_admin_has_all() {
-        let user = AuthUser {
-            username: "admin".to_string(),
-            permissions: vec!["admin".to_string()],
+    fn ready(mgr: &AuthManager, name: &str, now: Instant) -> (String, String, String) {
+        let hello = mgr.hello_at(name, now).unwrap();
+        let token = fields(&hello)["handshaketoken"].to_string();
+        let (_, first) = auth::client_first_message(name);
+        let ScramResponse::Challenge(challenge) = mgr.scram_at(Some(&token), &first, now).unwrap()
+        else {
+            panic!("expected challenge")
         };
-        assert!(AuthManager::check_permission(&user, "read"));
-        assert!(AuthManager::check_permission(&user, "write"));
-        assert!(AuthManager::check_permission(&user, "admin"));
+        assert_eq!(
+            mgr.scram_at(Some(&token), &first, now).err(),
+            Some(AuthFailure::Rejected)
+        );
+        let parsed = fields(&challenge);
+        (
+            parsed["handshaketoken"].into(),
+            first,
+            parsed["data"].into(),
+        )
+    }
+    #[test]
+    fn unknown_user_correct_fake_proof_never_issues_bearer() {
+        let mgr = manager();
+        let now = Instant::now();
+        let (token, first, server) = ready(&mgr, "ghost", now);
+        let bare = auth::decode_auth_data(&first).unwrap();
+        let server = auth::decode_auth_data(&server).unwrap();
+        let nonce = server
+            .split(',')
+            .next()
+            .unwrap()
+            .strip_prefix("r=")
+            .unwrap();
+        let without = format!("c=biws,r={nonce}");
+        let transcript = format!("{},{server},{without}", &bare[3..]);
+        let credentials = mgr.fake_credentials("ghost");
+        let mut mac = <Hmac<Sha256>>::new_from_slice(&credentials.stored_key).unwrap();
+        mac.update(transcript.as_bytes());
+        let signature = mac.finalize().into_bytes();
+        let client_key = mgr.fake_key(b"client-key", "ghost");
+        let proof: Vec<_> = client_key
+            .iter()
+            .zip(signature.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
+        let data = OUTER.encode(format!("{without},p={}", BASE64.encode(proof)));
+        // First prove this is a valid decoy proof, then prove identity admission rejects it.
+        {
+            let state = mgr.state.lock();
+            let Phase::AwaitFinal(hs) = &state.handshakes[&token].0 else {
+                panic!()
+            };
+            assert!(auth::server_verify_final(hs, &data).is_ok());
+        }
+        assert_eq!(
+            mgr.scram_at(Some(&token), &data, now).err(),
+            Some(AuthFailure::Rejected)
+        );
+        assert!(mgr.state.lock().tokens.is_empty());
+    }
+    #[test]
+    fn final_consumed_once_under_concurrency() {
+        let mgr = manager();
+        let now = Instant::now();
+        let (token, first, server) = ready(&mgr, "user", now);
+        let (proof, _) = auth::client_final_message("pencil", &first, &server).unwrap();
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| mgr.handle_scram(Some(&token), &proof));
+            let b = scope.spawn(|| mgr.handle_scram(Some(&token), &proof));
+            let results = [a.join().unwrap(), b.join().unwrap()];
+            assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        });
+        assert_eq!(mgr.state.lock().tokens.len(), 1);
+    }
+    #[test]
+    fn expired_states_are_swept_at_admission_and_transition_keeps_original_age() {
+        let mgr = manager().with_limits(AuthLimits {
+            max_handshakes: 1,
+            max_tokens: 1,
+            handshake_ttl: Duration::from_secs(2),
+        });
+        let now = Instant::now();
+        let hello = mgr.hello_at("user", now).unwrap();
+        assert_eq!(mgr.hello_at("user", now).err(), Some(AuthFailure::Capacity));
+        let (_, first) = auth::client_first_message("user");
+        let ScramResponse::Challenge(challenge) = mgr
+            .scram_at(
+                Some(fields(&hello)["handshaketoken"]),
+                &first,
+                now + Duration::from_secs(1),
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        let p = fields(&challenge);
+        let (proof, _) = auth::client_final_message("pencil", &first, p["data"]).unwrap();
+        assert_eq!(
+            mgr.scram_at(
+                Some(p["handshaketoken"]),
+                &proof,
+                now + Duration::from_secs(2)
+            )
+            .err(),
+            Some(AuthFailure::Rejected)
+        );
+        mgr.hello_at("user", now + Duration::from_secs(2)).unwrap();
+        mgr.hello_at("user", now + Duration::from_secs(4)).unwrap();
+        assert_eq!(mgr.state.lock().handshakes.len(), 1);
+    }
+    #[test]
+    fn bearer_capacity_and_expiry_are_atomic_even_without_token_reads() {
+        let mgr = manager().with_limits(AuthLimits {
+            max_tokens: 1,
+            ..AuthLimits::default()
+        });
+        let now = Instant::now();
+        let (token, first, server) = ready(&mgr, "user", now);
+        let (proof, _) = auth::client_final_message("pencil", &first, &server).unwrap();
+        let ScramResponse::Authenticated(info) = mgr.scram_at(Some(&token), &proof, now).unwrap()
+        else {
+            panic!()
+        };
+        let bearer = fields(&info)["authtoken"].to_string();
+        assert!(mgr.validate_at(&bearer, now).is_some());
+        let (token, first, server) = ready(&mgr, "user", now);
+        let (proof, _) = auth::client_final_message("pencil", &first, &server).unwrap();
+        assert_eq!(
+            mgr.scram_at(Some(&token), &proof, now).err(),
+            Some(AuthFailure::Capacity)
+        );
+        let later = now + Duration::from_secs(10);
+        let (token, first, server) = ready(&mgr, "user", later);
+        let (proof, _) = auth::client_final_message("pencil", &first, &server).unwrap();
+        assert!(mgr.scram_at(Some(&token), &proof, later).is_ok());
+        assert!(mgr.validate_at(&bearer, later).is_none());
+        assert_eq!(mgr.state.lock().tokens.len(), 1);
+    }
+    #[test]
+    fn missing_wrong_stage_and_wrong_identity_are_rejected() {
+        let mgr = manager();
+        let now = Instant::now();
+        assert_eq!(
+            mgr.handle_scram(None, "x").err(),
+            Some(AuthFailure::Rejected)
+        );
+        for data in [
+            OUTER.encode("c=biws,r=n,p=eA=="),
+            auth::client_first_message("other").1,
+        ] {
+            let hello = mgr.hello_at("user", now).unwrap();
+            let token = fields(&hello)["handshaketoken"];
+            assert_eq!(
+                mgr.scram_at(Some(token), &data, now).err(),
+                Some(AuthFailure::Rejected)
+            );
+            assert_eq!(
+                mgr.scram_at(Some(token), &data, now).err(),
+                Some(AuthFailure::Rejected)
+            );
+        }
+        let (token, first, _) = ready(&mgr, "user", now);
+        assert_eq!(
+            mgr.scram_at(Some(&token), &first, now).err(),
+            Some(AuthFailure::Rejected)
+        );
+    }
+    #[test]
+    fn concurrent_hello_admission_never_exceeds_capacity() {
+        let mgr = manager().with_limits(AuthLimits {
+            max_handshakes: 2,
+            ..AuthLimits::default()
+        });
+        let accepted = std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| mgr.handle_hello("user")))
+                .collect();
+            tasks
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .filter(Result::is_ok)
+                .count()
+        });
+        assert_eq!(accepted, 2);
+        assert_eq!(mgr.state.lock().handshakes.len(), 2);
     }
 
     #[test]
-    fn check_permission_viewer_limited() {
+    fn permissions_and_revocation() {
+        let mgr = manager();
         let user = AuthUser {
-            username: "viewer".to_string(),
-            permissions: vec!["read".to_string()],
+            username: "u".into(),
+            permissions: vec!["read".into()],
         };
         assert!(AuthManager::check_permission(&user, "read"));
         assert!(!AuthManager::check_permission(&user, "write"));
-        assert!(!AuthManager::check_permission(&user, "admin"));
-    }
-
-    #[test]
-    fn revoke_token_returns_false_for_unknown() {
-        let mgr = make_test_manager();
-        assert!(!mgr.revoke_token("nonexistent-token"));
-    }
-
-    #[test]
-    fn validate_token_succeeds_before_expiry() {
-        let mgr = make_test_manager();
-        // Manually insert a token with Instant::now() (fresh, not expired).
-        let user = AuthUser {
-            username: "admin".to_string(),
-            permissions: vec!["admin".to_string()],
-        };
-        mgr.tokens
-            .write()
-            .insert("good-token".to_string(), (user, Instant::now()));
-
-        assert!(mgr.validate_token("good-token").is_some());
-    }
-
-    #[test]
-    fn validate_token_fails_after_expiry() {
-        // Use a very short TTL so the token is already expired.
-        let mgr = make_test_manager().with_token_ttl(Duration::from_secs(0));
-
-        let user = AuthUser {
-            username: "admin".to_string(),
-            permissions: vec!["admin".to_string()],
-        };
-        // Insert a token that was created "now" -- with a 0s TTL it is
-        // immediately expired.
-        mgr.tokens
-            .write()
-            .insert("expired-token".to_string(), (user, Instant::now()));
-
-        // Even though the token exists, it should be reported as expired.
-        assert!(mgr.validate_token("expired-token").is_none());
-
-        // The expired token should have been removed from the map.
-        assert!(mgr.tokens.read().get("expired-token").is_none());
-    }
-
-    #[test]
-    fn with_token_ttl_sets_custom_duration() {
-        let mgr = AuthManager::empty().with_token_ttl(Duration::from_secs(120));
-        assert_eq!(mgr.token_ttl, Duration::from_secs(120));
+        mgr.inject_token("token".into(), user);
+        assert!(mgr.validate_token("token").is_some());
+        assert!(mgr.revoke_token("token"));
+        assert!(!mgr.revoke_token("token"));
     }
 }
