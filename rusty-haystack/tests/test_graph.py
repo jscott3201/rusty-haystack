@@ -257,3 +257,94 @@ class TestSharedGraph:
     def test_repr(self):
         sg = rh.SharedGraph()
         assert isinstance(repr(sg), str)
+
+
+def result_ids(graph, expression):
+    return sorted(row["id"].val for row in graph.read(expression))
+
+
+@pytest.mark.parametrize("graph_type", [rh.EntityGraph, rh.SharedGraph])
+class TestGraphCorrectness:
+    @pytest.mark.parametrize("invalid_id", [rh.Ref("renamed"), rh.Remove(), "equip"])
+    def test_rejected_identity_patch_preserves_every_view(self, graph_type, invalid_id):
+        graph = graph_type()
+        graph.add(rh.HDict({
+            "id": rh.Ref("equip", "Original display"),
+            "siteRef": rh.Ref("site", "Original site"),
+            "curVal": rh.Number(21),
+        }))
+        version = graph.version
+        for _ in range(2):
+            assert result_ids(graph, "curVal == 21") == ["equip"]
+        with pytest.raises(rh.GraphError, match="id cannot"):
+            graph.update("equip", rh.HDict({
+                "id": invalid_id,
+                "siteRef": rh.Ref("other"),
+                "curVal": rh.Number(99),
+                "newTag": rh.Marker(),
+            }))
+        assert graph.version == version
+        assert len(graph) == 1
+        assert graph.get("equip")["id"].dis == "Original display"
+        assert graph.get("equip")["siteRef"].dis == "Original site"
+        assert graph.get("renamed") is None
+        assert result_ids(graph, "curVal == 21") == ["equip"]
+        assert result_ids(graph, "curVal == 99 or newTag") == []
+        assert graph.refs_from("equip") == ["site"]
+        assert graph.refs_to("site") == ["equip"]
+        assert graph.refs_to("other") == []
+        assert graph.changes_since(version) == []
+
+    def test_same_id_full_row_and_display_updates(self, graph_type):
+        graph = graph_type()
+        row = rh.HDict({"id": rh.Ref("equip", "Old"), "curVal": rh.Number(21)})
+        graph.add(row)
+        assert result_ids(graph, "curVal == 21") == ["equip"]
+        graph.update("equip", row)
+        assert graph.version == 2
+        graph.update("equip", rh.HDict({"id": rh.Ref("equip", "New")}))
+        assert graph.version == 3
+        assert graph.get("equip")["id"].dis == "New"
+        assert next(iter(graph.read("curVal == 21")))["id"].dis == "New"
+        diff, = graph.changes_since(2)
+        assert diff.previous_tags["id"].dis == "Old"
+        assert diff.changed_tags["id"].dis == "New"
+
+    def test_empty_update_checks_existence(self, graph_type):
+        graph = graph_type()
+        graph.add(rh.HDict({"id": rh.Ref("equip")}))
+        graph.update("equip", rh.HDict())
+        with pytest.raises(rh.GraphError, match="not found"):
+            graph.update("missing", rh.HDict())
+        assert graph.version == 1
+        assert graph.changes_since(1) == []
+
+    def test_ref_query_cache_tracks_replacement_removal_and_readdition(self, graph_type):
+        graph = graph_type()
+        graph.add(rh.HDict({"id": rh.Ref("site"), "site": rh.Marker()}))
+        graph.add(rh.HDict({"id": rh.Ref("equip"), "siteRef": rh.Ref("site", "Label")}))
+        for _ in range(2):
+            assert result_ids(graph, 'siteRef == @site "Different label"') == ["equip"]
+            assert result_ids(graph, "siteRef->site") == ["equip"]
+        graph.update("equip", rh.HDict({"siteRef": "site"}))
+        assert graph.refs_from("equip") == []
+        assert graph.refs_to("site") == []
+        assert result_ids(graph, 'siteRef == @site "Different label"') == []
+        assert result_ids(graph, "siteRef->site") == []
+        graph.remove("equip")
+        graph.add(rh.HDict({"id": rh.Ref("equip"), "siteRef": rh.Ref("site")}))
+        assert result_ids(graph, "siteRef->site") == ["equip"]
+        assert graph.refs_to("site") == ["equip"]
+
+    def test_signed_zero_and_mixed_kind_inequality(self, graph_type):
+        graph = graph_type()
+        for ref, value in [
+            ("minus", rh.Number(-0.0)),
+            ("plus", rh.Number(0.0)),
+            ("unit", rh.Number(0.0, "kW")),
+            ("ref", rh.Ref("target")),
+        ]:
+            graph.add(rh.HDict({"id": rh.Ref(ref), "curVal": value}))
+        assert result_ids(graph, "curVal >= 0") == ["minus", "plus"]
+        assert result_ids(graph, "curVal == 0") == ["plus"]
+        assert result_ids(graph, "curVal != 0") == ["minus", "ref", "unit"]
