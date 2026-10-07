@@ -47,3 +47,7 @@ tower = { workspace = true, features = ["util"] }
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[[bench]]
+name = "baseline"
+harness = false

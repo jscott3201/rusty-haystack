@@ -1,5 +1,88 @@
 # Rusty Haystack Benchmarks
 
+## Reproducible baseline
+
+The `baseline` targets provide a bounded, correctness-checked selection for future
+comparisons. They make no production workload, memory-footprint, cross-platform,
+concurrency-capacity, or speedup claim. Timings are collected only after the harness
+is committed and the measurement host is free of other builds and benchmarks.
+
+| Dataset | Exact shape | Queries / expected rows |
+|---|---|---|
+| `campus_v1`, 972 entities | 12 campuses × (1 site + 8 equips + 72 points) | Marker: 96; site reference: 16; nested reference: 90; after referenced-site mutation: 75 |
+| `campus_v1`, 10,125 entities | 125 campuses × the same 81-entity shape | Marker: 1,000; site reference: 16; nested reference: 945; after mutation: 930 |
+| `history_v1`, 1,000 items | One series, UTC minute steps from 2024-06-01; value `70 + index/4` | Full and first-day reads: 1,000 |
+| `history_v1`, 10,000 items | Same series specification, spanning almost seven days | Full: 10,000; first UTC day: 1,440 |
+
+The campus generator alternates Portland/Seattle sites and uses AHU, VAV, boiler,
+meter, and weather equipment, with mixed sensor/command/setpoint tags. Query IDs and
+expressions are recorded by the harness. Independent manually enumerated IDs are
+checked against both the index-free evaluator and each indexed/cache path. The
+mutation moves site-0 from Portland to Seattle after warming the nested-reference
+result, requiring exactly 15 point IDs to disappear. History validation checks every
+timestamp and value, not only cardinality, and detects the old repeating-day bug.
+Validation uses separate graph/store/server instances that are discarded before
+timed instances are prepared.
+
+Every core sample times `EntityGraph::read(expression, 0)`, including returned-grid
+construction. Each iteration receives a fresh graph in untimed setup:
+
+| State | Untimed preparation | Timed work |
+|---|---|---|
+| `cold` | Build graph; no reads | Parse, evaluate, populate result cache, build grid |
+| `ast_warm_result_cold` | Read with `usize::MAX`, which caches the AST but not results | Reuse AST, evaluate, populate result cache, build grid |
+| `result_warm` | Read the same query with limit 0 | Reuse cached identities and build grid |
+| `mutation_then_nested_query` | Warm the nested query with limit 0 | Construct/apply site patch, reevaluate invalidated result, build grid |
+
+`iter_batched_ref` with `BatchSize::PerIteration` excludes setup and destruction of
+the input graph and output grid. It retains one prepared graph per iteration, so
+the harness does not grow an insertion workload or accumulate batches of graphs.
+These dataset caps are not measured RSS or a production memory budget. Hashes use
+sorted entity IDs and tags with Zinc scalar values; history hashes use ordered
+RFC3339 timestamps and values. Hashes and fixture metadata are saved with each run.
+
+Direct history timings include the store lock, scan and row cloning. HTTP timings
+include one synchronous `block_on`, request encoding, a loopback HTTP round-trip,
+server handling, and response decoding. Both exclude returned-container destruction.
+The HTTP server and client are created outside the timing loop, and the client
+reuses connections after warmup. Authentication is intentionally disabled. The
+fixture binds port 0, receives the actual address, verifies an HTTP readiness
+response, owns a two-worker Tokio runtime, and cancels/joins the server at teardown.
+There is one caller and one outstanding request; these are not saturation tests.
+
+The harness defaults to 30 Criterion samples, 500 ms warmup, a 2-second measurement
+target, and 10,000 bootstrap resamples. Criterion confidence intervals describe its
+sample estimator, not p95/p99 request latency. Actual sampling modes, iteration
+counts, raw times, toolchain, lock digest, source revision/dirty state, build profile,
+features, host, workers and exact commands are retained by the capture script.
+
+```bash
+# Validate the benchmark data and real HTTP fixture; no performance claim.
+cargo +1.99.0 nextest run --locked -p rusty-haystack-core -p rusty-haystack-server --test benchmark_fixtures --no-tests=fail
+
+# Smoke-test each Criterion target without collecting timings.
+cargo +1.99.0 bench --locked -p rusty-haystack-core --bench baseline -- --test
+cargo +1.99.0 bench --locked -p rusty-haystack-server --bench baseline -- --test
+
+# From clean committed source, with other heavy work paused. Python 3.11+;
+# destination must be outside the checkout and absent or empty.
+python3 scripts/bench/capture.py /tmp/rusty-haystack-baseline
+```
+
+The capture script uses the worktree's own `target` cache, `--locked`, the default
+optimized Cargo bench profile, `RUSTFLAGS=-Dwarnings`, two build jobs, and no extra
+package feature flags. Raw Criterion reports/logs remain in the specified output
+directory; `baseline.json` retains the compact raw samples and provenance. Results
+must cite their measured source commit even when the report is added in a later
+commit. A smoke test or fixture test is not a timing result.
+
+## Historical report — March 2026
+
+The tables below preserve the earlier v0.8.0 / Rust 1.93.1 report. They were not
+remeasured for the current source, and their raw samples, precise source identity,
+and cache states are not established by this document. They are not comparable to
+the new baseline and do not substantiate current speedup or service-capacity claims.
+
 ## Environment
 
 | Property | Value |
@@ -134,7 +217,8 @@
 | `graph_filter_range_10000` | 1.227 ms | 815 |
 
 **Observations:**
-- **Compound filter at 54.1ns on 10K entities** — roaring bitmap intersection prunes candidates before filter eval, yielding ~18.5M queries/sec
+- The reported 54.1ns compound-filter figure has no established cache-state or raw
+  sample provenance here; it does not establish bitmap evaluation cost or throughput.
 - Realistic 10K dataset (diverse entity types) filters in 611.6µs vs 4.6ms for homogeneous — bitmap pruning is highly effective with diverse tag sets
 - Range filter (`curVal > 73°F`) at 1.227ms scans all candidates with value comparison
 
@@ -272,7 +356,9 @@
 
 ## Server Benchmarks (haystack-server)
 
-11 benchmarks measuring real HTTP round-trips against a live Axum server with 1,000 pre-loaded entities across 10 sites. Each request includes full TCP connection, serialization, and deserialization.
+The historical report listed 11 HTTP benchmarks against a live Axum server with
+1,000 points plus 10 sites. The harness reused clients and connections; the figures
+do not establish TCP connection setup cost on every request.
 
 ### HTTP — Standard Operations
 
@@ -320,13 +406,15 @@
 
 **Observations:**
 - 10 parallel reads complete in 151.9µs = ~65.8K effective req/sec
-- 50 parallel reads at 591.4µs = ~84.6K effective req/sec — near-linear scaling demonstrates Axum's async efficiency
+- These are closed-loop batch completion figures. Dividing batch time by request
+  count does not establish individual request latency or sustainable service capacity.
 
 ---
 
 ## Version Comparison (0.4.x -> 0.8.0)
 
-Key improvements across versions. v0.7.0 added roaring bitmap indexing, delta tag indexing, bulk entity loading, and ID freelist recycling. v0.8.0 brings across-the-board performance improvements from optimized data structures and reduced allocations.
+Historical reported timings across versions. Cache state and comparable raw
+provenance are missing, so these figures do not establish causal speedups.
 
 | Benchmark | v0.4.x | v0.5.4 | v0.6.x | v0.7.0 | v0.8.0 |
 |-----------|--------|--------|--------|--------|--------|
@@ -342,14 +430,8 @@ Key improvements across versions. v0.7.0 added roaring bitmap indexing, delta ta
 | `xeto_effective_slots` | 598.1 ns | 165.0 ns | 320.9 ns | 183.9 ns | 114.1 ns |
 | `graph_filter_compound_10000` | — | — | — | 12.1 µs | 54.1 ns |
 
-**Notable v0.8.0 improvements over v0.7.0:**
-- `graph_get_entity`: 18.3ns -> 7.1ns (2.6x faster)
-- `filter_eval_simple`: 11.6ns -> 7.8ns (1.5x faster)
-- `filter_eval_complex`: 55.6ns -> 34.9ns (1.6x faster)
-- `graph_filter_compound_10000`: 12.1µs -> 54.1ns (224x faster — bitmap-only path eliminates per-entity eval)
-- `validate_graph_1000`: 343.0µs -> 208.4µs (1.6x faster)
-- `xeto_effective_slots`: 183.9ns -> 114.1ns (1.6x faster)
-- `zinc_encode_100_rows`: 54.1µs -> 40.9µs (1.3x faster)
+The former 224× compound-filter attribution is withdrawn: an unspecified cache
+state cannot establish the cost of parsing or evaluating that filter.
 
 ---
 
@@ -362,7 +444,7 @@ Test datasets used in benchmarks:
 | Homogeneous 1K | 1,001 | 1 site + 1K identical points (7 tags each) | Existing graph benchmarks |
 | Homogeneous 10K | 10,001 | 1 site + 10K identical points | `graph_filter_10000_entities` |
 | Hierarchy 112 | 112 | 2 sites -> 10 equips -> 100 points | Traversal benchmarks |
-| Realistic 10K | ~10,000 | ~125 campuses x 80 entities with diverse tag sets | Optimization benchmarks |
+| Historical Realistic 10K | 10,125 | 125 campuses × 81 entities with diverse tag sets | Legacy optimization benchmarks |
 
 ---
 
