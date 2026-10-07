@@ -1,22 +1,15 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::net::{TcpListener, TcpStream};
-use std::sync::OnceLock;
 
 use futures_util::future::join_all;
-use haystack_client::HaystackClient;
-use haystack_client::transport::http::HttpTransport;
 use haystack_core::data::HDict;
 use haystack_core::graph::{EntityGraph, SharedGraph};
-use haystack_core::kinds::{HDateTime, HRef, Kind, Number};
-use haystack_core::ontology::DefNamespace;
-use haystack_server::HaystackServer;
-
-/// Find a free TCP port on localhost.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
-    listener.local_addr().unwrap().port()
-}
+use haystack_core::kinds::{HRef, Kind, Number};
+#[path = "fixtures/items.rs"]
+mod history_items;
+#[path = "fixtures/server.rs"]
+mod server_fixture;
+use server_fixture::TestServer;
 
 /// Build a test graph with 10 sites and `n` points distributed evenly.
 fn build_test_graph(n: usize) -> SharedGraph {
@@ -63,81 +56,13 @@ fn build_test_graph(n: usize) -> SharedGraph {
     SharedGraph::new(graph)
 }
 
-/// Get a lazily-initialized static tokio runtime for client operations.
-fn get_runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime")
-    })
-}
-
-/// A test server that starts a real Haystack server on a free port.
-///
-/// The server runs in a dedicated thread with its own tokio runtime.
-/// Auth is disabled to avoid SCRAM handshake overhead in benchmarks.
-struct TestServer {
-    port: u16,
-    _thread: std::thread::JoinHandle<()>,
-}
-
-impl TestServer {
-    /// Start a test server with the given shared graph (auth disabled).
-    fn start(graph: SharedGraph) -> Self {
-        haystack_client::ensure_crypto_provider();
-        let port = free_port();
-        let ns = DefNamespace::load_standard().unwrap();
-
-        let thread = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime");
-            rt.block_on(async move {
-                HaystackServer::new(graph)
-                    .with_namespace(ns)
-                    .port(port)
-                    .run()
-                    .await
-                    .expect("server failed");
-            });
-        });
-
-        // Wait for the server to be ready by polling TCP connectivity
-        for _ in 0..200 {
-            if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-
-        Self {
-            port,
-            _thread: thread,
-        }
-    }
-
-    /// Get the HTTP API URL for this server.
-    fn api_url(&self) -> String {
-        format!("http://127.0.0.1:{}/api", self.port)
-    }
-
-    /// Connect an HTTP client to this server (no auth).
-    fn connect_http(&self) -> HaystackClient<HttpTransport> {
-        let transport = HttpTransport::new(&self.api_url(), String::new());
-        HaystackClient::from_transport(transport)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // HTTP operation benchmarks
 // ---------------------------------------------------------------------------
 
 fn http_benchmarks(c: &mut Criterion) {
-    let rt = get_runtime();
     let server = TestServer::start(build_test_graph(1000));
+    let rt = server.runtime();
     let client = server.connect_http();
 
     c.bench_function("http_about", |b| {
@@ -192,28 +117,12 @@ fn http_benchmarks(c: &mut Criterion) {
 
 /// Create a vector of history items (dicts with "ts" and "val").
 fn make_his_items(count: usize, base_hour: u32) -> Vec<HDict> {
-    use chrono::{FixedOffset, TimeZone};
-
-    let offset = FixedOffset::east_opt(0).unwrap();
-    (0..count)
-        .map(|i| {
-            let minute = (i % 60) as u32;
-            let hour = base_hour + (i / 60) as u32;
-            let dt = offset
-                .with_ymd_and_hms(2024, 6, 1, hour % 24, minute, 0)
-                .unwrap();
-            let hdt = HDateTime::new(dt, "UTC");
-            let mut d = HDict::new();
-            d.set("ts", Kind::DateTime(hdt));
-            d.set("val", Kind::Number(Number::unitless(70.0 + i as f64 * 0.1)));
-            d
-        })
-        .collect()
+    history_items::history_dicts(count, i64::from(base_hour) * 60)
 }
 
 fn his_benchmarks(c: &mut Criterion) {
-    let rt = get_runtime();
     let server = TestServer::start(build_test_graph(100));
+    let rt = server.runtime();
     let client = server.connect_http();
 
     // Pre-load 1000 history items for p-0
@@ -245,8 +154,8 @@ fn his_benchmarks(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn watch_benchmarks(c: &mut Criterion) {
-    let rt = get_runtime();
     let server = TestServer::start(build_test_graph(100));
+    let rt = server.runtime();
 
     // watch_sub: subscribe to 10 entities via HTTP
     let watch_ids: Vec<String> = (0..10).map(|i| format!("p-{i}")).collect();
@@ -257,9 +166,10 @@ fn watch_benchmarks(c: &mut Criterion) {
             rt.block_on(async {
                 let grid = client.watch_sub(&id_refs, None).await.unwrap();
                 // Close the watch (empty IDs = full unsubscribe) to avoid hitting watch limit
-                if let Some(Kind::Str(wid)) = grid.meta.get("watchId") {
-                    let _ = client.watch_unsub(wid, &[]).await;
-                }
+                let Some(Kind::Str(wid)) = grid.meta.get("watchId") else {
+                    panic!("watchSub did not return a watchId");
+                };
+                client.watch_unsub(wid, &[]).await.unwrap();
                 black_box(grid);
             });
         });
@@ -288,8 +198,8 @@ fn watch_benchmarks(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn concurrent_benchmarks(c: &mut Criterion) {
-    let rt = get_runtime();
     let server = TestServer::start(build_test_graph(1000));
+    let rt = server.runtime();
 
     // Pre-create clients to reuse connections across iterations (avoids ephemeral port exhaustion)
     let clients_10: Vec<_> = (0..10).map(|_| server.connect_http()).collect();

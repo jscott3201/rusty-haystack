@@ -21,7 +21,7 @@ policy in `scripts/ci/policy.py` rejects an unknown event, target branch, or pro
 | Python bindings | Ubuntu, CPython 3.12 | Ubuntu, CPython 3.12 | PyO3 Clippy, locked release-mode `maturin develop` with Maturin 1.15.0, then pytest |
 | Cargo Deny | Ubuntu | Ubuntu | Locked all-feature dependency advisory, license, ban and source checks |
 | CodeQL | Ubuntu, Rust/Python/Actions | Ubuntu, Rust/Python/Actions | Analysis and upload jobs completed using the existing query filters; the separate alert-results check is described below |
-| CI policy | Ubuntu | Ubuntu | Process-level aggregate and matrix tests plus workflow wiring regressions |
+| CI policy | Ubuntu | Ubuntu | Process-level aggregate and matrix tests, workflow wiring regressions, and benchmark capture input/receipt regressions |
 
 The Rust floor and current-stable pins currently coincide at 1.99.0. Their names
 express distinct compatibility contracts and do not imply coverage of two compiler
@@ -55,6 +55,11 @@ deliberately guard the current workflow layout; they are not a general YAML pars
 Use `actionlint .github/workflows/ci.yml .github/workflows/codeql.yml` for independent
 workflow syntax validation when editing those files.
 
+The same CI policy job runs the nine benchmark capture-control tests in
+`scripts/bench/test_capture.py`. They cover build-input admission, configuration
+and toolchain provenance, and receipt completion/failure; they run no benchmarks
+and do not establish timing results.
+
 CodeQL runs once through CI on pushes and PRs and retains standalone weekly/manual
 execution. The separate Audit workflow checks both branches daily and on manual
 dispatch. Scheduled/manual results are not results for a particular PR run. Branch
@@ -63,7 +68,8 @@ configured as a required branch-protection check.
 
 ## Local gate
 
-`./.agents/gate.sh --full` runs the policy tests, formatting, the same Rust command
+`./.agents/gate.sh --full` runs the policy and benchmark capture-control tests,
+formatting, the same Rust command
 selections on the local host, core minimal/default checks, Python binding checks,
 and Cargo Deny. Python checks require the repository `.venv` with CPython 3.12,
 Maturin 1.15.0 and pytest; the extension is rebuilt before pytest. A missing `.venv`

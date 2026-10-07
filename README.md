@@ -25,18 +25,15 @@ A high-performance Rust implementation of the [Project Haystack](https://project
 
 ## Performance
 
-| Operation | Throughput |
-|-----------|-----------|
-| Zinc encode | ~1,920 rows/ms |
-| Zinc decode | ~921 rows/ms |
-| Graph lookup | 18 ns per entity (O(1)) |
-| Filter (1,000 entities) | ~610 us |
-| Unit conversion | ~95 ns per convert |
-| Ontology fitting | < 1 us |
-| HTTP read (single entity) | ~59 us end-to-end |
-| HTTP concurrent (50 clients) | ~14 us effective per request |
+The correctness-checked baseline separates cold, parsed-filter-warm, and
+result-cache-warm graph reads, mutation followed by query, direct history reads,
+and loopback HTTP history reads. Fixtures have exact counts and independent
+expected identities. See [Benchmarks.md](Benchmarks.md) for the workload, timing
+boundaries, reproducible commands, and retained measurement provenance.
 
-See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
+The older March 2026 results describe v0.8.0 on Rust 1.93.1 and are historical.
+They do not establish current performance, request-tail latency, service capacity,
+or a speedup against the new fixtures.
 
 ## Quick Start
 
