@@ -6,77 +6,264 @@ on:
       - "v*"
 
 permissions:
-  id-token: write
+  contents: read
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE" --tag "$GITHUB_REF_NAME"
+
   build-wheels:
-    name: Build wheels (${{ matrix.target }} - ${{ matrix.os }})
+    name: Build wheel (${{ matrix.target }}, ${{ matrix.python.tag }})
+    needs: validate
     runs-on: ${{ matrix.os }}
+    outputs:
+      wheel_linux_x86_64_cp311: ${{ steps.identity.outputs.wheel_linux_x86_64_cp311 }}
+      wheel_linux_x86_64_cp312: ${{ steps.identity.outputs.wheel_linux_x86_64_cp312 }}
+      wheel_linux_x86_64_cp313: ${{ steps.identity.outputs.wheel_linux_x86_64_cp313 }}
+      wheel_linux_aarch64_cp311: ${{ steps.identity.outputs.wheel_linux_aarch64_cp311 }}
+      wheel_linux_aarch64_cp312: ${{ steps.identity.outputs.wheel_linux_aarch64_cp312 }}
+      wheel_linux_aarch64_cp313: ${{ steps.identity.outputs.wheel_linux_aarch64_cp313 }}
+      wheel_macos_x86_64_cp311: ${{ steps.identity.outputs.wheel_macos_x86_64_cp311 }}
+      wheel_macos_x86_64_cp312: ${{ steps.identity.outputs.wheel_macos_x86_64_cp312 }}
+      wheel_macos_x86_64_cp313: ${{ steps.identity.outputs.wheel_macos_x86_64_cp313 }}
+      wheel_macos_aarch64_cp311: ${{ steps.identity.outputs.wheel_macos_aarch64_cp311 }}
+      wheel_macos_aarch64_cp312: ${{ steps.identity.outputs.wheel_macos_aarch64_cp312 }}
+      wheel_macos_aarch64_cp313: ${{ steps.identity.outputs.wheel_macos_aarch64_cp313 }}
     strategy:
       fail-fast: false
       matrix:
+        python:
+          - version: "3.11"
+            tag: cp311
+            directory: cp311-cp311
+          - version: "3.12"
+            tag: cp312
+            directory: cp312-cp312
+          - version: "3.13"
+            tag: cp313
+            directory: cp313-cp313
+        platform: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64]
         include:
-          - os: ubuntu-latest
-            target: x86_64
-          - os: ubuntu-latest
-            target: aarch64
-          - os: macos-latest
-            target: x86_64
-          - os: macos-latest
-            target: aarch64
+          - platform: linux-x86_64
+            output_prefix: wheel_linux_x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            image: quay.io/pypa/manylinux2014_x86_64:latest
+          - platform: linux-aarch64
+            output_prefix: wheel_linux_aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            image: ghcr.io/rust-cross/manylinux2014-cross:aarch64
+          - platform: macos-x86_64
+            output_prefix: wheel_macos_x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+          - platform: macos-aarch64
+            output_prefix: wheel_macos_aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-
-      - name: Build wheels
+          python-version: ${{ matrix.python.version }}
+      - name: Resolve immutable Linux builder image
+        if: runner.os == 'Linux'
+        id: container
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          mkdir -p target
+          docker pull "$IMAGE"
+          docker image inspect "$IMAGE" > target/container.json
+          python -c 'import json, os; image=json.load(open("target/container.json")); print("image=" + image[0]["RepoDigests"][0], file=open(os.environ["GITHUB_OUTPUT"], "a"))'
+      - uses: dtolnay/rust-toolchain@master
+        if: runner.os == 'macOS'
+        with:
+          toolchain: "1.99.0"
+          targets: ${{ matrix.target }}
+      - name: Bind macOS compiler and builder before construction
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python -m pip install maturin==1.15.0
+          mkdir -p target
+          python scripts/release/artifacts.py tools --repo "$GITHUB_WORKSPACE" --target "$TARGET" --python "$(command -v python)" --maturin maturin --output target/builder.json --environment-file target/builder.env
+          cat target/builder.env >> "$GITHUB_ENV"
+          python -c 'import json,pathlib; print(pathlib.Path(json.load(open("target/builder.json"))["executables"]["cargo"]["path"]).parent)' >> "$GITHUB_PATH"
+      - name: Build one wheel and capture actual Linux builder versions
         uses: PyO3/maturin-action@v1
         with:
           rust-toolchain: "1.99.0"
           maturin-version: "v1.15.0"
           target: ${{ matrix.target }}
-          args: --locked --release --out dist -m rusty-haystack/Cargo.toml -i 3.11 3.12 3.13
+          container: ${{ steps.container.outputs.image }}
+          args: --locked --release --out target/release-candidate/files -m rusty-haystack/Cargo.toml -i ${{ matrix.python.version }}
           manylinux: auto
-          sccache: true
+          before-script-linux: |
+            /opt/python/cp312-cp312/bin/python scripts/release/artifacts.py tools --repo . --target ${{ matrix.target }} --python /opt/python/${{ matrix.python.directory }}/bin/python --maturin maturin --container-info target/container.json --output target/builder.json --environment-file target/builder.env
+            while IFS= read -r setting; do export "$setting"; done < target/builder.env
+            CARGO_BIN=$(/opt/python/cp312-cp312/bin/python -c 'import json,pathlib; print(pathlib.Path(json.load(open("target/builder.json"))["executables"]["cargo"]["path"]).parent)')
+            export PATH="$CARGO_BIN:$PATH"
         env:
           CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
-
+      - name: Seal final wheel bytes
+        env:
+          SOURCE: ${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+          PYTHON_TAG: ${{ matrix.python.tag }}
+        run: python scripts/release/artifacts.py seal --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --bundle target/release-candidate --kind wheel --tools target/builder.json --target "$TARGET" --python-tag "$PYTHON_TAG"
       - uses: actions/upload-artifact@v4
+        id: candidate
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}
-          path: dist
+          name: candidate-wheel-${{ matrix.target }}-${{ matrix.python.tag }}-${{ github.run_attempt }}
+          path: target/release-candidate
+          if-no-files-found: error
+      - name: Retain producer identity and artifact service digest
+        id: identity
+        shell: bash
+        env:
+          OUTPUT_KEY: ${{ matrix.output_prefix }}_${{ matrix.python.tag }}
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
+        run: |
+          test -n "$ARTIFACT_ID"
+          echo "$OUTPUT_KEY=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
   build-sdist:
-    name: Build sdist
+    name: Build and seal source archive
+    needs: validate
+    outputs:
+      sdist: ${{ steps.candidate.outputs.artifact-id }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
+      - uses: actions/setup-python@v5
         with:
-          rust-toolchain: "1.99.0"
-          maturin-version: "v1.15.0"
-          command: sdist
-          args: --out dist -m rusty-haystack/Cargo.toml
-
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: python -m pip install maturin==1.15.0
+      - run: cargo fetch --locked
+      - name: Build and validate source lock transformation
+        env:
+          SOURCE: ${{ github.sha }}
+        run: python scripts/release/build.py sdist --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target source --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work"
       - uses: actions/upload-artifact@v4
+        id: candidate
         with:
-          name: wheels-sdist
-          path: dist
+          name: candidate-sdist-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+      - name: Retain artifact service identity
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
+        run: |
+          printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: sdist-build-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-work/*.log
+          if-no-files-found: warn
+
+  qualify-python:
+    name: Qualify downloaded Python artifacts
+    needs: [build-wheels, build-sdist]
+    outputs:
+      packages: ${{ steps.qualified.outputs.artifact-id }}
+      proof: ${{ steps.proof.outputs.artifact-id }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fetch --locked
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile python --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}
+          path: ${{ runner.temp }}/download
+      - name: Qualify downloaded candidates and stage identical bytes
+        env:
+          SOURCE: ${{ github.sha }}
+        run: |
+          python scripts/release/qualify.py --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile python --python "$(command -v python)" --work "$RUNNER_TEMP/consumer-work" --evidence "$RUNNER_TEMP/evidence"
+          python scripts/release/artifacts.py stage --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile python --evidence "$RUNNER_TEMP/evidence" --output "$RUNNER_TEMP/publication" > "$RUNNER_TEMP/stage.json"
+          python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile python --receipt "$RUNNER_TEMP/stage.json"
+      - uses: actions/upload-artifact@v4
+        id: qualified
+        with:
+          name: qualified-python-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        id: proof
+        if: always()
+        with:
+          name: python-proof-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/download-ids.json
+            ${{ runner.temp }}/stage.json
+            ${{ runner.temp }}/evidence
+            ${{ runner.temp }}/download/*/receipts
+            ${{ runner.temp }}/consumer-work/**/*.log
+          if-no-files-found: error
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [build-wheels, build-sdist]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: qualify-python
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile publish-python --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
       - uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*
+          artifact-ids: ${{ steps.inventory.outputs.packages }}
+          path: ${{ runner.temp }}/publication
           merge-multiple: true
-          path: dist
-
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.inventory.outputs.proof }}
+          path: ${{ runner.temp }}/proof
+          merge-multiple: true
+      - name: Verify staged files immediately before publication
+        env:
+          SOURCE: ${{ github.sha }}
+        run: python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile python --receipt "$RUNNER_TEMP/proof/stage.json"
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: ${{ runner.temp }}/publication

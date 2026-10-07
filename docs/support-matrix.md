@@ -21,7 +21,7 @@ policy in `scripts/ci/policy.py` rejects an unknown event, target branch, or pro
 | Python bindings | Ubuntu, CPython 3.12 | Ubuntu, CPython 3.12 | PyO3 Clippy, locked release-mode `maturin develop` with Maturin 1.15.0, then pytest |
 | Cargo Deny | Ubuntu | Ubuntu | Locked all-feature dependency advisory, license, ban and source checks |
 | CodeQL | Ubuntu, Rust/Python/Actions | Ubuntu, Rust/Python/Actions | Analysis and upload jobs completed using the existing query filters; the separate alert-results check is described below |
-| CI policy | Ubuntu | Ubuntu | Process-level aggregate and matrix tests, workflow wiring regressions, and benchmark capture input/receipt regressions |
+| CI policy | Ubuntu | Ubuntu | Process-level aggregate and matrix tests, workflow wiring regressions, benchmark capture input/receipt regressions, and artifact provenance/staging regressions |
 
 The Rust floor and current-stable pins currently coincide at 1.99.0. Their names
 express distinct compatibility contracts and do not imply coverage of two compiler
@@ -60,6 +60,11 @@ The same CI policy job runs the nine benchmark capture-control tests in
 and toolchain provenance, and receipt completion/failure; they run no benchmarks
 and do not establish timing results.
 
+The CI policy job also runs the artifact provenance and staging tests in
+`scripts/release/tests`. These exercise rejection paths and byte-preserving staging
+with bounded fixtures. They do not build, install or execute a release artifact;
+that evidence belongs to the separate artifact workflows.
+
 CodeQL runs once through CI on pushes and PRs and retains standalone weekly/manual
 execution. The separate Audit workflow checks both branches daily and on manual
 dispatch. Scheduled/manual results are not results for a particular PR run. Branch
@@ -68,7 +73,8 @@ configured as a required branch-protection check.
 
 ## Local gate
 
-`./.agents/gate.sh --full` runs the policy and benchmark capture-control tests,
+`./.agents/gate.sh --full` runs the policy, benchmark capture-control and artifact
+provenance/staging tests,
 formatting, the same Rust command
 selections on the local host, core minimal/default checks, Python binding checks,
 and Cargo Deny. Python checks require the repository `.venv` with CPython 3.12,
@@ -93,10 +99,18 @@ Release publication remains a separate operation from PR validation.
 
 | Artifact | Configured inventory | Current qualification boundary |
 |---|---|---|
-| Python wheels | CPython 3.11, 3.12, 3.13 × Linux/macOS × x86_64/aarch64: 12 combinations | Builds are configured; PR pytest uses a development install on Ubuntu/3.12 and does not install these wheels |
-| Python source distribution | One archive built with Maturin 1.15.0 | Archive creation alone does not qualify an extracted locked build; the known extracted locked-resolution failure remains a packaging repair item |
-| CLI archives | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` | Five builds are configured; target-specific archive execution is not part of these release jobs |
-| Rust crates | Core, client, server and CLI | PR locked workspace tests do not establish that each published package can build independently outside the checkout |
+| Python wheels | CPython 3.11, 3.12, 3.13 × Linux/macOS × x86_64/aarch64: 12 combinations | The release workflow verifies every wheel's metadata/provenance and requires an installed Linux x86_64/CPython 3.12 consumer before staging; the other eleven tuples require separate runtime evidence |
+| Python source distribution | One archive built with Maturin 1.15.0 | The final archive contains a checked pruned lock; qualification requires full offline locked metadata and a fresh PEP 517 installation outside the checkout before staging |
+| CLI archives | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` | All five archives require metadata/provenance checks; the release workflow executes the downloaded Linux x86_64 archive before staging. Other targets require separate runtime evidence |
+| Rust crates | Core, client, server and CLI | Publication waits for CLI qualification, but cargo publish packages source separately; the tested CLI archive does not qualify the exact crate upload bytes |
+
+The manual `Artifact Qualification` workflow rehearses one native Linux x86_64
+CLI, CPython 3.12 wheel and source archive through build, GitHub upload/download,
+isolated consumers and exact-byte staging. It has read-only permissions and no
+publication job. Its presence is not evidence of a successful run; retain the run
+revision and file-bound receipts for that claim. See [artifact validation and
+provenance](artifact-validation.md) for the source-archive repair, evidence profiles
+and publication boundaries.
 
 The current Python wheel workflow has no Windows wheel target. New interpreter
 versions, free-threaded Python, alternate compression/TLS backends, and unlisted

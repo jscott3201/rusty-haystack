@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin==1.15.0"]
 build-backend = "maturin"
 
 [project]
@@ -26,6 +26,7 @@ Homepage = "https://github.com/jscott3201/rusty-haystack"
 Repository = "https://github.com/jscott3201/rusty-haystack"
 
 [tool.maturin]
+locked = true
 features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]

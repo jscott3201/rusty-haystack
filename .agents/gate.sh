@@ -58,6 +58,7 @@ skip() {
 # Each block below cites the CI job it mirrors so drift is visible in review.
 run "CI policy and workflow wiring" python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v  # ci.yml: jobs.ci-policy
 run "benchmark capture controls" python3 -m unittest discover -s scripts/bench -p 'test_capture.py' -v  # ci.yml: jobs.ci-policy
+run "artifact provenance and staging controls" python3 -m unittest discover -s scripts/release/tests -v  # ci.yml: jobs.ci-policy
 run "rustfmt (MSRV 1.99.0)" cargo +1.99.0 fmt --all --check  # ci.yml: jobs.fmt
 run "clippy (MSRV 1.99.0)" \
   cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.clippy
