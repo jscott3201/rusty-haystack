@@ -24,6 +24,8 @@ pub enum GraphError {
     MissingId,
     #[error("entity id must be a Ref")]
     InvalidId,
+    #[error("entity id cannot be removed, retyped, or renamed")]
+    ImmutableId,
     #[error("entity already exists: {0}")]
     DuplicateRef(String),
     #[error("entity not found: {0}")]
@@ -249,10 +251,18 @@ impl EntityGraph {
     // ── Value Indexes ──
 
     /// Register a field for B-Tree value indexing. Enables O(log N) range
-    /// queries (e.g. `temp > 72`) for this field. Must be called before
-    /// entities are added, or followed by `rebuild_value_index` for existing data.
+    /// queries (e.g. `temp > 72`) for this field. Existing values are backfilled
+    /// before the index can be used. Registering an indexed field again is a no-op.
     pub fn index_field(&mut self, field: &str) {
+        if self.value_index.has_index(field) {
+            return;
+        }
         self.value_index.index_field(field);
+        for (ref_val, entity) in &self.entities {
+            if let Some(value) = entity.get(field) {
+                self.value_index.add(self.id_map[ref_val], field, value);
+            }
+        }
     }
 
     /// Rebuild the value index for all indexed fields from the current entities.
@@ -339,16 +349,27 @@ impl EntityGraph {
     /// Update an existing entity by merging `changes` into it.
     ///
     /// Tags in `changes` overwrite existing tags; `Kind::Remove` tags are
-    /// deleted. The `id` tag cannot be changed.
+    /// deleted. An `id` in the patch must remain a Ref with the same value;
+    /// its display text may change. Invalid identity patches return
+    /// [`GraphError::ImmutableId`] before changing any graph state.
+    ///
+    /// An empty patch is a no-op for an existing entity, but still returns
+    /// [`GraphError::NotFound`] for a missing entity. Every accepted nonempty
+    /// patch records a revision, including equal values and display-only changes.
     pub fn update(&mut self, ref_val: &str, changes: HDict) -> Result<(), GraphError> {
-        if changes.is_empty() {
-            return Ok(());
-        }
-
         let eid = *self
             .id_map
             .get(ref_val)
             .ok_or_else(|| GraphError::NotFound(ref_val.to_string()))?;
+
+        if let Some(id) = changes.get("id")
+            && !matches!(id, Kind::Ref(id) if id.val == ref_val)
+        {
+            return Err(GraphError::ImmutableId);
+        }
+        if changes.is_empty() {
+            return Ok(());
+        }
 
         let mut old_entity = self
             .entities
@@ -960,11 +981,11 @@ impl EntityGraph {
                 return true;
             }
         }
-        // Check for removed refs.
+        // Check for removed refs, including refs replaced by another kind.
         for (name, val) in old.iter() {
             if name != "id"
                 && let Kind::Ref(_) = val
-                && new.get(name).is_none()
+                && new.get(name) != Some(val)
             {
                 return true;
             }
@@ -1106,13 +1127,30 @@ fn bitmap_candidates(
         FilterNode::Cmp { path, op, val } => {
             if path.is_single() && value_index.has_index(&path.0[0]) {
                 let field = &path.0[0];
-                let ids = match op {
-                    CmpOp::Eq => value_index.eq_lookup(field, val),
-                    CmpOp::Ne => value_index.ne_lookup(field, val),
-                    CmpOp::Lt => value_index.lt_lookup(field, val),
-                    CmpOp::Le => value_index.le_lookup(field, val),
-                    CmpOp::Gt => value_index.gt_lookup(field, val),
-                    CmpOp::Ge => value_index.ge_lookup(field, val),
+                // Candidates must include every evaluator match. This index
+                // stores only Numbers (without units) and Strings. Equality
+                // can over-select units safely; inequality cannot subtract an
+                // exact bucket because other units/kinds may still match !=.
+                // Its total float order also distinguishes +/-0, unlike the
+                // evaluator's ordered comparisons, so zero bounds fall back.
+                let ids = match (op, val) {
+                    (CmpOp::Eq, Kind::Number(_) | Kind::Str(_)) => {
+                        value_index.eq_lookup(field, val)
+                    }
+                    (_, Kind::Number(n)) if n.val == 0.0 => return None,
+                    (CmpOp::Lt, Kind::Number(_) | Kind::Str(_)) => {
+                        value_index.lt_lookup(field, val)
+                    }
+                    (CmpOp::Le, Kind::Number(_) | Kind::Str(_)) => {
+                        value_index.le_lookup(field, val)
+                    }
+                    (CmpOp::Gt, Kind::Number(_) | Kind::Str(_)) => {
+                        value_index.gt_lookup(field, val)
+                    }
+                    (CmpOp::Ge, Kind::Number(_) | Kind::Str(_)) => {
+                        value_index.ge_lookup(field, val)
+                    }
+                    _ => return None,
                 };
                 let mut bm = RoaringBitmap::new();
                 for id in ids {
