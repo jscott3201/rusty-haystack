@@ -44,6 +44,7 @@ pyo3 = "0.29"
 rand = "0.10"
 regex = "1"
 reqwest = { version = "0.13", default-features = false }
+rcgen = { version = "0.14.10", default-features = false }
 roaring = "0.11"
 rustc-hash = "2"
 # Security floor: GHSA-2mjx-qc3c-rqvc is fixed in 0.23.45.
@@ -60,6 +61,7 @@ thiserror = "2"
 time = "0.3"
 tokio = "1"
 tokio-tungstenite = "0.30"
+tokio-rustls = { version = "0.26.6", default-features = false }
 tokio-util = "0.7"
 toml = "1.0"
 tower = "0.5"
