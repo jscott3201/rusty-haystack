@@ -12,8 +12,16 @@ env:
 
 jobs:
   build:
-    name: Build native candidates once
+    name: Build native candidate (${{ matrix.kind }})
     runs-on: ubuntu-latest
+    outputs:
+      cli: ${{ steps.identity.outputs.cli }}
+      wheel: ${{ steps.identity.outputs.wheel }}
+      sdist: ${{ steps.identity.outputs.sdist }}
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [cli, wheel, sdist]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,57 +33,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: python -m pip install maturin==1.15.0
       - run: cargo fetch --locked
-      - name: Build and seal candidates
+      - name: Build and seal one candidate
         env:
           SOURCE: ${{ github.sha }}
+          KIND: ${{ matrix.kind }}
         run: |
-          python scripts/release/build.py cli --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --bundle "$RUNNER_TEMP/candidates/cli" --work "$RUNNER_TEMP/build-cli"
-          python scripts/release/build.py wheel --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidates/wheel" --work "$RUNNER_TEMP/build-wheel"
-          python scripts/release/build.py sdist --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target source --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidates/sdist" --work "$RUNNER_TEMP/build-sdist"
+          target="$TARGET"
+          if [ "$KIND" = "sdist" ]; then target=source; fi
+          python scripts/release/build.py "$KIND" --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$target" --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work"
       - uses: actions/upload-artifact@v4
-        id: cli
+        id: candidate
         with:
-          name: native-candidate-cli-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/candidates/cli
+          name: native-candidate-${{ matrix.kind }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
           if-no-files-found: error
-      - name: Retain artifact service identity
+      - name: Retain producer identity and artifact service digest
+        id: identity
         shell: bash
         env:
-          ARTIFACT_ID: ${{ steps.cli.outputs.artifact-id }}
-          ARTIFACT_DIGEST: ${{ steps.cli.outputs.artifact-digest }}
+          OUTPUT_KEY: ${{ matrix.kind }}
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
         run: |
-          printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        id: wheel
-        with:
-          name: native-candidate-wheel-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/candidates/wheel
-          if-no-files-found: error
-      - name: Retain artifact service identity
-        shell: bash
-        env:
-          ARTIFACT_ID: ${{ steps.wheel.outputs.artifact-id }}
-          ARTIFACT_DIGEST: ${{ steps.wheel.outputs.artifact-digest }}
-        run: |
-          printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        id: sdist
-        with:
-          name: native-candidate-sdist-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/candidates/sdist
-          if-no-files-found: error
-      - name: Retain artifact service identity
-        shell: bash
-        env:
-          ARTIFACT_ID: ${{ steps.sdist.outputs.artifact-id }}
-          ARTIFACT_DIGEST: ${{ steps.sdist.outputs.artifact-digest }}
-        run: |
+          test -n "$ARTIFACT_ID"
+          echo "$OUTPUT_KEY=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
           printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: native-build-logs-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/build-*/*.log
+          name: native-build-logs-${{ matrix.kind }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-work/*.log
           if-no-files-found: warn
 
   qualify:
@@ -92,18 +79,15 @@ jobs:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - run: cargo fetch --locked
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile native --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
       - uses: actions/download-artifact@v4
         with:
-          name: native-candidate-cli-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/cli
-      - uses: actions/download-artifact@v4
-        with:
-          name: native-candidate-wheel-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/wheel
-      - uses: actions/download-artifact@v4
-        with:
-          name: native-candidate-sdist-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/sdist
+          artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}
+          path: ${{ runner.temp }}/download
       - name: Qualify downloaded candidates and stage identical bytes
         env:
           SOURCE: ${{ github.sha }}
@@ -121,6 +105,7 @@ jobs:
         with:
           name: native-proof-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/download-ids.json
             ${{ runner.temp }}/stage.json
             ${{ runner.temp }}/evidence
             ${{ runner.temp }}/download/*/receipts

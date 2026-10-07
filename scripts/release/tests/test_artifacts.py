@@ -37,7 +37,7 @@ def receipt(path, kind, details):
             "source": {"revision": SOURCE, "dirty": False, "lock_sha256": sha(LOCK)},
             "package": {"name": "rusty-haystack-cli" if kind == "cli" else "rusty-haystack", "version": VERSION},
             "artifact": {"filename": path.name, "size": path.stat().st_size, "sha256": sha(path.read_bytes())},
-            "build": {"target": "source" if kind == "sdist" else TARGET, "profile": "sdist" if kind == "sdist" else "release", "features": [] if kind == "cli" else ["pyo3/extension-module"], "tools": {"rustc": "rustc 1.99.0\nrelease: 1.99.0\nhost: " + TARGET, "cargo": "cargo 1.99.0", "maturin": "maturin 1.15.0", "python": {"implementation": "CPython", "cache_tag": "cpython-312", "version": "3.12.13", "platform": "linux-x86_64"}}},
+            "build": {"target": "source" if kind == "sdist" else TARGET, "profile": "sdist" if kind == "sdist" else "release", "features": [] if kind == "cli" else ["pyo3/extension-module"], "tools": {"rustc": "rustc 1.99.0\nrelease: 1.99.0\nhost: " + TARGET, "cargo": "cargo 1.99.0", "target": "source" if kind == "sdist" else TARGET, "context": {"controlled_environment": {"CARGO_BUILD_JOBS": "2", "CARGO_INCREMENTAL": "0", "RUSTUP_TOOLCHAIN": "1.99.0"}}, "executables": {name: {"path": "/builder/"+name, "sha256": "e"*64} for name in ("cargo", "rustc", "rustdoc")}, "maturin": "maturin 1.15.0", "python": {"implementation": "CPython", "cache_tag": "cpython-312", "version": "3.12.13", "platform": "linux-x86_64"}}},
             "details": details, **({"removed_lock_packages": []} if kind == "sdist" else {})}
 
 
@@ -162,6 +162,30 @@ class ArtifactCLI(unittest.TestCase):
     def test_tag_guard_uses_parsed_version(self):
         self.assertEqual(self.invoke("version", "--repo", REPO, "--tag", "v" + VERSION), {"version": VERSION})
         self.invoke("version", "--repo", REPO, "--tag", "v99.0.0", success=False)
+
+    def test_lock_pruning_removes_only_existing_dependency_edges(self):
+        # The observed sdist keeps clap/clap_builder identities while dropping
+        # CLI-only clap_derive/strsim edges and an anstream edge to a retained node.
+        before = self.root / "before.lock"; after = self.root / "after.lock"
+        initial = ('version = 4\n[[package]]\nname="clap"\nversion="4.6.7"\nchecksum="same"\n'
+                   'dependencies=["clap_builder", "clap_derive"]\n'
+                   '[[package]]\nname="clap_builder"\nversion="4.6.7"\nchecksum="builder"\n'
+                   'dependencies=["anstream", "strsim"]\n'
+                   '[[package]]\nname="anstream"\nversion="1.0.0"\n'
+                   '[[package]]\nname="clap_derive"\nversion="4.6.7"\n'
+                   '[[package]]\nname="strsim"\nversion="0.11.1"\n')
+        pruned = ('version = 4\n[[package]]\nname="clap"\nversion="4.6.7"\nchecksum="same"\n'
+                  'dependencies=["clap_builder"]\n'
+                  '[[package]]\nname="clap_builder"\nversion="4.6.7"\nchecksum="builder"\n'
+                  '[[package]]\nname="anstream"\nversion="1.0.0"\n')
+        before.write_text(initial); after.write_text(pruned)
+        removed = self.invoke("check-lock-prune", "--before", before, "--after", after)["removed"]
+        self.assertEqual(removed, [["clap_derive", "4.6.7", ""], ["strsim", "0.11.1", ""]])
+        for changed in (pruned.replace('["clap_builder"]', '["clap_builder", "anstream"]'),
+                        pruned.replace('checksum="same"', 'checksum="changed"'),
+                        pruned.replace('version="4.6.7"', 'version="4.6.8"', 1)):
+            after.write_text(changed)
+            self.invoke("check-lock-prune", "--before", before, "--after", after, success=False)
 
     def test_lock_pruning_allows_only_unreferenced_removal(self):
         before = self.root / "before.lock"; after = self.root / "after.lock"

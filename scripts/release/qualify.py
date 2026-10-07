@@ -45,6 +45,7 @@ def installed_smoke(path, kind, repo, work, version, interpreter):
     env = clean_environment(python)
     checks = {"installed-smoke", "typing-layout"}
     source_lock_before = None
+    source_tools = None
     if kind == "sdist":
         source_dir = work / "source"
         a.extract(path, source_dir)
@@ -55,9 +56,12 @@ def installed_smoke(path, kind, repo, work, version, interpreter):
         a.require(pyproject["tool"]["maturin"]["locked"] is True, "sdist PEP517 builds are not locked")
         locks = list(root.rglob("Cargo.lock")); a.require(len(locks) == 1, "source lock inventory mismatch")
         source_lock_before = a.digest(locks[0])
-        run(["cargo", "metadata", "--offline", "--locked", "--format-version", "1", "--manifest-path", str(manifest_in(root))], work, "locked-source-metadata", cwd=root, env=env)
         run([str(python), "-m", "pip", "install", "--disable-pip-version-check", f"maturin=={a.MATURIN}"], work, "install-pinned-backend", cwd=scratch, env=env)
         a.require(run([str(python), "-m", "maturin", "--version"], work, "backend-version", cwd=scratch, env=env) == f"maturin {a.MATURIN}", "installed backend version mismatch")
+        source_base_env = dict(env)
+        source_tools = a.tool_info(str(python), repo=root, target="source", env=source_base_env)
+        env = a.build_environment(source_tools, source_base_env)
+        run([source_tools["executables"]["cargo"]["path"], "metadata", "--offline", "--locked", "--format-version", "1", "--manifest-path", str(manifest_in(root))], work, "locked-source-metadata", cwd=root, env=env)
         install = root
         checks |= {"locked-source-metadata", "pep517-install"}
     else:
@@ -65,7 +69,10 @@ def installed_smoke(path, kind, repo, work, version, interpreter):
     run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", "--no-cache-dir", "--no-build-isolation", str(install)], work, "install-artifact", cwd=scratch, env=env)
     if source_lock_before:
         a.require(a.digest(locks[0]) == source_lock_before, "PEP517 build mutated the sealed source lock")
+        a.require(a.tool_info(str(python), repo=root, target="source", env=source_base_env) == source_tools, "PEP517 compiler context changed")
     observed = json.loads(run([str(python), "-I", str(repo / "scripts/release/consumer.py"), "--prefix", str(venv), "--version", version], work, "installed-smoke", cwd=scratch, env=env))
+    if source_tools:
+        observed["source_build_tools"] = source_tools
     return checks, observed
 
 
@@ -98,8 +105,9 @@ def main():
         version = a.project(repo)
         found = a.inventory(incoming, profile=args.profile, target=args.target, source=args.source, version=version, source_lock=a.digest(repo / "Cargo.lock"), source_lock_text=(repo / "Cargo.lock").read_text())
         work.mkdir(parents=True, exist_ok=False); evidence.mkdir(parents=True, exist_ok=False)
-        host = next(line[6:] for line in a.output(["rustc", "-vV"]).splitlines() if line.startswith("host: "))
         runtime_target = args.target if args.profile == "native" else "x86_64-unknown-linux-gnu"
+        selected_tools = a.tool_info(repo=repo, target=runtime_target, env=clean_environment())
+        host = next(line[6:] for line in selected_tools["rustc"].splitlines() if line.startswith("host: "))
         a.require(host == runtime_target, "qualification requires the selected native host")
         for key, (path, receipt_path, receipt) in sorted(found.items()):
             kind, target, py = key

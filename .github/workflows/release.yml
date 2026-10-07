@@ -32,20 +32,31 @@ jobs:
     name: Build (${{ matrix.target }})
     needs: validate
     runs-on: ${{ matrix.runner }}
+    outputs:
+      cli_linux_x86_64: ${{ steps.identity.outputs.cli_linux_x86_64 }}
+      cli_linux_aarch64: ${{ steps.identity.outputs.cli_linux_aarch64 }}
+      cli_macos_x86_64: ${{ steps.identity.outputs.cli_macos_x86_64 }}
+      cli_macos_aarch64: ${{ steps.identity.outputs.cli_macos_aarch64 }}
+      cli_windows_x86_64: ${{ steps.identity.outputs.cli_windows_x86_64 }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            output: cli_linux_x86_64
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
+            output: cli_linux_aarch64
             runner: ubuntu-latest
             cross: true
           - target: x86_64-apple-darwin
+            output: cli_macos_x86_64
             runner: macos-latest
           - target: aarch64-apple-darwin
+            output: cli_macos_aarch64
             runner: macos-latest
           - target: x86_64-pc-windows-msvc
+            output: cli_windows_x86_64
             runner: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,12 +93,16 @@ jobs:
           name: candidate-cli-${{ matrix.target }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidate
           if-no-files-found: error
-      - name: Retain artifact service identity
+      - name: Retain producer identity and artifact service digest
+        id: identity
         shell: bash
         env:
+          OUTPUT_KEY: ${{ matrix.output }}
           ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
         run: |
+          test -n "$ARTIFACT_ID"
+          echo "$OUTPUT_KEY=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
           printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -99,6 +114,9 @@ jobs:
   qualify-binaries:
     name: Qualify downloaded binaries
     needs: build-binaries
+    outputs:
+      packages: ${{ steps.qualified.outputs.artifact-id }}
+      proof: ${{ steps.proof.outputs.artifact-id }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,26 +127,15 @@ jobs:
         with:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile binaries --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
       - uses: actions/download-artifact@v4
         with:
-          name: candidate-cli-x86_64-unknown-linux-gnu-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/cli-x86_64-unknown-linux-gnu
-      - uses: actions/download-artifact@v4
-        with:
-          name: candidate-cli-aarch64-unknown-linux-gnu-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/cli-aarch64-unknown-linux-gnu
-      - uses: actions/download-artifact@v4
-        with:
-          name: candidate-cli-x86_64-apple-darwin-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/cli-x86_64-apple-darwin
-      - uses: actions/download-artifact@v4
-        with:
-          name: candidate-cli-aarch64-apple-darwin-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/cli-aarch64-apple-darwin
-      - uses: actions/download-artifact@v4
-        with:
-          name: candidate-cli-x86_64-pc-windows-msvc-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/download/cli-x86_64-pc-windows-msvc
+          artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}
+          path: ${{ runner.temp }}/download
       - name: Qualify downloaded candidates and stage identical bytes
         env:
           SOURCE: ${{ github.sha }}
@@ -137,15 +144,18 @@ jobs:
           python scripts/release/artifacts.py stage --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile binaries --evidence "$RUNNER_TEMP/evidence" --output "$RUNNER_TEMP/publication" > "$RUNNER_TEMP/stage.json"
           python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile binaries --receipt "$RUNNER_TEMP/stage.json"
       - uses: actions/upload-artifact@v4
+        id: qualified
         with:
           name: qualified-binaries-${{ github.run_attempt }}
           path: ${{ runner.temp }}/publication
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
+        id: proof
         if: always()
         with:
           name: binaries-proof-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/download-ids.json
             ${{ runner.temp }}/stage.json
             ${{ runner.temp }}/evidence
             ${{ runner.temp }}/download/*/receipts
@@ -208,14 +218,21 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile publish-binaries --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
       - uses: actions/download-artifact@v4
         with:
-          name: qualified-binaries-${{ github.run_attempt }}
+          artifact-ids: ${{ steps.inventory.outputs.packages }}
           path: ${{ runner.temp }}/publication
+          merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
-          name: binaries-proof-${{ github.run_attempt }}
+          artifact-ids: ${{ steps.inventory.outputs.proof }}
           path: ${{ runner.temp }}/proof
+          merge-multiple: true
       - name: Verify staged files immediately before publication
         env:
           SOURCE: ${{ github.sha }}
