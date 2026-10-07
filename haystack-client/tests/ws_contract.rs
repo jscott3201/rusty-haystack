@@ -519,3 +519,104 @@ async fn close_settles_pending_calls_and_drop_releases_the_socket() {
         .unwrap()
         .unwrap();
 }
+
+fn no_application_peer() -> (Peer, oneshot::Receiver<bool>) {
+    let (observed, result) = oneshot::channel();
+    let peer = Peer::start(move |listener| async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let closed_without_application =
+            matches!(ws.next().await, Some(Ok(Message::Close(_))) | None);
+        let _ = observed.send(closed_without_application);
+    });
+    (peer, result)
+}
+async fn assert_budget_rejected<T: Transport + 'static>(transport: T, zero: bool) {
+    let transport = Arc::new(transport);
+    let caller = transport.clone();
+    let outcome =
+        tokio::spawn(async move { caller.call("watchSub", &subscription(&["p"])).await }).await;
+    transport.close().await.unwrap();
+    let outcome = outcome.expect("an arbitrary configured duration must not panic");
+    if zero {
+        assert!(matches!(outcome, Err(ClientError::Timeout(Duration::ZERO))));
+    } else {
+        assert!(matches!(outcome, Err(ClientError::Connection(_))));
+    }
+}
+#[tokio::test]
+async fn zero_deadline_never_dispatches_on_either_transport() {
+    use haystack_client::transport::ws::ReconnectingWsTransport;
+    let (peer, observed) = no_application_peer();
+    let transport = WsTransport::connect_with_timeout(&peer.url, "token", Duration::ZERO)
+        .await
+        .unwrap();
+    assert_budget_rejected(transport, true).await;
+    assert!(
+        observed.await.unwrap(),
+        "expired call sent an application request"
+    );
+    let (peer, observed) = no_application_peer();
+    let transport =
+        ReconnectingWsTransport::connect_with_timeout(&peer.url, "token", Duration::ZERO)
+            .await
+            .unwrap();
+    assert_budget_rejected(transport, true).await;
+    assert!(
+        observed.await.unwrap(),
+        "expired reconnecting call sent an application request"
+    );
+}
+#[tokio::test]
+async fn overflowing_deadline_is_a_typed_error_without_dispatch_on_plain_transport() {
+    let (peer, observed) = no_application_peer();
+    let transport = WsTransport::connect_with_timeout(&peer.url, "token", Duration::MAX)
+        .await
+        .unwrap();
+    assert_budget_rejected(transport, false).await;
+    assert!(observed.await.unwrap());
+}
+#[tokio::test]
+async fn overflowing_deadline_is_a_typed_error_without_dispatch_on_reconnecting_transport() {
+    use haystack_client::transport::ws::ReconnectingWsTransport;
+    let (peer, observed) = no_application_peer();
+    let transport =
+        ReconnectingWsTransport::connect_with_timeout(&peer.url, "token", Duration::MAX)
+            .await
+            .unwrap();
+    assert_budget_rejected(transport, false).await;
+    assert!(observed.await.unwrap());
+}
+#[tokio::test]
+async fn repeated_prefix_spelling_is_preserved_for_subscribe_and_unsubscribe() {
+    let peer = Peer::start(|listener| async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let sub = request(&mut ws).await;
+        assert_eq!(sub["ids"], json!(["@@point-1", "@point-1"]));
+        reply(
+            &mut ws,
+            json!({"reqId":sub["reqId"],"watchId":"w","rows":[]}),
+        )
+        .await;
+        let unsub = request(&mut ws).await;
+        assert_eq!(unsub["ids"], json!(["@@point-1"]));
+        reply(
+            &mut ws,
+            json!({"reqId":unsub["reqId"],"watchId":"w","rows":[]}),
+        )
+        .await;
+        wait_close(&mut ws).await;
+    });
+    let client = HaystackClient::from_transport(
+        WsTransport::connect_with_timeout(&peer.url, "token", Duration::from_secs(1))
+            .await
+            .unwrap(),
+    );
+    client
+        .watch_sub(&["@@point-1", "@point-1"], None)
+        .await
+        .unwrap();
+    client.watch_unsub("w", &["@@point-1"]).await.unwrap();
+    client.close().await.unwrap();
+}

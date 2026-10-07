@@ -232,7 +232,9 @@ impl WsTransport {
         req: &HGrid,
         deadline: tokio::time::Instant,
     ) -> Result<HGrid, ClientError> {
+        check_deadline(deadline, self.request_timeout)?;
         let (mut envelope, expected) = encode_request(op, req)?;
+        check_deadline(deadline, self.request_timeout)?;
         let (mut guard, receiver) = self.shared.admit(expected)?;
         envelope["reqId"] = Value::String(guard.id.clone());
         let text = envelope.to_string();
@@ -244,6 +246,9 @@ impl WsTransport {
             if self.is_closed() {
                 return Err(self.shared.error());
             }
+            // timeout_at polls its inner future first. A ready writer must not
+            // turn an expired call into a server-side effect.
+            check_deadline(deadline, self.request_timeout)?;
             let sink = writer.as_mut().ok_or(ClientError::ConnectionClosed)?;
             guard.sending = true;
             if sink
@@ -263,6 +268,21 @@ impl WsTransport {
             _ = self.shared.stopped.cancelled() => Err(self.shared.error()),
             result = tokio::time::timeout_at(deadline, work) => result.unwrap_or(Err(ClientError::Timeout(self.request_timeout))),
         }
+    }
+}
+
+fn request_deadline(timeout: Duration) -> Result<tokio::time::Instant, ClientError> {
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| {
+            ClientError::Connection("WebSocket request timeout exceeds the clock range".into())
+        })
+}
+fn check_deadline(deadline: tokio::time::Instant, timeout: Duration) -> Result<(), ClientError> {
+    if tokio::time::Instant::now() >= deadline {
+        Err(ClientError::Timeout(timeout))
+    } else {
+        Ok(())
     }
 }
 
@@ -304,11 +324,13 @@ fn encode_request(op: &str, grid: &HGrid) -> Result<(Value, Expected), ClientErr
         let Some(Kind::Ref(id)) = row.get("id") else {
             return Err(invalid_request());
         };
-        let id = id.val.strip_prefix('@').unwrap_or(&id.val);
-        if id.is_empty() || id.len() > 1024 {
+        let normalized = id.val.strip_prefix('@').unwrap_or(&id.val);
+        if normalized.is_empty() || normalized.len() > 1024 {
             return Err(invalid_request());
         }
-        ids.push(id);
+        // The server owns the single optional-prefix normalization. Preserve
+        // spelling here so @@point selects @point just as a raw request does.
+        ids.push(id.val.as_str());
     }
     if op == "watchSub" {
         Ok((json!({"op":op,"ids":ids}), Expected::Subscribe))
@@ -452,7 +474,7 @@ fn spawn_reader(
 }
 impl Transport for WsTransport {
     async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
-        self.call_until(op, req, tokio::time::Instant::now() + self.request_timeout)
+        self.call_until(op, req, request_deadline(self.request_timeout)?)
             .await
     }
     async fn close(&self) -> Result<(), ClientError> {
@@ -526,8 +548,10 @@ impl ReconnectingWsTransport {
 }
 impl Transport for ReconnectingWsTransport {
     async fn call(&self, op: &str, req: &HGrid) -> Result<HGrid, ClientError> {
-        let deadline = tokio::time::Instant::now() + self.request_timeout;
+        let deadline = request_deadline(self.request_timeout)?;
+        check_deadline(deadline, self.request_timeout)?;
         encode_request(op, req)?;
+        check_deadline(deadline, self.request_timeout)?;
         let _permit = self
             .admission
             .try_acquire()
@@ -535,6 +559,7 @@ impl Transport for ReconnectingWsTransport {
         let work = async {
             let transport = {
                 let mut inner = self.inner.lock().await;
+                check_deadline(deadline, self.request_timeout)?;
                 if inner.as_ref().is_none_or(|transport| transport.is_closed()) {
                     inner.take();
                     let transport = WsTransport::connect_with_timeout(
@@ -668,6 +693,57 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+    async fn check_expired_deadline(before_admission: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            assert!(
+                ws.next().await.unwrap().unwrap().is_close(),
+                "expired call reached the wire"
+            );
+        });
+        let transport = WsTransport::connect(&url, "token").await.unwrap();
+        let mut row = HDict::new();
+        row.set("id", Kind::Ref(haystack_core::kinds::HRef::from_val("p")));
+        let grid = HGrid::from_parts(HDict::new(), vec![HCol::new("id")], vec![row]);
+        let result = if before_admission {
+            let expired = tokio::time::Instant::now() - Duration::from_secs(1);
+            transport.call_until("watchSub", &grid, expired).await
+        } else {
+            let held = transport.writer.lock().await;
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+            let mut waiting = Box::pin(transport.call_until("watchSub", &grid, deadline));
+            assert!(futures_util::poll!(&mut waiting).is_pending());
+            // Poll the call only after both its writer and timer become ready.
+            tokio::time::sleep_until(deadline + Duration::from_millis(1)).await;
+            drop(held);
+            waiting.await
+        };
+        let (next_id, pending) = {
+            let state = transport.shared.state.lock().unwrap();
+            (state.next_id, state.pending.len())
+        };
+        let still_open = !transport.is_closed();
+        transport.close().await.unwrap();
+        assert!(matches!(result, Err(ClientError::Timeout(_))));
+        assert_eq!(next_id, if before_admission { 1 } else { 2 });
+        assert_eq!(pending, 0);
+        assert!(still_open);
+        tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn expired_deadlines_before_admission_do_not_allocate_or_send() {
+        check_expired_deadline(true).await;
+    }
+    #[tokio::test]
+    async fn expired_deadlines_after_writer_wait_do_not_send_or_leak() {
+        check_expired_deadline(false).await;
     }
     #[test]
     fn cancellation_during_write_seals_connection_and_settles_other_calls() {

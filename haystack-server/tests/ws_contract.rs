@@ -247,3 +247,67 @@ async fn server_oversized_response_closes_without_sending_rows() {
         Some(Ok(Message::Close(_))) | Some(Err(_)) | None
     ));
 }
+
+fn graph_with_prefixed_ids() -> SharedGraph {
+    let graph = SharedGraph::new(EntityGraph::new());
+    for id in ["@point-1", "point-1"] {
+        let mut entity = HDict::new();
+        entity.set("id", Kind::Ref(HRef::from_val(id)));
+        entity.set("curVal", Kind::Number(Number::unitless(1.0)));
+        graph.add(entity).unwrap();
+    }
+    graph
+}
+#[tokio::test]
+async fn first_party_repeated_prefix_subscription_normalizes_once() {
+    let server = Server::start(graph_with_prefixed_ids());
+    let client = HaystackClient::connect_ws(&server.url, &server.ws_url, "user", "pencil")
+        .await
+        .unwrap();
+    let grid = client.watch_sub(&["@@point-1"], None).await.unwrap();
+    assert_eq!(grid.rows.len(), 1);
+    assert_eq!(
+        grid.rows[0].get("id"),
+        Some(&Kind::Ref(HRef::from_val("@point-1")))
+    );
+    client.close().await.unwrap();
+}
+#[tokio::test]
+async fn first_party_repeated_prefix_selective_unsubscribe_normalizes_once() {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message;
+    let graph = graph_with_prefixed_ids();
+    let server = Server::start(graph.clone());
+    // An independent request establishes both IDs so the unsubscribe assertion
+    // cannot be masked by a matching bug in first-party subscription encoding.
+    let mut raw = raw_client(&server).await;
+    raw.send(Message::Text(
+        json!({"op":"watchSub","reqId":"setup","ids":["@@point-1","point-1"]})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let Message::Text(text) = raw.next().await.unwrap().unwrap() else {
+        panic!("subscription response")
+    };
+    let subscribed: Value = serde_json::from_str(&text).unwrap();
+    let watch = subscribed["watchId"].as_str().unwrap();
+    let client = HaystackClient::connect_ws(&server.url, &server.ws_url, "user", "pencil")
+        .await
+        .unwrap();
+    client.watch_unsub(watch, &["@@point-1"]).await.unwrap();
+    for id in ["@point-1", "point-1"] {
+        let mut changes = HDict::new();
+        changes.set("curVal", Kind::Number(Number::unitless(2.0)));
+        graph.update(id, changes).unwrap();
+    }
+    let remaining = client.watch_poll(watch).await.unwrap();
+    assert_eq!(remaining.rows.len(), 1);
+    assert_eq!(
+        remaining.rows[0].get("id"),
+        Some(&Kind::Ref(HRef::from_val("point-1")))
+    );
+    client.close().await.unwrap();
+}
