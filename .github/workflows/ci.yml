@@ -30,6 +30,8 @@ jobs:
         run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - name: Test benchmark capture controls
         run: python3 -m unittest discover -s scripts/bench -p 'test_capture.py' -v
+      - name: Test artifact provenance and staging controls
+        run: python3 -m unittest discover -s scripts/release/tests -v
       - name: Select branch coverage
         id: plan
         env:
