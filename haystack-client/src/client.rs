@@ -39,12 +39,19 @@ impl HaystackClient<HttpTransport> {
         password: &str,
         config: &ClientConfig,
     ) -> Result<Self, ClientError> {
-        crate::ensure_crypto_provider();
+        let parsed_url = crate::config::validate_http_url(url)?;
+        let url = parsed_url.as_str().trim_end_matches('/');
         let client = config.build_reqwest_client()?;
         let transport = match config.auth_mode {
             crate::config::AuthMode::Scram => {
-                let auth_token =
-                    crate::auth::authenticate(&client, url, username, password).await?;
+                let auth_token = crate::auth::authenticate_with_timeout(
+                    &client,
+                    url,
+                    username,
+                    password,
+                    config.auth_timeout,
+                )
+                .await?;
                 HttpTransport::with_bearer(url, auth_token, client, &config.wire_format)
             }
             crate::config::AuthMode::Basic => {
@@ -54,13 +61,14 @@ impl HaystackClient<HttpTransport> {
                 // because there is no TLS to verify. See
                 // `ClientConfig::allow_plaintext_basic`.
                 if !url.starts_with("https://") && !config.allow_plaintext_basic {
-                    return Err(ClientError::Connection(format!(
-                        "refusing HTTP Basic auth over a non-HTTPS URL ({url}): the \
+                    return Err(ClientError::Connection(
+                        "refusing HTTP Basic auth over a non-HTTPS URL: the \
                          password would be sent base64-encoded, not encrypted, on \
                          every request. Use https://, or set \
                          ClientConfig::allow_plaintext_basic if the network is \
                          genuinely trusted"
-                    )));
+                            .into(),
+                    ));
                 }
                 HttpTransport::with_basic(url, username, password, client, &config.wire_format)
             }
@@ -68,47 +76,29 @@ impl HaystackClient<HttpTransport> {
         Ok(Self { transport })
     }
 
-    /// Connect to a Haystack server via HTTP with mutual TLS (mTLS) client
-    /// certificate authentication, then perform SCRAM authentication.
+    /// Connect with additional server trust and optional mutual TLS identity,
+    /// then perform SCRAM authentication.
     ///
-    /// Builds a custom `reqwest::Client` configured with the provided TLS
-    /// identity (client certificate + key) and optional CA certificate, then
-    /// runs the standard SCRAM handshake over that client.
+    /// Uses the same configured HTTP client for authentication and all later
+    /// operations. Use `connect_with_config` to combine TLS with HTTP Basic or
+    /// customize deadlines.
     ///
     /// # Arguments
     /// * `url` - The server API root (e.g. `https://localhost:8443/api`)
     /// * `username` - The username to authenticate as
     /// * `password` - The user's plaintext password
-    /// * `tls` - The mTLS configuration (cert, key, optional CA)
+    /// * `tls` - Additional CA trust and optional paired client certificate/key
     pub async fn connect_with_tls(
         url: &str,
         username: &str,
         password: &str,
         tls: &crate::tls::TlsConfig,
     ) -> Result<Self, ClientError> {
-        crate::ensure_crypto_provider();
-        // Combine cert + key into a single PEM buffer for reqwest::Identity
-        let mut combined_pem = tls.client_cert_pem.clone();
-        combined_pem.extend_from_slice(&tls.client_key_pem);
-
-        let identity = reqwest::Identity::from_pem(&combined_pem)
-            .map_err(|e| ClientError::Connection(format!("invalid client certificate: {e}")))?;
-
-        let mut builder = reqwest::Client::builder().identity(identity);
-
-        if let Some(ref ca) = tls.ca_cert_pem {
-            let cert = reqwest::Certificate::from_pem(ca)
-                .map_err(|e| ClientError::Connection(format!("invalid CA certificate: {e}")))?;
-            builder = builder.add_root_certificate(cert);
-        }
-
-        let client = builder
-            .build()
-            .map_err(|e| ClientError::Connection(format!("TLS client build failed: {e}")))?;
-
-        let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
-        let transport = HttpTransport::new(url, auth_token);
-        Ok(Self { transport })
+        let config = ClientConfig {
+            tls: Some(tls.clone()),
+            ..ClientConfig::default()
+        };
+        Self::connect_with_config(url, username, password, &config).await
     }
 }
 
