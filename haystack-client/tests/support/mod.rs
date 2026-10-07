@@ -115,6 +115,7 @@ pub enum Challenge {
     MultipleScram,
     CombinedSchemes,
     SeparateSchemes,
+    BareSchemeAfterScram,
 }
 #[derive(Clone, Copy, Default, Debug)]
 pub enum Final {
@@ -305,6 +306,7 @@ fn response(
                 "x".repeat(8200)
             ),
             Challenge::MultipleScram => format!("{valid}\r\nWWW-Authenticate: {valid}"),
+            Challenge::BareSchemeAfterScram => format!("{valid}, Negotiate"),
             Challenge::CombinedSchemes => format!("Basic realm=\"synthetic\", {valid}"),
             _ => valid,
         };

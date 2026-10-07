@@ -193,12 +193,10 @@ fn scram_challenge(headers: &HeaderMap) -> Result<String, ClientError> {
     for header in bounded_headers(headers, "www-authenticate")? {
         let mut selected = false;
         for part in challenge_parts(header)?.into_iter().map(str::trim) {
-            if let Some((scheme, rest)) =
-                part.split_once(char::is_whitespace)
-                    .filter(|(scheme, rest)| {
-                        !scheme.contains('=') && !rest.trim_start().starts_with('=')
-                    })
-            {
+            // RFC 9110 permits a challenge containing only an auth-scheme.
+            // A parameter with whitespace before '=' is still a parameter.
+            let (scheme, rest) = part.split_once(char::is_whitespace).unwrap_or((part, ""));
+            if is_auth_scheme_token(scheme) && !rest.trim_start().starts_with('=') {
                 selected = scheme.eq_ignore_ascii_case("SCRAM");
                 if selected {
                     if result.is_some() {
@@ -213,6 +211,30 @@ fn scram_challenge(headers: &HeaderMap) -> Result<String, ClientError> {
         }
     }
     result.ok_or_else(|| failed("no supported SCRAM challenge"))
+}
+
+fn is_auth_scheme_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 // Other advertised schemes may use quoted realms containing commas. Keep
@@ -358,6 +380,53 @@ mod tests {
         assert_eq!(required(&fields, "hash").unwrap(), "SHA-256");
         assert!(parameters("hash=SHA-256, HASH=SHA-512").is_err());
         assert!(parameters("hash=\"SHA-256\"").is_err());
+    }
+
+    #[test]
+    fn bare_alternative_schemes_bound_scram_parameters() {
+        let scram = "handshakeToken=token, hash=SHA-256, data=YQ==";
+        for header in [
+            format!("SCRAM {scram}, Negotiate"),
+            format!("Negotiate, SCRAM {scram}"),
+            format!("SCRAM {scram}, X-Auth, realm=opaque"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("www-authenticate", HeaderValue::from_str(&header).unwrap());
+            let selected = scram_challenge(&headers).unwrap();
+            let fields = parameters(&selected)
+                .expect("alternative scheme must not become a SCRAM parameter");
+            assert_eq!(fields.len(), 3);
+            assert_eq!(required(&fields, "handshakeToken").unwrap(), "token");
+            assert_eq!(required(&fields, "hash").unwrap(), "SHA-256");
+            assert_eq!(required(&fields, "data").unwrap(), "YQ==");
+        }
+    }
+
+    #[test]
+    fn invalid_bare_segments_are_not_silently_discarded() {
+        for suffix in ["Invalid/Scheme", "Invalid@Scheme", ""] {
+            let mut headers = HeaderMap::new();
+            let header = format!("SCRAM handshakeToken=token, hash=SHA-256, data=YQ==, {suffix}");
+            headers.insert("www-authenticate", HeaderValue::from_str(&header).unwrap());
+            let selected = scram_challenge(&headers).unwrap();
+            assert!(parameters(&selected).is_err());
+        }
+    }
+
+    #[test]
+    fn bare_scram_challenge_still_counts_as_a_duplicate() {
+        let scram = "handshakeToken=token, hash=SHA-256, data=YQ==";
+        for header in [
+            format!("SCRAM {scram}, SCRAM"),
+            format!("SCRAM, SCRAM {scram}"),
+            format!("SCRAM {scram}, Negotiate, scram"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("www-authenticate", HeaderValue::from_str(&header).unwrap());
+            assert!(
+                matches!(scram_challenge(&headers), Err(ClientError::AuthFailed(message)) if message == "multiple SCRAM challenges")
+            );
+        }
     }
 
     #[test]

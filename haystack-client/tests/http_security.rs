@@ -221,6 +221,32 @@ async fn scram_can_be_selected_from_multiple_auth_schemes() {
 }
 
 #[tokio::test]
+async fn bare_alternative_after_scram_authenticates() {
+    let certs = Certificates::new();
+    let server = Server::start(
+        &certs,
+        false,
+        Options {
+            challenge: Challenge::BareSchemeAfterScram,
+            ..Options::default()
+        },
+    );
+    let client = HaystackClient::connect_with_config(
+        &server.url,
+        "user",
+        "password",
+        &config(TlsConfig::with_ca(certs.ca.clone())),
+    )
+    .await
+    .expect("a bare alternative after SCRAM must not invalidate the supported challenge");
+    client.about().await.unwrap();
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.requests.len(), 3);
+    assert_eq!(state.domain, 1);
+    assert_eq!(state.requests[2].1, "BEARER authToken=session-token");
+}
+
+#[tokio::test]
 async fn one_deadline_covers_both_handshake_requests() {
     let certs = Certificates::new();
     let server = Server::start(
