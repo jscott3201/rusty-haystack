@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use haystack_core::codecs::codec_for;
 use haystack_core::data::{HCol, HDict, HGrid};
 use haystack_core::filter;
@@ -214,24 +214,21 @@ fn graph_benchmarks(c: &mut Criterion) {
     });
 
     c.bench_function("graph_add_entity", |b| {
-        let mut g = EntityGraph::new();
-        let mut s = HDict::new();
-        s.set("id", Kind::Ref(HRef::from_val("site-1")));
-        s.set("site", Kind::Marker);
-        g.add(s).unwrap();
-        let mut counter = 0usize;
-        b.iter_with_setup(
+        b.iter_batched_ref(
             || {
-                counter += 1;
-                let mut d = HDict::new();
-                d.set("id", Kind::Ref(HRef::from_val(format!("bench-{counter}"))));
-                d.set("point", Kind::Marker);
-                d.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
-                d
+                let mut graph = EntityGraph::new();
+                let mut site = HDict::new();
+                site.set("id", Kind::Ref(HRef::from_val("site-1")));
+                site.set("site", Kind::Marker);
+                graph.add(site).unwrap();
+                (graph, make_sample_entity(0))
             },
-            |entity| {
-                let _ = g.add(entity);
+            |(graph, entity)| {
+                graph
+                    .add(std::mem::take(entity))
+                    .expect("bounded benchmark insertion")
             },
+            BatchSize::PerIteration,
         );
     });
 
@@ -259,7 +256,7 @@ fn graph_benchmarks(c: &mut Criterion) {
                 "temp",
                 Kind::Number(Number::new(75.0, Some("\u{00b0}F".into()))),
             );
-            graph.update(black_box("p-500"), changes)
+            graph.update(black_box("p-500"), changes).unwrap()
         });
     });
 
@@ -334,7 +331,7 @@ fn graph_benchmarks(c: &mut Criterion) {
                     d.set("id", Kind::Ref(HRef::from_val(format!("w-{j}"))));
                     d.set("point", Kind::Marker);
                     d.set("siteRef", Kind::Ref(HRef::from_val("site-1")));
-                    let _ = writer.add(d);
+                    writer.add(d).unwrap();
                 }
             }));
 
@@ -576,7 +573,8 @@ fn validation_benchmarks(c: &mut Criterion) {
 /// Structure per "campus" (repeats to reach target count):
 ///   1 site, 3 AHUs, 2 VAVs, 1 boiler, 1 meter, 1 weather station,
 ///   then ~10 points per equip with varying kinds (temp, pressure, flow, occ, cmd).
-/// Total per campus ≈ 80 entities (8 parents + ~72 points).
+/// Total per campus is 81 entities (1 site + 8 equips + 72 points).
+/// The historical nominal 10,000 target below therefore creates 10,125 entities.
 fn build_realistic_graph(target: usize) -> EntityGraph {
     let mut graph = EntityGraph::new();
     let campuses = (target / 80).max(1);
@@ -662,6 +660,7 @@ fn build_realistic_graph(target: usize) -> EntityGraph {
             }
         }
     }
+    assert_eq!(graph.len(), campuses * 81);
     graph
 }
 
@@ -673,7 +672,7 @@ fn graph_scale_benchmarks(c: &mut Criterion) {
             let mut changes = HDict::new();
             changes.set("dis", Kind::Str("Updated".into()));
             changes.set("curVal", Kind::Number(Number::new(99.0, Some("°F".into()))));
-            let _ = g10k.update(black_box("pt-60-2-temp-0"), changes);
+            g10k.update(black_box("pt-60-2-temp-0"), changes).unwrap();
         });
     });
 
