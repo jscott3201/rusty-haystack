@@ -285,7 +285,7 @@ def inspect_file(path, kind, version, target, python_tag=None):
         require("rusty_haystack/__init__.pyi" in entries and "rusty_haystack/py.typed" in entries, "missing installed typing files")
         native = [p for p in entries if p.startswith("rusty_haystack/rusty_haystack.") and p.endswith((".so", ".pyd"))]
         require(len(native) == 1 and native_identity(entries[native[0]][0]) == target_identity(target), "wheel native extension target mismatch")
-        return {"name": meta["Name"], "version": meta["Version"]}, {"python": interpreter, "abi": abi, "platforms": platform_tags, "requires_python": meta["Requires-Python"]}
+        return {"name": meta["Name"], "version": meta["Version"]}, {"python": interpreter, "abi": abi, "platforms": platform_tags, "requires_python": meta["Requires-Python"], "typing_stub_sha256": hashlib.sha256(entries["rusty_haystack/__init__.pyi"][0]).hexdigest()}
     require(kind == "sdist" and target == "source", "unsupported artifact kind")
     roots = {p.split("/")[0] for p in entries}
     require(len(roots) == 1, "source archive must have one root")
@@ -296,7 +296,9 @@ def inspect_file(path, kind, version, target, python_tag=None):
     require(path.name == f"{root}.tar.gz" and root in (f"rusty_haystack-{version}", f"rusty-haystack-{version}"), "sdist filename mismatch")
     locks = [data for name, (data, _) in entries.items() if name.endswith("/Cargo.lock")]
     require(len(locks) == 1, "source archive lock inventory mismatch")
-    return {"name": meta["Name"], "version": meta["Version"]}, {"lock_sha256": hashlib.sha256(locks[0]).hexdigest()}
+    typing = (f"{root}/rusty_haystack.pyi", f"{root}/rusty-haystack/rusty_haystack.pyi")
+    require(all(name in entries for name in typing) and entries[typing[0]][0] == entries[typing[1]][0], "sdist typing layout mismatch")
+    return {"name": meta["Name"], "version": meta["Version"]}, {"lock_sha256": hashlib.sha256(locks[0]).hexdigest(), "typing_stub_sha256": hashlib.sha256(entries[typing[0]][0]).hexdigest()}
 
 
 def lock_prune(before, after):
@@ -333,6 +335,8 @@ def seal(repo, bundle, source, target, kind, tools, *, python_tag=None, removed=
     path = inventory[0]
     version = project(repo)
     package, details = inspect_file(path, kind, version, target, python_tag)
+    if kind != "cli":
+        require(details["typing_stub_sha256"] == digest(repo / "rusty-haystack/rusty_haystack.pyi"), "typing source mismatch")
     receipt = {"schema": 1, "kind": kind, "source": source, "package": package,
                "artifact": {"filename": path.name, "size": path.stat().st_size, "sha256": digest(path)},
                "build": {"target": target, "profile": "sdist" if kind == "sdist" else "release", "features": [] if kind == "cli" else ["pyo3/extension-module"], "tools": tools},
@@ -352,7 +356,7 @@ def expected_tuples(profile, target=None):
     return {("cli", target, None), ("wheel", target, "cp312"), ("sdist", "source", None)}
 
 
-def read_bundle(bundle, *, source, version, source_lock, allow_dirty=False):
+def read_bundle(bundle, *, source, version, source_lock, source_stub=None, allow_dirty=False):
     require({p.name for p in bundle.iterdir()} == {"files", "receipts"}, "unexpected bundle entries")
     files = list((bundle / "files").iterdir()); receipts = list((bundle / "receipts").iterdir())
     require(len(files) == len(receipts) == 1, "missing, duplicate or unexpected candidate files/receipts")
@@ -381,15 +385,17 @@ def read_bundle(bundle, *, source, version, source_lock, allow_dirty=False):
         require(python["implementation"] == "CPython" and python["cache_tag"] == "cpython-" + python_tag[2:] and "cp" + "".join(python["version"].split(".")[:2]) == python_tag, "builder interpreter provenance mismatch")
     package, details = inspect_file(path, receipt["kind"], version, build["target"], python_tag)
     require(receipt["package"] == package and receipt["details"] == details, "package/ABI metadata mismatch")
+    if receipt["kind"] != "cli":
+        require(details["typing_stub_sha256"] == source_stub, "typing source mismatch")
     return (receipt["kind"], build["target"], python_tag), path, receipt_path, receipt
 
 
-def inventory(directory, *, profile, target, source, version, source_lock, source_lock_text, allow_dirty=False):
+def inventory(directory, *, profile, target, source, version, source_lock, source_lock_text, source_stub, allow_dirty=False):
     require(directory.is_dir() and not directory.is_symlink(), "missing downloaded inventory")
     found = {}; filenames = set()
     for bundle in directory.iterdir():
         require(bundle.is_dir() and not bundle.is_symlink(), "unexpected downloaded inventory entry")
-        key, path, receipt_path, receipt = read_bundle(bundle, source=source, version=version, source_lock=source_lock, allow_dirty=allow_dirty)
+        key, path, receipt_path, receipt = read_bundle(bundle, source=source, version=version, source_lock=source_lock, source_stub=source_stub, allow_dirty=allow_dirty)
         if key[0] == "sdist":
             shipped = [data.decode() for name, (data, _) in members(path).items() if name.endswith("/Cargo.lock")]
             removed = lock_prune(source_lock_text, shipped[0])
@@ -535,7 +541,7 @@ def main():
             result = check_staged(args.input, read_json(args.receipt), source=args.source, version=project(args.repo), source_lock=digest(args.repo / "Cargo.lock"), profile=args.profile, target=args.target)
         else:
             outside_checkout(args.input, args.repo)
-            found = inventory(args.input, profile=args.profile, target=args.target, source=args.source, version=project(args.repo), source_lock=digest(args.repo / "Cargo.lock"), source_lock_text=(args.repo / "Cargo.lock").read_text(), allow_dirty=args.allow_dirty)
+            found = inventory(args.input, profile=args.profile, target=args.target, source=args.source, version=project(args.repo), source_lock=digest(args.repo / "Cargo.lock"), source_lock_text=(args.repo / "Cargo.lock").read_text(), source_stub=digest(args.repo / "rusty-haystack/rusty_haystack.pyi"), allow_dirty=args.allow_dirty)
             if args.command == "stage":
                 outside_checkout(args.output, args.repo)
                 result = stage(found, args.evidence, args.output, args.target if args.profile == "native" else "x86_64-unknown-linux-gnu")

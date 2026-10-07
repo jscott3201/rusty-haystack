@@ -14,6 +14,7 @@ import sys
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--prefix", type=Path, required=True)
 parser.add_argument("--version", required=True)
+parser.add_argument("--stub-sha256", required=True)
 args = parser.parse_args()
 assert platform.python_implementation() == "CPython" and sys.version_info[:2] == (3, 12)
 assert Path(sys.prefix).resolve() == args.prefix.resolve()
@@ -44,8 +45,9 @@ package = origin.parent
 stub = package / "__init__.pyi"
 marker = package / "py.typed"
 assert stub.is_file() and marker.is_file()
+assert hashlib.sha256(stub.read_bytes()).hexdigest() == args.stub_sha256
 classes = {node.name for node in ast.parse(stub.read_text()).body if isinstance(node, ast.ClassDef)}
 assert {"Number", "Ref", "HGrid", "CodecError", "ClientError"} <= classes
 installed_files = {str(path) for path in importlib.metadata.distribution("rusty-haystack").files}
 assert {"rusty_haystack/__init__.pyi", "rusty_haystack/py.typed"} <= installed_files
-print(json.dumps({"implementation": platform.python_implementation(), "python": platform.python_version(), "prefix": str(args.prefix.resolve()), "module_origin": str(origin), "version": module.__version__, "typing": "installed PEP 561 layout and parsed public stub names; no full type-checker claim"}, sort_keys=True))
+print(json.dumps({"implementation": platform.python_implementation(), "python": platform.python_version(), "prefix": str(args.prefix.resolve()), "module_origin": str(origin), "version": module.__version__, "typing_stub_sha256": args.stub_sha256, "typing": "installed PEP 561 layout, current stub digest and parsed public names; no full type-checker claim"}, sort_keys=True))

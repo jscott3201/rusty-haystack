@@ -70,7 +70,7 @@ def installed_smoke(path, kind, repo, work, version, interpreter):
     if source_lock_before:
         a.require(a.digest(locks[0]) == source_lock_before, "PEP517 build mutated the sealed source lock")
         a.require(a.tool_info(str(python), repo=root, target="source", env=source_base_env) == source_tools, "PEP517 compiler context changed")
-    observed = json.loads(run([str(python), "-I", str(repo / "scripts/release/consumer.py"), "--prefix", str(venv), "--version", version], work, "installed-smoke", cwd=scratch, env=env))
+    observed = json.loads(run([str(python), "-I", str(repo / "scripts/release/consumer.py"), "--prefix", str(venv), "--version", version, "--stub-sha256", a.digest(repo / "rusty-haystack/rusty_haystack.pyi")], work, "installed-smoke", cwd=scratch, env=env))
     if source_tools:
         observed["source_build_tools"] = source_tools
     return checks, observed
@@ -103,7 +103,7 @@ def main():
         repo, incoming, work, evidence = (path.resolve() for path in (args.repo, args.input, args.work, args.evidence))
         for path in (incoming, work, evidence): a.outside_checkout(path, repo)
         version = a.project(repo)
-        found = a.inventory(incoming, profile=args.profile, target=args.target, source=args.source, version=version, source_lock=a.digest(repo / "Cargo.lock"), source_lock_text=(repo / "Cargo.lock").read_text())
+        found = a.inventory(incoming, profile=args.profile, target=args.target, source=args.source, version=version, source_lock=a.digest(repo / "Cargo.lock"), source_lock_text=(repo / "Cargo.lock").read_text(), source_stub=a.digest(repo / "rusty-haystack/rusty_haystack.pyi"))
         work.mkdir(parents=True, exist_ok=False); evidence.mkdir(parents=True, exist_ok=False)
         runtime_target = args.target if args.profile == "native" else "x86_64-unknown-linux-gnu"
         selected_tools = a.tool_info(repo=repo, target=runtime_target, env=clean_environment())

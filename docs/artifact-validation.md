@@ -16,7 +16,7 @@ Every file receives archive, native-header, package, version, target and provena
 
 The isolated CLI consumer checks `haystack --version` and a two-entity Zinc-to-JSON v3 export with a `site` filter against fixed expected values. The Python consumer checks the installed distribution and module version, imports the public submodules, exercises number/ref/Zinc behavior and the public codec exception, and compares authentication derivation with independent standard-library PBKDF2/HMAC calculations. It verifies that import origins are in a newly created virtual environment while the working directory is outside the checkout. Python path overrides are cleared and the consumer runs with `-I`.
 
-Typing evidence covers installed `__init__.pyi` and `py.typed` files, distribution file records and parsed public stub declarations. It does not claim that a full type checker has validated every annotation.
+Typing evidence covers installed `__init__.pyi` and `py.typed` files, distribution file records, exact equality with the current source stub SHA-256 and parsed public stub declarations. It does not claim that a full type checker has validated every annotation.
 
 ## File identity and promotion
 
@@ -25,7 +25,7 @@ Each uploaded candidate contains only `files/<one package file>` and `receipts/<
 - The exact clean source revision and SHA-256 of the checkout's `Cargo.lock`.
 - Package name/version and the final package filename, size and SHA-256.
 - Target, release/source profile, explicitly enabled features and actual Rust/Cargo versions, selected executable paths/hashes and the repository working directory. The build records the workspace profiles, admitted native inputs and allowed linker-only Cargo configuration hashes.
-- For Python artifacts, the actual Maturin version and interpreter identity; wheels also bind Python/ABI/platform tags and `Requires-Python` metadata.
+- For Python artifacts, the actual Maturin version and interpreter identity plus the current typing-stub digest; wheels also bind Python/ABI/platform tags and `Requires-Python` metadata.
 - For container builders, the actual inspected image ID and immutable registry digest. The cross executable is pinned to 0.2.5 and its version is captured.
 - For the repaired source archive, its distinct shipped lock hash and the exact removed lock packages.
 
@@ -44,6 +44,8 @@ Build helpers resolve Rust/Cargo 1.99.0 in the repository build context, record 
 Maturin 1.15.0's Cargo source generator trims workspace members while copying the original workspace lock. The unmodified archive can therefore fail full `cargo metadata --offline --locked`; shallow `--no-deps` metadata does not establish a usable locked graph.
 
 The builder extracts one raw archive into disposable staging and checks that its initial lock equals the checkout lock. Offline Cargo metadata prunes it. The helper permits package removal and removal of existing dependency edges only. It rejects added packages or edges, upgrades, changes to retained identity/version/source/checksum or other package metadata, changes to lock metadata, and removal of a package still referenced by the final entries. The observed transformation removes the CLI/demo packages, `clap_derive` and `strsim`, as well as unused edges from retained `clap`/`clap_builder` entries. An edge may disappear even when its destination remains reachable through another package. Full offline locked metadata must then succeed before the builder creates and seals one final archive.
+
+Maturin also relocates `pyproject.toml` to the archive root while initially leaving `rusty_haystack.pyi` beside the nested Rust manifest. Its pure Rust wheel builder looks for the stub at the Python project root. Before final sealing, the archive builder verifies the nested stub against the current checkout and copies those identical bytes to `rusty_haystack.pyi` at the archive root. Missing/stale nested data or a conflicting destination fails; no stub is generated or rewritten. Both archived copies and the receipt's typing hash must match the current source. Maturin then copies the stub to installed `rusty_haystack/__init__.pyi` and emits its usual empty `py.typed` marker. The installed consumer checks the exact stub digest, so a source install cannot pass with missing or stale typing data.
 
 Downloaded qualification extracts that sealed archive into another fresh directory, repeats full offline locked metadata, installs the pinned Maturin 1.15.0 backend into a new virtual environment, and runs pip's PEP 517 install with dependency lookup and build isolation disabled. `pyproject.toml` pins the backend and requests locked Maturin builds. The shipped lock must remain unchanged after installation. The wheel built during this source-install check is validation-only; it never replaces the separately built release wheel. Cargo dependencies must already be available locally, and Cargo stays offline for the extracted-source build. Installing the pinned backend may use the configured Python package index/cache.
 
