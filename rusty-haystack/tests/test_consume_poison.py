@@ -18,7 +18,7 @@ import rusty_haystack as rh
 
 USERS_TOML = """
 [users.alice]
-password_hash = "dGVzdA==:100000:dGVzdA==:dGVzdA=="
+password_hash = "W22ZaJ0SNY7soEsUEjb6gQ==:4096:WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU="
 role = "admin"
 """
 

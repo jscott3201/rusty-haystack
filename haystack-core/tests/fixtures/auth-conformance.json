@@ -1,0 +1,44 @@
+{
+  "provenance": {
+    "publishedSource": "https://www.rfc-editor.org/rfc/rfc7677.html#section-3",
+    "httpContract": "https://project-haystack.org/doc/docHaystack/Auth",
+    "verifiedBy": "Independent read-only research agent using Python hashlib.pbkdf2_hmac, HMAC, SHA-256 and XOR on 2026-10-07",
+    "messageBytes": "UTF-8, no CR/LF or trailing whitespace; preserve received transcript exactly",
+    "haystackIllustrationDefect": "The page omits the $k0 suffix from the RFC combined nonce while retaining RFC proof/verifier; its outer encodings also contain trailing LF. Do not alter primitives or trim bytes to force a match.",
+    "outerEncoding": "URL-safe Base64 without padding; inner salt/proof/verifier use standard padded Base64"
+  },
+  "published": {
+    "username": "user",
+    "password": "pencil",
+    "salt_base64": "W22ZaJ0SNY7soEsUEjb6gQ==",
+    "salt_hex": "5b6d99689d12358eeca04b141236fa81",
+    "iterations": 4096,
+    "client_first_bare": "n=user,r=rOprNGfwEbeRWgbNEkqO",
+    "server_first": "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096",
+    "client_final_without_proof": "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0",
+    "proof": "dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=",
+    "verifier": "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
+  },
+  "derived_outer": {
+    "hello_username": "dXNlcg",
+    "client_first_data": "biwsbj11c2VyLHI9ck9wck5HZndFYmVSV2diTkVrcU8",
+    "server_first_data": "cj1yT3ByTkdmd0ViZVJXZ2JORWtxTyVodllEcFdVYTJSYVRDQWZ1eEZJbGopaE5sRiRrMCxzPVcyMlphSjBTTlk3c29Fc1VFamI2Z1E9PSxpPTQwOTY",
+    "client_final_data": "Yz1iaXdzLHI9ck9wck5HZndFYmVSV2diTkVrcU8laHZZRHBXVWEyUmFUQ0FmdXhGSWxqKWhObEYkazAscD1kSHpiWmFwV0lrNGpVaE4rVXRlOXl0YWc5empmTUhnc3FtbWl6N0FuZFZRPQ",
+    "server_final_data": "dj02cnJpVFJCaTIzV3BSUi93dHVwK21NaFVaVW4vZEI1bkxUSlJzamw5NUc0PQ"
+  },
+  "synthetic_unicode": {
+    "published": false,
+    "normalizationClaim": false,
+    "username": "josé,=工",
+    "username_utf8_hex": "6a6f73c3a92c3de5b7a5",
+    "password": "pencil",
+    "reuse": "Same salt, iterations, nonces, server_first and client_final_without_proof as published fixture",
+    "client_first_bare": "n=josé=2C=3D工,r=rOprNGfwEbeRWgbNEkqO",
+    "proof": "ogODVTmFiD1sOLu7EeIejxKe64XJd58YrRNXEg6DvA8=",
+    "verifier": "MjOaVFZX/TzxlDerqYoFwm9XEkH7IM77jzU7t9SLXig=",
+    "hello_username": "am9zw6ksPeW3pQ",
+    "client_first_data": "biwsbj1qb3PDqT0yQz0zROW3pSxyPXJPcHJOR2Z3RWJlUldnYk5Fa3FP",
+    "client_final_data": "Yz1iaXdzLHI9ck9wck5HZndFYmVSV2diTkVrcU8laHZZRHBXVWEyUmFUQ0FmdXhGSWxqKWhObEYkazAscD1vZ09EVlRtRmlEMXNPTHU3RWVJZWp4S2U2NFhKZDU4WXJSTlhFZzZEdkE4PQ",
+    "server_final_data": "dj1Nak9hVkZaWC9UenhsRGVycVlvRndtOVhFa0g3SU03N2p6VTd0OVNMWGlnPQ"
+  }
+}

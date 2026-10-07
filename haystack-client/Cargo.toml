@@ -33,3 +33,11 @@ rand.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+hmac.workspace = true
+sha2.workspace = true
+tokio-rustls.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
+rcgen = { workspace = true, features = ["ring", "pem"] }
+time.workspace = true
