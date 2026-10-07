@@ -1,6 +1,6 @@
 // SharedGraph — thread-safe wrapper around EntityGraph using parking_lot RwLock.
 
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -26,6 +26,27 @@ pub struct SharedGraph {
     tx: broadcast::Sender<u64>,
 }
 
+/// Own the write lock until the closure finishes, including during unwinding.
+/// `Option` lets Drop release it before broadcasting to potentially reentrant
+/// receiver wakers. Accepted mutations are observable even if the closure fails.
+struct WriteNotification<'a> {
+    guard: Option<RwLockWriteGuard<'a, EntityGraph>>,
+    version_before: u64,
+    tx: &'a broadcast::Sender<u64>,
+}
+
+impl Drop for WriteNotification<'_> {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            let version_after = guard.version();
+            drop(guard);
+            if version_after != self.version_before {
+                let _ = self.tx.send(version_after);
+            }
+        }
+    }
+}
+
 impl SharedGraph {
     /// Wrap an `EntityGraph` in a thread-safe handle.
     pub fn new(graph: EntityGraph) -> Self {
@@ -39,7 +60,8 @@ impl SharedGraph {
     /// Subscribe to graph change notifications.
     ///
     /// Returns a receiver that yields the new graph version after each
-    /// write operation (add, update, remove).
+    /// write operation that changes the revision. A batch passed to
+    /// [`write`](Self::write) sends one notification for its final revision.
     pub fn subscribe(&self) -> broadcast::Receiver<u64> {
         self.tx.subscribe()
     }
@@ -70,38 +92,26 @@ impl SharedGraph {
     }
 
     /// Execute a closure with exclusive (write) access to the graph.
+    ///
+    /// If its revision changes, broadcast the final version once after releasing
+    /// the lock, including when the closure returns an error or unwinds. This is
+    /// not a transaction: earlier accepted mutations are not rolled back when
+    /// a later operation in the closure fails. A closure that does not change
+    /// the revision sends no notification.
     pub fn write<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut EntityGraph) -> R,
     {
-        let mut guard = self.inner.write();
-        f(&mut guard)
-    }
-
-    /// Execute a write closure and broadcast the new version if it changed.
-    fn write_and_notify<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut EntityGraph) -> R,
-    {
-        let (result, version) = {
-            let mut guard = self.inner.write();
-            let v_before = guard.version();
-            let result = f(&mut guard);
-            let v_after = guard.version();
-            (
-                result,
-                if v_after != v_before {
-                    Some(v_after)
-                } else {
-                    None
-                },
-            )
+        let guard = self.inner.write();
+        let mut write = WriteNotification {
+            version_before: guard.version(),
+            guard: Some(guard),
+            tx: &self.tx,
         };
-        // Send outside the lock to avoid holding it during broadcast.
-        if let Some(v) = version {
-            let _ = self.tx.send(v);
-        }
-        result
+        f(write
+            .guard
+            .as_deref_mut()
+            .expect("write guard exists until drop"))
     }
 
     // ── Convenience methods ──
@@ -117,7 +127,7 @@ impl SharedGraph {
 
     /// Add an entity. See [`EntityGraph::add`].
     pub fn add(&self, entity: HDict) -> Result<String, GraphError> {
-        self.write_and_notify(|g| g.add(entity))
+        self.write(|g| g.add(entity))
     }
 
     /// Get an entity by ref value.
@@ -130,12 +140,12 @@ impl SharedGraph {
 
     /// Update an entity. See [`EntityGraph::update`].
     pub fn update(&self, ref_val: &str, changes: HDict) -> Result<(), GraphError> {
-        self.write_and_notify(|g| g.update(ref_val, changes))
+        self.write(|g| g.update(ref_val, changes))
     }
 
     /// Remove an entity. See [`EntityGraph::remove`].
     pub fn remove(&self, ref_val: &str) -> Result<HDict, GraphError> {
-        self.write_and_notify(|g| g.remove(ref_val))
+        self.write(|g| g.remove(ref_val))
     }
 
     /// Run a filter expression and return a grid.
@@ -538,5 +548,62 @@ mod tests {
         // No subscribers — write should still succeed.
         sg.add(make_site("site-1")).unwrap();
         assert_eq!(sg.len(), 1);
+    }
+
+    #[test]
+    fn write_releases_lock_before_waking_receivers_even_on_unwind() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct LockWitness {
+            graph: SharedGraph,
+            woke: AtomicBool,
+        }
+        impl Wake for LockWitness {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                // A nonblocking check makes an incorrect lock order fail instead
+                // of hanging the test by reentering read() from the waker.
+                assert!(self.graph.inner.try_write().is_some());
+                self.woke.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for unwind in [false, true] {
+            let graph = SharedGraph::default();
+            let mut receiver = graph.subscribe();
+            let witness = Arc::new(LockWitness {
+                graph: graph.clone(),
+                woke: AtomicBool::new(false),
+            });
+            let waker = Waker::from(Arc::clone(&witness));
+            let mut context = Context::from_waker(&waker);
+            let mut receive = std::pin::pin!(receiver.recv());
+            assert!(receive.as_mut().poll(&mut context).is_pending());
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                graph.write(|g| {
+                    g.add(make_site("site")).unwrap();
+                    if unwind {
+                        panic!("original closure panic");
+                    }
+                });
+            }));
+            if unwind {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<&str>(),
+                    Some(&"original closure panic")
+                );
+            } else {
+                result.unwrap();
+            }
+            assert!(witness.woke.load(Ordering::SeqCst));
+            assert_eq!(receive.as_mut().poll(&mut context), Poll::Ready(Ok(1)));
+            assert!(graph.contains("site"));
+        }
     }
 }
