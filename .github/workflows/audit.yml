@@ -27,3 +27,6 @@ jobs:
         with:
           ref: ${{ matrix.branch }}
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.99.0"
+          arguments: --locked --all-features

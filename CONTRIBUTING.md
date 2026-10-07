@@ -2,19 +2,51 @@
 
 ## Prerequisites
 
-- **Rust 1.97.1.** The repository pins normal local commands to this exact toolchain in
+- **Rust 1.99.0.** The repository pins normal local commands to this exact toolchain in
   `rust-toolchain.toml`. It is also the CI MSRV lane for the workspace's declared
-  `rust-version = "1.97"`. A separate Ubuntu lane pins current stable Rust 1.98.1; both
-  pins move only through reviewed changes.
+  `rust-version = "1.99"`. A separate Ubuntu lane pins current stable Rust 1.99.0; both
+  pins currently coincide and move only through reviewed changes.
 - **[uv](https://docs.astral.sh/uv/)** and **Python 3.12**, only if you touch the Python
   bindings. CI pins the interpreter version deliberately — `pyo3` is configured without
   `abi3`, so every build is interpreter-specific.
 
+## Dependency baseline
+
+The October 2026 refresh raises the supported Rust floor to 1.99 and selects
+[resolver 3](https://doc.rust-lang.org/edition-guide/rust-2024/cargo-resolver.html),
+which considers package Rust-version requirements when resolving dependencies.
+Workspace dependency versions live in the root manifest; members declare their own
+additional features. `Cargo.lock` records the tested resolution. Change that file
+intentionally with `cargo update`, then run the locked gate below.
+
+The refresh keeps the existing dependency families, including PyO3 0.29.3, reqwest
+0.13.5 and Tokio 1.53.2. The direct rustls requirement is at least 0.23.45 to address
+[GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc);
+its existing `ring`, `std` and `tls12` features are preserved. Older compatible
+transitive families, including base64 0.22 and tungstenite 0.29, remain where their
+owning dependencies require them. First-party public APIs are unchanged; the supported
+Rust floor increases.
+
+The core still has no default features, and `chrono-tz` remains optional. All direct
+base64 users, including the demo, now share 0.23 with only `std` requested. The core
+alone does not enable base64 SIMD; the full client/server graph now enables
+`simd-unsafe` through reqwest and hyper-util. The first-party `unsafe_code = "forbid"`
+policy is unchanged and does not apply to dependency internals. flate2 1.1.10 adds
+default runtime detection while retaining the miniz_oxide Rust backend. Its optional
+zlib-rs dependency appears in the lockfile but is not enabled in the workspace build.
+
+The refreshed dependency graph's highest declared Rust requirement is 1.90, below
+the workspace floor; some dependencies do not declare an MSRV. License policy is
+unchanged: the newly resolved optional zlib-rs package uses the already allowed Zlib
+license, and two existing dependencies only normalize their MIT/Apache SPDX spelling.
+Python's declared support range and the release interpreter matrix are unchanged;
+the existing build lanes now pin Rust 1.99.0 and Maturin 1.15.0.
+
 ## Build and test
 
 ```bash
-cargo build --workspace --exclude rusty-haystack
-cargo test  --workspace --exclude rusty-haystack
+cargo build --locked --workspace --exclude rusty-haystack
+cargo test --locked --workspace --exclude rusty-haystack
 ```
 
 ### Why `--exclude rusty-haystack`
@@ -41,8 +73,8 @@ tested by its own job, through `maturin`, which supplies the interpreter (see
 ### Single crate, single test
 
 ```bash
-cargo test -p rusty-haystack-core
-cargo test -p rusty-haystack-core -- test_name
+cargo test --locked -p rusty-haystack-core
+cargo test --locked -p rusty-haystack-core -- test_name
 ```
 
 ## The gate
@@ -55,8 +87,9 @@ crate is excluded from which command:
 ./.agents/gate.sh --full   # every CI check — this is the CI-equivalent run
 ```
 
-It runs CI's commands in CI's exact form, including the `chrono-tz` feature surface on
-both Rust 1.97.1 and Rust 1.98.1, plus clippy on the PyO3 crate.
+It runs CI's commands in CI's exact form, including the `chrono-tz` feature surface in
+both the MSRV and current-stable lanes (currently Rust 1.99.0), plus clippy on the PyO3
+crate. Builds, lints and tests use `--locked` so they validate the checked-in graph.
 
 **Read the exit status, not just the last line.** A check that could not run is never
 reported as one that passed:
@@ -81,12 +114,12 @@ green on what CI is about to reject.
 
 | Job | Command |
 |---|---|
-| Rustfmt (Rust 1.97.1) | `cargo +1.97.1 fmt --all --check` |
-| Clippy (MSRV, Rust 1.97.1) | `cargo +1.97.1 clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.97.1 clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
-| Test (MSRV, Rust 1.97.1) | `cargo +1.97.1 test --workspace --exclude rusty-haystack`<br>`cargo +1.97.1 test -p rusty-haystack-core --features chrono-tz` |
-| Current stable (Ubuntu, Rust 1.98.1) | The same two Clippy and two test commands above, using `cargo +1.98.1` |
-| Python Bindings (Rust 1.97.1) | clippy on the excluded crate, then `maturin develop` and `pytest` |
-| Cargo Deny | `EmbarkStudios/cargo-deny-action@v2`, configured by `deny.toml` — advisories, licenses, bans, sources |
+| Rustfmt (Rust 1.99.0) | `cargo +1.99.0 fmt --all --check` |
+| Clippy (MSRV, Rust 1.99.0) | `cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
+| Test (MSRV, Rust 1.99.0) | `cargo +1.99.0 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz` |
+| Current stable (Ubuntu, Rust 1.99.0) | The same two Clippy and two test commands above, using `cargo +1.99.0` |
+| Python Bindings (Rust 1.99.0) | clippy on the excluded crate, then `maturin develop` and `pytest` |
+| Cargo Deny (Rust 1.99.0) | `cargo +1.99.0 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
 
 **The OS matrix is conditional.** Anything targeting `main` runs on Ubuntu, macOS and
 Windows. Everything else — including PRs into `dev` — runs Ubuntu only. So a PR showing a
@@ -96,7 +129,7 @@ deserves a local check on your own OS before you rely on the matrix.
 
 The Clippy job excludes the PyO3 crate and the Python job lints it instead, so the
 exclusion is about *where* the lint runs, not *whether* it runs. Note that
-`cargo clippy --workspace` does lint that crate successfully on a normal developer machine
+`cargo clippy --locked --workspace` does lint that crate successfully on a normal developer machine
 — verified on macOS with no virtualenv active — so if you want a single lint command
 locally, drop the exclusion and use it.
 
@@ -106,7 +139,7 @@ locally, drop the exclusion and use it.
 uv venv --python 3.12
 uv pip install maturin==1.15.0 pytest
 source .venv/bin/activate
-maturin develop --release -m rusty-haystack/Cargo.toml
+maturin develop --locked --release -m rusty-haystack/Cargo.toml
 pytest rusty-haystack/tests -q
 ```
 

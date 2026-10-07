@@ -20,35 +20,35 @@ default = []
 chrono-tz = ["dep:chrono-tz"]
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = { version = "0.10.4", optional = true }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2"
-slotmap = "1.1"
-smallvec = { version = "1.15", features = ["serde"] }
-parking_lot = "0.12"
-indexmap = "2"
-tokio = { version = "1", features = ["sync"] }
-sha2 = "0.11"
-hmac = "0.13"
-pbkdf2 = { version = "0.13", features = ["hmac"] }
-base64 = { version = "0.23", default-features = false, features = ["std"] }
-rand = "0.10"
-subtle = "2"
-regex = "1"
-roaring = "0.11"
-rustc-hash = "2"
-zeroize = "1"
+chrono = { workspace = true, features = ["serde"] }
+chrono-tz = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+slotmap.workspace = true
+smallvec = { workspace = true, features = ["serde"] }
+parking_lot.workspace = true
+indexmap.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2 = { workspace = true, features = ["hmac"] }
+base64.workspace = true
+rand.workspace = true
+subtle.workspace = true
+regex.workspace = true
+roaring.workspace = true
+rustc-hash.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 # Already a normal dependency; declared here so integration tests can build the
 # DateTime<FixedOffset> that HDateTime::new takes. Adds nothing to the tree.
-chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1", features = ["rt", "macros"] }
-criterion = { version = "0.8", features = ["html_reports"] }
-test-case = "3"
-tempfile = "3"
+chrono = { workspace = true, features = ["serde"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
+criterion = { workspace = true, features = ["html_reports"] }
+test-case.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "benchmarks"

@@ -16,20 +16,20 @@ workspace = true
 name = "haystack_client"
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.9.0", path = "../haystack-core" }
-reqwest = { version = "0.13", features = ["rustls-no-provider"], default-features = false }
-rustls = { version = "0.23", features = ["ring", "tls12", "std"], default-features = false }
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-tokio-util = "0.7"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-url = "2"
-base64 = { version = "0.23", default-features = false, features = ["std"] }
-futures-util = "0.3"
-dashmap = "6"
-flate2 = "1"
-rand = "0.10"
-zeroize = "1"
-thiserror = "2"
-log = "0.4"
+haystack-core.workspace = true
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+rustls = { workspace = true, features = ["ring", "tls12", "std"] }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+url.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+dashmap.workspace = true
+flate2.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+log.workspace = true

@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "haystack-core",
     "rusty-haystack",
@@ -12,12 +12,61 @@ members = [
 [workspace.package]
 version = "0.9.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/jscott3201/rusty-haystack"
 homepage = "https://github.com/jscott3201/rusty-haystack"
 keywords = ["haystack", "iot", "building-automation", "smart-buildings"]
 categories = ["encoding", "network-programming"]
+
+# Own versions here; members opt into only the features they need.
+[workspace.dependencies]
+haystack-core = { package = "rusty-haystack-core", version = "0.9.0", path = "haystack-core" }
+haystack-client = { package = "rusty-haystack-client", version = "0.9.0", path = "haystack-client" }
+haystack-server = { package = "rusty-haystack-server", version = "0.9.0", path = "haystack-server" }
+axum = "0.8"
+# Direct consumers request only std; transitive consumers may enable SIMD.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+chrono = "0.4"
+chrono-tz = "0.10.4"
+clap = "4"
+criterion = "0.8"
+dashmap = "6"
+env_logger = "0.11"
+flate2 = "1"
+futures-util = "0.3"
+hmac = "0.13"
+indexmap = "2"
+log = "0.4"
+parking_lot = "0.12"
+pbkdf2 = "0.13"
+pyo3 = "0.29"
+rand = "0.10"
+regex = "1"
+reqwest = { version = "0.13", default-features = false }
+roaring = "0.11"
+rustc-hash = "2"
+# Security floor: GHSA-2mjx-qc3c-rqvc is fixed in 0.23.45.
+rustls = { version = "0.23.45", default-features = false }
+serde = "1.0"
+serde_json = "1.0"
+sha2 = "0.11"
+slotmap = "1.1"
+smallvec = "1.15"
+subtle = "2"
+tempfile = "3"
+test-case = "3"
+thiserror = "2"
+time = "0.3"
+tokio = "1"
+tokio-tungstenite = "0.30"
+tokio-util = "0.7"
+toml = "1.0"
+tower = "0.5"
+tower-http = "0.7"
+url = "2"
+uuid = "1"
+zeroize = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
