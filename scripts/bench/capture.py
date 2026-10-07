@@ -16,6 +16,47 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGES = ("rusty-haystack-core", "rusty-haystack-server")
+TOOLCHAIN = "1.99.0"
+
+
+def check_build_inputs(root, environ):
+    """Reject hidden Cargo/compiler inputs without reading configs or secret values."""
+    controlled = {"CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "CARGO_TARGET_DIR"}
+    native_names = {"CC", "CXX", "AR", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
+                    "RANLIB", "SDKROOT", "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET",
+                    "IPHONEOS_DEPLOYMENT_TARGET"}
+    for name in sorted(environ):
+        cargo_override = name.startswith("CARGO_") and name not in controlled | {"CARGO_HOME"}
+        rust_override = name.startswith(("RUSTC", "RUSTDOC")) or name in {
+            "RUST_TARGET_PATH", "RUSTUP_TOOLCHAIN",
+        }
+        native_override = name in native_names or name.startswith(
+            tuple(f"{prefix}_" for prefix in native_names | {"HOST", "TARGET"})
+        )
+        if cargo_override or rust_override or native_override:
+            raise ValueError(f"remove the unrecorded build override {name}")
+
+    home_name = "USERPROFILE" if os.name == "nt" else "HOME"
+    home = Path(environ.get(home_name) or Path.home())
+    cargo_home = Path(environ.get("CARGO_HOME") or home / ".cargo")
+    if not cargo_home.is_absolute():
+        cargo_home = root / cargo_home
+    directories = {directory / ".cargo" for directory in (root, *root.parents)}
+    directories.add(cargo_home)
+    for directory in directories:
+        for filename in ("config", "config.toml"):
+            try:
+                (directory / filename).lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise ValueError("cannot establish absence of Cargo configuration") from None
+            raise ValueError("active Cargo configuration is unsupported; use a checkout and "
+                             "Cargo home without config/config.toml (contents were not read)")
+
+    manifest = root / "Cargo.toml"
+    profiles = tomllib.loads(manifest.read_text()).get("profile", {}) if manifest.exists() else {}
+    return {"cargo_config_files": [], "workspace_profiles": profiles}
 
 
 def output(*command):
@@ -24,6 +65,19 @@ def output(*command):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def toolchain():
+    executables = {}
+    for name in ("cargo", "rustc", "rustdoc"):
+        path = Path(output("rustup", "which", "--toolchain", TOOLCHAIN, name)).resolve(strict=True)
+        executables[name] = {"path": str(path), "sha256": digest(path)}
+    rustc = output(executables["rustc"]["path"], "-Vv")
+    host = [line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: ")]
+    if len(host) != 1:
+        raise ValueError("cannot establish the selected compiler host target")
+    return {"executables": executables, "rustc": rustc,
+            "cargo": output(executables["cargo"]["path"], "--version"), "host_target": host[0]}
 
 
 def source():
@@ -52,20 +106,22 @@ def main():
         parser.error("write raw output outside the checkout to preserve clean source")
     if destination.exists() and any(destination.iterdir()):
         parser.error("output directory must be absent or empty")
+    try:
+        build_inputs = check_build_inputs(ROOT, os.environ)
+    except ValueError as error:
+        parser.error(str(error))
     before = source()
     if before["dirty"]:
         parser.error("measurement requires a clean, committed source tree")
-    for name in os.environ:
-        if name.startswith("CARGO_PROFILE_") or name in {
-            "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
-        }:
-            parser.error(f"remove the unrecorded build override {name}")
+    selected_toolchain = toolchain()
 
     destination.mkdir(parents=True, exist_ok=True)
     criterion_home = destination / "criterion"
     env = os.environ.copy()
     settings = {"RUSTFLAGS": "-Dwarnings", "CARGO_BUILD_JOBS": "2",
                 "CARGO_INCREMENTAL": "0", "CARGO_TARGET_DIR": str(ROOT / "target"),
+                "RUSTC": selected_toolchain["executables"]["rustc"]["path"],
+                "RUSTDOC": selected_toolchain["executables"]["rustdoc"]["path"],
                 "CRITERION_HOME": str(criterion_home)}
     env.update(settings)
     lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
@@ -76,10 +132,12 @@ def main():
         host.update(cpu=output("sysctl", "-n", "machdep.cpu.brand_string"),
                     memory_bytes=int(output("sysctl", "-n", "hw.memsize")))
     record = {
-        "schema_version": 1, "status": "running", "source_before": before,
+        "schema_version": 2, "status": "running", "source_before": before,
         "started_utc": datetime.now(timezone.utc).isoformat(), "host": host,
-        "rustc": output("rustc", "+1.99.0", "-Vv"), "cargo": output("cargo", "+1.99.0", "--version"),
-        "profile": "Cargo bench (default optimized profile)", "criterion_version": criterion_version,
+        "toolchain": selected_toolchain, "build_inputs": build_inputs,
+        "target": "compiler host; no --target flag or inherited Cargo target selection",
+        "profile": "Cargo bench defaults plus recorded workspace manifest profiles",
+        "criterion_version": criterion_version,
         "features": {"packages": "default features; no --features flags", "criterion": "default + html_reports"},
         "environment": settings,
         "criterion_configuration": {"sample_size": 30, "warmup_seconds": 0.5,
@@ -92,7 +150,10 @@ def main():
     record_path = destination / "baseline.json"
     try:
         for package in PACKAGES:
-            command = ["cargo", "+1.99.0", "bench", "--locked", "-p", package,
+            if check_build_inputs(ROOT, os.environ) != build_inputs:
+                raise RuntimeError("build inputs changed during measurement")
+            command = [selected_toolchain["executables"]["cargo"]["path"],
+                       "bench", "--locked", "-p", package,
                        "--bench", "baseline", "--", "--noplot", "--save-baseline", "m0"]
             log_path = destination / f"{package}.log"
             print("Running " + " ".join(command), flush=True)
@@ -118,6 +179,8 @@ def main():
         record["source_after"] = source()
         if record["source_after"] != before:
             raise RuntimeError("source or lockfile changed during measurement")
+        if check_build_inputs(ROOT, os.environ) != build_inputs or toolchain() != selected_toolchain:
+            raise RuntimeError("build inputs or selected toolchain changed during measurement")
         record["status"] = "complete"
     except BaseException:
         record["status"] = "failed"

@@ -64,14 +64,35 @@ cargo +1.99.0 nextest run --locked -p rusty-haystack-core -p rusty-haystack-serv
 cargo +1.99.0 bench --locked -p rusty-haystack-core --bench baseline -- --test
 cargo +1.99.0 bench --locked -p rusty-haystack-server --bench baseline -- --test
 
+# Test capture input admission and receipts without builds or measurements.
+python3 -m unittest discover -s scripts/bench -p test_capture.py
+
 # From clean committed source, with other heavy work paused. Python 3.11+;
 # destination must be outside the checkout and absent or empty.
 python3 scripts/bench/capture.py /tmp/rusty-haystack-baseline
 ```
 
-The capture script uses the worktree's own `target` cache, `--locked`, the default
-optimized Cargo bench profile, `RUSTFLAGS=-Dwarnings`, two build jobs, and no extra
-package feature flags. Raw Criterion reports/logs remain in the specified output
+The capture script uses the worktree's own `target` cache, `--locked`, Cargo's bench
+profile plus any recorded workspace manifest profile settings, `RUSTFLAGS=-Dwarnings`,
+two build jobs, and no extra package feature flags. It resolves Cargo, rustc and
+rustdoc through `rustup which --toolchain 1.99.0`, invokes those exact paths, and
+records their hashes, Cargo/compiler versions and the compiler host target. No
+`--target` is used.
+
+Capture rejects inherited compiler/wrapper, Cargo target/profile/build selectors,
+encoded Rust flags and native compiler/linker overrides. It controls `RUSTFLAGS`,
+`CARGO_BUILD_JOBS`, `CARGO_INCREMENTAL` and `CARGO_TARGET_DIR` only in child processes;
+the caller environment is unchanged. `CARGO_HOME` may locate an existing cache, but
+any `config` or `config.toml` in that Cargo home, the workspace or its ancestors is
+rejected before running. Configuration existence is checked without reading its
+contents or credential files; diagnostics disclose override names, never values.
+These checks follow Cargo's [configuration discovery and precedence rules](https://doc.rust-lang.org/cargo/reference/config.html).
+The receipt records manifest profiles and absence of active Cargo configuration,
+and completion rechecks inputs, toolchain identity and source. Use an invocation
+environment and checkout with no such overrides; the script does not edit personal
+configuration. This bounds Cargo build inputs without claiming a hermetic host.
+
+Raw Criterion reports/logs remain in the specified output
 directory; `baseline.json` retains the compact raw samples and provenance. Results
 must cite their measured source commit even when the report is added in a later
 commit. A smoke test or fixture test is not a timing result.
