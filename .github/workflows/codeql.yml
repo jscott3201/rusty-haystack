@@ -9,14 +9,9 @@ name: CodeQL
 # and not what is *covered*. Losing a language here would be silent.
 
 on:
-  push:
-    branches: [main, dev]
-  pull_request:
-    # Default setup only ever gated PRs into main, which meant an alert was first
-    # seen at propagation time — with a batch of commits behind it and someone
-    # waiting on the merge. Running on dev PRs too surfaces it next to the change
-    # that caused it.
-    branches: [main, dev]
+  # CI calls this for every dev/main push and PR, so CI OK can require all three
+  # analyses without a second PR run or polling another workflow.
+  workflow_call:
   schedule:
     # Matches default setup's weekly cadence. Advisories and query updates land
     # against code that has not changed, so a timer is the only thing that catches
