@@ -97,6 +97,76 @@ directory; `baseline.json` retains the compact raw samples and provenance. Resul
 must cite their measured source commit even when the report is added in a later
 commit. A smoke test or fixture test is not a timing result.
 
+## Measured baseline — October 7, 2026
+
+This run measured source commit
+[`1a9edf75cf9fa0ce2cc7bb88ffc5e357ca1c131c`](https://github.com/jscott3201/rusty-haystack/commit/1a9edf75cf9fa0ce2cc7bb88ffc5e357ca1c131c).
+The source was clean before and after capture, with an unchanged lock digest. This
+identity refers to the measured harness; the later report commit is not substituted
+for it. All 26 workloads completed successfully: 18 graph query/cache cases, two
+mutation/query cases, and six history cases.
+
+| Property | Observed value |
+|---|---|
+| Host | Apple M5, 10 logical CPUs, 16 GiB RAM; macOS 27.2, arm64 |
+| Compiler / target | Rust 1.99.0 (`b940084d7`), LLVM 23.1.1; `aarch64-apple-darwin` |
+| Cargo / Criterion | Cargo 1.99.0 (`5f94df478`); Criterion 0.8.2 |
+| Build | Default bench profile; no manifest profile overrides or active Cargo config; package defaults; `RUSTFLAGS=-Dwarnings`; incremental off |
+| Capture window | 2026-10-07 19:55:41.756304–19:57:04.126367 UTC; **82.37 seconds** total |
+| Samples | 30 per workload; 780 retained samples; 500 ms warmup and 2-second measurement target per workload |
+| Sampling mode | Linear for the 972-entity and history cases; flat for the 10,125-entity graph cases |
+
+The worktree's release cache was prepared by prior optimized smoke tests. The two
+Cargo invocations reported 0.11 and 0.10 seconds to finish preparation; the capture
+duration also includes fixture checks/setup, warmups, sampling and analysis. A
+coordinated quiet window paused other task builds, tests and benchmarks, with a
+pre-run process check. This remained a shared interactive host: CPU placement,
+thermal/frequency behavior and other background activity were not controlled.
+There was one capture, without a repeated-run drift study.
+
+Every value below is the Criterion **mean in microseconds**, followed by its **95%
+bootstrap confidence interval**. These are mean estimates over Criterion samples,
+not p95/p99 request latency. The raw receipt retains each sample's iteration count
+and elapsed time as well as the full estimator output. The console's `time:` line
+may use a different estimator, so the tables consistently select `estimates.mean`.
+
+| Query | Entities | Cold | AST warm / result cold | Result warm |
+|---|---:|---:|---:|---:|
+| Marker | 972 | 85.29 [84.70, 86.02] | 79.33 [78.69, 80.04] | 44.47 [44.12, 44.84] |
+| Site reference | 972 | 62.09 [61.76, 62.40] | 54.03 [53.82, 54.25] | 7.44 [7.39, 7.49] |
+| Nested reference | 972 | 147.50 [146.92, 148.14] | 137.09 [136.78, 137.40] | 40.13 [39.96, 40.32] |
+| Marker | 10,125 | 1,070.37 [1,055.47, 1,086.24] | 832.76 [828.05, 838.01] | 496.94 [494.74, 499.20] |
+| Site reference | 10,125 | 728.50 [711.63, 746.18] | 457.09 [453.94, 460.62] | 8.95 [8.86, 9.05] |
+| Nested reference | 10,125 | 2,049.00 [2,006.02, 2,098.43] | 1,601.45 [1,589.46, 1,615.53] | 462.86 [459.75, 467.07] |
+
+| Mutation followed by nested query | Expected returned rows | Mean [95% CI], µs |
+|---|---:|---:|
+| 972 entities | 75 | 133.14 [132.57, 133.72] |
+| 10,125 entities | 930 | 1,604.06 [1,587.55, 1,622.86] |
+
+| History boundary | Stored items | Returned items | Mean [95% CI], µs |
+|---|---:|---:|---:|
+| Direct full series | 1,000 | 1,000 | 6.76 [6.73, 6.79] |
+| Direct first UTC day | 1,000 | 1,000 | 7.14 [6.87, 7.66] |
+| Loopback HTTP first UTC day | 1,000 | 1,000 | 1,213.68 [1,210.08, 1,217.82] |
+| Direct full series | 10,000 | 10,000 | 66.51 [66.37, 66.65] |
+| Direct first UTC day | 10,000 | 1,440 | 15.48 [15.46, 15.50] |
+| Loopback HTTP first UTC day | 10,000 | 1,440 | 1,709.31 [1,705.14, 1,713.78] |
+
+The exact [receipt and raw samples](scripts/bench/results/2026-10-07-1a9edf75/baseline.json),
+[core log](scripts/bench/results/2026-10-07-1a9edf75/rusty-haystack-core.log) and
+[history log](scripts/bench/results/2026-10-07-1a9edf75/rusty-haystack-server.log)
+are retained together. The receipt includes dataset hashes, exact query expressions
+and expected counts, commands, toolchain binary hashes, the lock digest, worker
+counts, and log hashes. All samples and reported outliers are retained. Complete
+Criterion output also remains in the original local capture directory recorded by
+`environment.CRITERION_HOME`; the committed receipt contains the data needed to
+inspect all 26 estimates without that directory.
+
+These figures characterize only the stated synthetic fixtures and timing
+boundaries on this host. They do not measure RSS, production workload behavior,
+concurrent service capacity, cross-platform performance, or a before/after speedup.
+
 ## Historical report — March 2026
 
 The tables below preserve the earlier v0.8.0 / Rust 1.93.1 report. They were not
