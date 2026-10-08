@@ -27,6 +27,7 @@ pub mod csv;
 pub mod entity;
 pub mod history;
 pub mod history_mutation;
+pub mod jeto;
 pub mod json;
 pub mod shared;
 pub mod subscription;

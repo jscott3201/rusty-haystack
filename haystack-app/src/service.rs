@@ -39,6 +39,7 @@ pub struct ReadService {
 }
 struct Inner {
     typed_profile: haystack_core::xeto::read_by_id::ReadByIdProfile,
+    typed_wire: crate::typed_read::WireProfile,
     lifecycle: Option<Arc<Lifecycle>>,
     graph: SharedGraph,
     dataset: [u8; 16],
@@ -104,10 +105,13 @@ impl ReadService {
         limits: ReadLimits,
     ) -> Result<Self, ReadError> {
         limits.validate()?;
+        let typed_profile = haystack_core::xeto::read_by_id::ReadByIdProfile::load_http_pinned()
+            .map_err(|_| ReadError::InvalidLimits)?;
+        let typed_wire = crate::typed_read::WireProfile::new(&typed_profile)?;
         Ok(Self {
             inner: Arc::new(Inner {
-                typed_profile: haystack_core::xeto::read_by_id::ReadByIdProfile::load_http_pinned()
-                    .map_err(|_| ReadError::InvalidLimits)?,
+                typed_profile,
+                typed_wire,
                 lifecycle: None,
                 graph,
                 dataset: rand::random(),
@@ -474,7 +478,7 @@ impl Inner {
             return Err(ApiError::InvalidArgs);
         }
         budget.check()?;
-        let request = typed_read::decode(&input, budget)?;
+        let request = typed_read::decode(&input, &self.typed_wire, budget)?;
         let policy = self.policy.snapshot(&principal)?;
         budget.check()?;
         if !policy.operation(ReadOperation::Read) {
@@ -526,7 +530,7 @@ impl Inner {
         self.typed_profile
             .fit_result("sys.api::readById", &value)
             .map_err(|_| ApiError::Internal)?;
-        typed_read::encode(value, &request, budget)
+        typed_read::encode(value, &request, &self.typed_wire, budget)
     }
     fn execute(
         &self,

@@ -387,7 +387,6 @@ async fn raw_media_default_json_hayson_errors_and_reserved_filetype() {
     for accept in [
         "text/csv",
         "application/json;box=none",
-        "application/json;box=all",
         "application/json;box=unknown",
         "application/json;q=0",
         "application/vnd.haystack+json;version=5",
@@ -536,7 +535,15 @@ async fn rich_values_are_exactly_supported_or_explicitly_rejected() {
     .await;
     assert_eq!(value["integer"].as_i64(), Some(i64::MAX));
     assert_eq!(value["number"]["spec"], "sys::Number");
-    assert_eq!(value["number"]["val"], "-0");
+    assert_eq!(
+        value["number"]["val"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            .to_bits(),
+        (-0.0_f64).to_bits()
+    );
     assert_eq!(
         value["float"].as_f64().unwrap().to_bits(),
         (-0.0_f64).to_bits()
@@ -910,4 +917,182 @@ async fn repair_zinc_expanded_rows_are_charged_before_legacy_decode() {
         .await;
         f.close().await;
     }
+}
+
+#[tokio::test]
+async fn contextual_jeto_boxing_modes_preserve_exact_http_results_and_reject_loss() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for accept in ["application/json;box=all", "text/jeto;box=all"] {
+        let response = f
+            .get("/readById?id=a&xeto-version=5")
+            .header("Accept", accept)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()["vary"],
+            "Accept, Xeto-Version, Accept-Encoding"
+        );
+        let json = json_response(response, 200).await;
+        assert_eq!(json["id"], serde_json::json!({"spec":"sys::Ref","val":"a"}));
+        assert_eq!(
+            json["dis"],
+            serde_json::json!({"spec":"sys::Str","val":"Alpha"})
+        );
+        assert_eq!(
+            json["site"],
+            serde_json::json!({"spec":"sys::Marker","val":"✓"})
+        );
+    }
+    assert!(
+        json_response(
+            f.get("/readById?checked=false&xeto-version=5")
+                .header("Accept", "application/json;box=none")
+                .send()
+                .await
+                .unwrap(),
+            200
+        )
+        .await
+        .is_null()
+    );
+    api_error(
+        f.get("/readById?id=a&xeto-version=5")
+            .header("Accept", "application/json;box=none"),
+        406,
+        "NotAcceptableErr",
+    )
+    .await;
+    // A specific exclusion wins over wildcard acceptance for all three modes.
+    for mode in ["auto", "none", "all"] {
+        api_error(
+            f.get("/readById?checked=false&xeto-version=5")
+                .header(
+                    "Accept",
+                    format!("application/json;q=0, application/json;box={mode};q=0, */*;q=1"),
+                )
+                .header("Accept", "text/zinc;q=0"),
+            406,
+            "NotAcceptableErr",
+        )
+        .await;
+    }
+    let json=json_response(f.post("/readById?xeto-version=5").header("Content-Type","application/json;box=all").header("Accept","application/json;box=all").body(r#"{"id":{"spec":"sys::Ref","val":"a","dis":"incoming"},"checked":{"spec":"sys::Bool","val":"true"}}"#).send().await.unwrap(),200).await;
+    assert_eq!(json["id"]["val"], "a");
+    assert!(json["id"].get("dis").is_none());
+    f.close().await;
+}
+#[tokio::test]
+async fn contextual_jeto_http_uses_temporals_specials_and_nested_grid_scope() {
+    use haystack_core::{
+        codecs::{jeto, typed},
+        data::{HCol, HGrid},
+        kinds::Uri,
+    };
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    let mut meta = HDict::new();
+    meta.set("title", Kind::Str("Nested".into()));
+    let mut colmeta = HDict::new();
+    colmeta.set("of", Kind::Ref(HRef::from_val("sys::Number")));
+    let mut gridrow = HDict::new();
+    gridrow.set("value", Kind::Number(Number::unitless(42.0)));
+    let mut row = HDict::new();
+    row.set("id", Kind::Ref(HRef::from_val("contextual")));
+    row.set(
+        "date",
+        Kind::Date(chrono::NaiveDate::from_ymd_opt(2024, 11, 26).unwrap()),
+    );
+    row.set(
+        "time",
+        Kind::Time(chrono::NaiveTime::from_hms_opt(14, 30, 0).unwrap()),
+    );
+    row.set("uri", Kind::Uri(Uri::new("https://example.test/")));
+    row.set("positiveInf", Kind::Float(Float::new(f64::INFINITY)));
+    row.set(
+        "canonicalNaN",
+        Kind::Float(Float::from_bits(0x7ff8000000000000)),
+    );
+    row.set(
+        "grid",
+        Kind::Grid(Box::new(HGrid::from_parts(
+            meta,
+            vec![HCol::with_meta("value", colmeta)],
+            vec![gridrow],
+        ))),
+    );
+    let expected = Kind::Dict(Box::new(row.clone()));
+    f.graph.add(row).unwrap();
+    for mode in ["auto", "all"] {
+        let response = f
+            .get("/readById?id=contextual&xeto-version=5")
+            .header("Accept", format!("application/json;box={mode}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = response.bytes().await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["grid"]["spec"], "sys::Grid");
+        assert_eq!(json["grid"]["cols"][0]["name"], "value");
+        assert_eq!(json["grid"]["cols"][0]["of"], "sys::Number");
+        assert_eq!(
+            json["date"],
+            serde_json::json!({"spec":"sys::Date","val":"2024-11-26"})
+        );
+        assert_eq!(
+            json["canonicalNaN"],
+            serde_json::json!({"spec":"sys::Float","val":"NaN"})
+        );
+        let decoded = jeto::decode(
+            &body,
+            &jeto::Context::standard(),
+            Some("sys::Dict"),
+            jeto::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            typed::encode(&decoded).unwrap(),
+            typed::encode(&expected).unwrap()
+        );
+    }
+    f.close().await;
+}
+#[tokio::test]
+async fn contextual_jeto_request_validates_every_member_before_binding_declared_parameters() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for body in [
+        r#"{"id":"a","id":"x"}"#,
+        r#"{"id":"a","extra":{"spec":"missing::Type","val":"bad"}}"#,
+        r#"{"id":"a","extra":[null,{"spec":"sys::Int","val":42}]}"#,
+        r#"{"id":{"spec":"sys::Str","val":"a"},"checked":true}"#,
+        r#"{"id":"a","checked":{"spec":"sys::Number","val":"1"}}"#,
+    ] {
+        api_error(
+            f.post("/readById?xeto-version=5")
+                .header("Content-Type", "application/json")
+                .body(body),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    for body in [
+        r#"{"id":"a","checked":"true","extra":{"x":[1,2,null]}}"#,
+        r#"{"id":"a","checked":true}"#,
+    ] {
+        assert_eq!(
+            json_response(
+                f.post("/readById?xeto-version=5")
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap(),
+                200
+            )
+            .await["id"]["val"],
+            "a"
+        );
+    }
+    f.close().await;
 }

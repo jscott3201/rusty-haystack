@@ -1,10 +1,11 @@
-//! Initial pinned readById wire profile. Complete Jeto and general dispatch are
-//! deliberately separate work. All allocating stages share the read admission.
+//! Pinned readById HTTP profile using the core contextual Jeto codec.
+//! Codec context is derived from the admitted signature at service setup;
+//! every allocating request stage shares the original read admission.
 use crate::{BudgetKind, H4Codec, OutputProfile, ReadError, ReadOutput, budget::Budget, output};
 use haystack_core::{
-    codecs::codec_for,
+    codecs::{codec_for, jeto},
     data::HDict,
-    kinds::{HRef, Kind},
+    kinds::Kind,
 };
 use serde_json::Value;
 
@@ -137,13 +138,13 @@ pub struct TypedReadResponse {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Media {
-    Jeto,
+    Jeto(jeto::Boxing),
     Grid(H4Codec),
 }
 impl Media {
     fn content_type(self) -> &'static str {
         match self {
-            Self::Jeto | Self::Grid(H4Codec::Json | H4Codec::JsonV3) => "application/json",
+            Self::Jeto(_) | Self::Grid(H4Codec::Json | H4Codec::JsonV3) => "application/json",
             Self::Grid(c) => c.mime(),
         }
     }
@@ -183,20 +184,28 @@ fn media(value: &str, v5: bool) -> Option<Media> {
     let mut split = value.split(';');
     let name = split.next()?.trim();
     let mut version = None;
+    let mut boxing = None;
     for part in split {
         let (key, value) = part.trim().split_once('=')?;
-        if key.eq_ignore_ascii_case("box")
-            && value == "auto"
-            && matches!(name, "application/json" | "text/jeto")
-            && v5
+        let value = value.trim_matches('"');
+        if key.eq_ignore_ascii_case("box") && matches!(name, "application/json" | "text/jeto") && v5
         {
+            let mode = match value {
+                "auto" => jeto::Boxing::Auto,
+                "none" => jeto::Boxing::None,
+                "all" => jeto::Boxing::All,
+                _ => return None,
+            };
+            if boxing.replace(mode).is_some() {
+                return None;
+            }
             continue;
         }
         if key.eq_ignore_ascii_case("charset") && value.eq_ignore_ascii_case("utf-8") {
             continue;
         }
         if key.eq_ignore_ascii_case("version") && version.is_none() {
-            version = Some(value.trim_matches('"'));
+            version = Some(value);
         } else {
             return None;
         }
@@ -206,11 +215,11 @@ fn media(value: &str, v5: bool) -> Option<Media> {
     }
     match name {
         "application/json" if version.is_none() => Some(if v5 {
-            Media::Jeto
+            Media::Jeto(boxing.unwrap_or_default())
         } else {
             Media::Grid(H4Codec::Json)
         }),
-        "text/jeto" if v5 && version.is_none() => Some(Media::Jeto),
+        "text/jeto" if v5 && version.is_none() => Some(Media::Jeto(boxing.unwrap_or_default())),
         "application/vnd.haystack+json" => Some(Media::Grid(H4Codec::Json)),
         "text/zinc" if version.is_none() => Some(Media::Grid(H4Codec::Zinc)),
         _ => None,
@@ -223,9 +232,9 @@ fn response_media(
 ) -> Result<Media, ApiError> {
     if let Some(name) = filetype {
         return match name {
-            "jeto" if v5 => Ok(Media::Jeto),
+            "jeto" if v5 => Ok(Media::Jeto(jeto::Boxing::Auto)),
             "json" => Ok(if v5 {
-                Media::Jeto
+                Media::Jeto(jeto::Boxing::Auto)
             } else {
                 Media::Grid(H4Codec::Json)
             }),
@@ -235,7 +244,7 @@ fn response_media(
         };
     }
     let default = if v5 {
-        Media::Jeto
+        Media::Jeto(jeto::Boxing::Auto)
     } else {
         Media::Grid(H4Codec::Zinc)
     };
@@ -249,12 +258,14 @@ fn response_media(
         default,
         Media::Grid(H4Codec::Json),
         Media::Grid(H4Codec::Zinc),
-        Media::Jeto,
+        Media::Jeto(jeto::Boxing::Auto),
+        Media::Jeto(jeto::Boxing::None),
+        Media::Jeto(jeto::Boxing::All),
     ];
     let mut selected = None;
     let mut best = 0.0_f32;
     for candidate in candidates {
-        if candidate == Media::Jeto && !v5 {
+        if matches!(candidate, Media::Jeto(_)) && !v5 {
             continue;
         }
         let mut effective: Option<(usize, f32)> = None;
@@ -308,57 +319,110 @@ fn response_media(
     selected.ok_or(ApiError::NotAcceptable)
 }
 
-fn argument(name: &str, value: &Value) -> Result<Option<Kind>, ApiError> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    // Boxed scalar identity overrides context, then native fitting checks it.
-    let (spec, value) = match value {
-        Value::Object(map) => {
-            if map
-                .keys()
-                .any(|k| !matches!(k.as_str(), "spec" | "val" | "dis"))
-            {
-                return Err(ApiError::InvalidArgs);
+const ARGUMENTS: &str = "rusty.http::ReadByIdArgs";
+/// A codec-only argument container derived from the actual admitted function
+/// slots. It does not register a function or admit a broader Xeto catalog.
+pub(crate) struct WireProfile {
+    context: jeto::Context,
+    parameters: std::collections::BTreeMap<String, String>,
+    result: String,
+}
+impl WireProfile {
+    pub(crate) fn new(
+        profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
+    ) -> Result<Self, ReadError> {
+        let declaration = profile
+            .declaration("sys.api::readById")
+            .ok_or(ReadError::InvalidLimits)?;
+        let mut parameters = std::collections::BTreeMap::new();
+        let mut result = None;
+        for slot in &declaration.spec.slots {
+            let name = slot.type_ref.as_ref().ok_or(ReadError::InvalidLimits)?;
+            if slot.name == "returns" {
+                result = Some(name.clone());
+            } else {
+                parameters.insert(slot.name.clone(), name.clone());
             }
-            let spec = map
-                .get("spec")
-                .and_then(Value::as_str)
-                .ok_or(ApiError::InvalidArgs)?;
-            let val = map
-                .get("val")
-                .and_then(Value::as_str)
-                .ok_or(ApiError::InvalidArgs)?;
-            let result = match spec {
-                "sys::Ref" => Kind::Ref(HRef::new(
-                    val,
-                    map.get("dis")
-                        .map(|v| v.as_str().ok_or(ApiError::InvalidArgs))
-                        .transpose()?
-                        .map(str::to_owned),
-                )),
-                "sys::Bool" => Kind::Bool(match val {
-                    "true" => true,
-                    "false" => false,
-                    _ => return Err(ApiError::InvalidArgs),
-                }),
-                "sys::Str" => Kind::Str(val.into()),
-                _ => return Err(ApiError::InvalidArgs),
-            };
-            return Ok(Some(result));
         }
-        value => (name, value),
-    };
-    Ok(Some(match (spec, value) {
-        ("id", Value::String(s)) => Kind::Ref(HRef::from_val(s)),
-        ("checked", Value::String(s)) if s == "true" || s == "false" => Kind::Bool(s == "true"),
-        (_, Value::Bool(b)) => Kind::Bool(*b),
-        (_, Value::String(s)) => Kind::Str(s.clone()),
-        _ => return Err(ApiError::InvalidArgs),
-    }))
+        let context = jeto::Context::new(
+            &profile.provenance().repository,
+            &profile.provenance().commit,
+            vec![jeto::Definition::Dict {
+                name: ARGUMENTS.into(),
+                members: parameters.clone(),
+            }],
+        )
+        .map_err(|_| ReadError::InvalidLimits)?;
+        let result = result.ok_or(ReadError::InvalidLimits)?;
+        if !context.contains(&result) {
+            return Err(ReadError::InvalidLimits);
+        }
+        Ok(Self {
+            context,
+            parameters,
+            result,
+        })
+    }
+}
+struct JetoMeter<'a>(&'a mut Budget);
+impl jeto::Meter for JetoMeter<'_> {
+    type Error = ReadError;
+    fn charge(&mut self, cost: jeto::Charge) -> Result<(), ReadError> {
+        use jeto::Charge;
+        self.0.check()?;
+        match cost {
+            // Raw transport bytes were already reserved before collection. The
+            // core parser reports the document length for an additional ceiling
+            // check, without renewing or double-charging that input allowance.
+            Charge::Input(n) if n > self.0.limits.max_input_bytes => {
+                Err(ReadError::Budget(BudgetKind::Input))
+            }
+            Charge::Output(n) if n > self.0.limits.max_output_bytes => {
+                Err(ReadError::Budget(BudgetKind::Output))
+            }
+            Charge::Input(_) | Charge::Output(_) => Ok(()),
+            Charge::Work(n) => self.0.charge(BudgetKind::Work, n),
+            Charge::Retained(n) => self.0.charge(BudgetKind::Retained, n),
+            Charge::Nodes(n) => self.0.charge(BudgetKind::Values, n),
+            Charge::Depth(n) => self.0.depth(n),
+        }
+    }
+}
+fn codec_error(error: jeto::Error<ReadError>, output: bool) -> ApiError {
+    match error {
+        jeto::Error::Budget(error) => error.into(),
+        jeto::Error::Allocation => ApiError::Unavailable,
+        _ if output => ApiError::NotAcceptable,
+        _ => ApiError::InvalidArgs,
+    }
+}
+fn argument(
+    value: &str,
+    expected: &str,
+    profile: &WireProfile,
+    budget: &mut Budget,
+) -> Result<Kind, ApiError> {
+    if value.starts_with(['[', '{']) {
+        jeto::decode_metered(
+            value.as_bytes(),
+            &profile.context,
+            Some(expected),
+            &mut JetoMeter(budget),
+        )
+        .map_err(|e| codec_error(e, false))
+    } else {
+        // GET non-container values are scalar text, even when they resemble
+        // JSON numbers or null. Decode directly under the original budget.
+        jeto::decode_scalar_text_metered(value, &profile.context, expected, &mut JetoMeter(budget))
+            .map_err(|e| codec_error(e, false))
+    }
 }
 
-pub(crate) fn decode(input: &TypedReadInput, budget: &mut Budget) -> Result<Request, ApiError> {
+pub(crate) fn decode(
+    input: &TypedReadInput,
+    profile: &WireProfile,
+    budget: &mut Budget,
+) -> Result<Request, ApiError> {
     let mut args = HDict::new();
     let mut query_args = Vec::new();
     let mut version = None;
@@ -379,7 +443,7 @@ pub(crate) fn decode(input: &TypedReadInput, budget: &mut Budget) -> Result<Requ
                 }
             }
             key if key.starts_with("xeto-") => {}
-            "id" | "checked" if !input.post => {
+            name if !input.post && profile.parameters.contains_key(name) => {
                 if query_args.iter().any(|(name, _)| name == &key) {
                     return Err(ApiError::InvalidArgs);
                 }
@@ -416,16 +480,9 @@ pub(crate) fn decode(input: &TypedReadInput, budget: &mut Budget) -> Result<Requ
     let output = response_media(input, filetype.as_deref(), version == "5")?;
     let gzip = accepts_gzip(&input.accept_encodings)?;
     for (key, value) in query_args {
-        budget.charge(
-            BudgetKind::Retained,
-            value.len().saturating_mul(512).saturating_add(1024),
-        )?;
-        let value = if value.starts_with(['[', '{']) {
-            serde_json::from_str(&value).map_err(|_| ApiError::InvalidArgs)?
-        } else {
-            Value::String(value)
-        };
-        if let Some(value) = argument(&key, &value)? {
+        let expected = profile.parameters.get(&key).ok_or(ApiError::Internal)?;
+        let value = argument(&value, expected, profile, budget)?;
+        if !matches!(value, Kind::Null) {
             args.set(key, value);
         }
     }
@@ -438,39 +495,42 @@ pub(crate) fn decode(input: &TypedReadInput, budget: &mut Budget) -> Result<Requ
         }
         let input_media =
             media(&input.content_types[0], version == "5").ok_or(ApiError::UnsupportedMediaType)?;
+        budget.charge(BudgetKind::Work, input.body.len().saturating_add(1))?;
         let text = std::str::from_utf8(&input.body).map_err(|_| ApiError::InvalidArgs)?;
-        let lines = text.lines().count().saturating_add(1);
-        let longest = text.lines().map(str::len).max().unwrap_or(0);
-        let expansion = text
-            .len()
-            .saturating_add(if input_media == Media::Grid(H4Codec::Zinc) {
-                lines.saturating_mul(longest)
-            } else {
-                0
-            });
-        // Legacy Zinc builds every row and clones column names even though
-        // argument binding consumes only the first row. Account for expanded
-        // name-copy work before entering that unmetered decoder.
-        budget.charge(BudgetKind::Work, expansion.saturating_add(1))?;
-        budget.charge(
-            BudgetKind::Retained,
-            expansion.saturating_mul(512).saturating_add(2048),
-        )?;
         if !text.trim().is_empty() {
             match input_media {
-                Media::Jeto => {
-                    let value: Value =
-                        serde_json::from_str(text).map_err(|_| ApiError::InvalidArgs)?;
-                    let map = value.as_object().ok_or(ApiError::InvalidArgs)?;
-                    for name in ["id", "checked"] {
-                        if let Some(value) = map.get(name)
-                            && let Some(value) = argument(name, value)?
-                        {
+                Media::Jeto(_) => {
+                    let decoded = jeto::decode_metered(
+                        &input.body,
+                        &profile.context,
+                        Some(ARGUMENTS),
+                        &mut JetoMeter(budget),
+                    )
+                    .map_err(|e| codec_error(e, false))?;
+                    let Kind::Dict(mut map) = decoded else {
+                        return Err(ApiError::InvalidArgs);
+                    };
+                    for name in profile.parameters.keys() {
+                        if let Some(value) = map.remove_tag(name) {
                             args.set(name, value);
                         }
                     }
                 }
                 Media::Grid(codec) => {
+                    let lines = text.lines().count().saturating_add(1);
+                    let longest = text.lines().map(str::len).max().unwrap_or(0);
+                    let expansion = text.len().saturating_add(if codec == H4Codec::Zinc {
+                        lines.saturating_mul(longest)
+                    } else {
+                        0
+                    });
+                    // Legacy Zinc clones column names for all rows. Keep its
+                    // expanded reservation before entering the H4 decoder.
+                    budget.charge(BudgetKind::Work, expansion.saturating_add(1))?;
+                    budget.charge(
+                        BudgetKind::Retained,
+                        expansion.saturating_mul(512).saturating_add(2048),
+                    )?;
                     if codec == H4Codec::Json {
                         let envelope: Value =
                             serde_json::from_str(text).map_err(|_| ApiError::InvalidArgs)?;
@@ -487,7 +547,7 @@ pub(crate) fn decode(input: &TypedReadInput, budget: &mut Budget) -> Result<Requ
                         .decode_grid(text)
                         .map_err(|_| ApiError::InvalidArgs)?;
                     if let Some(row) = grid.rows.first() {
-                        for name in ["id", "checked"] {
+                        for name in profile.parameters.keys() {
                             if let Some(value) = row.get(name)
                                 && !matches!(value, Kind::Null)
                             {
@@ -508,107 +568,10 @@ pub(crate) fn decode(input: &TypedReadInput, budget: &mut Budget) -> Result<Requ
     })
 }
 
-// Conservative bound is computed before any serializer/scalar formatting. The
-// reservation includes JSON nodes, scalar temporaries and the output buffer.
-fn bound(value: &Kind, budget: &mut Budget, depth: usize) -> Result<usize, ApiError> {
-    budget.depth(depth)?;
-    budget.charge(BudgetKind::Values, 1)?;
-    budget.charge(BudgetKind::Work, 1)?;
-    let mut size = if matches!(value, Kind::Number(_)) {
-        512_usize
-    } else {
-        256_usize
-    };
-    let string = |s: &str| s.len().saturating_mul(6).saturating_add(128);
-    match value {
-        Kind::Null | Kind::Bool(_) | Kind::Marker | Kind::None | Kind::NA | Kind::Int(_) => {}
-        Kind::Float(f) if f.value().is_finite() => {}
-        Kind::Number(n) if n.val.is_finite() => {
-            if let Some(unit) = &n.unit {
-                // The initial text encoding must preserve both unit identity and
-                // the pinned unit grammar; Some("") would decode as unitless.
-                if unit.is_empty()
-                    || !unit
-                        .chars()
-                        .all(|c| !c.is_ascii() || c.is_ascii_alphabetic() || "%_/$".contains(c))
-                {
-                    return Err(ApiError::NotAcceptable);
-                }
-                size = size.saturating_add(string(unit));
-            }
-        }
-        Kind::Str(s) => size = size.saturating_add(string(s)),
-        Kind::Ref(r) => {
-            size = size.saturating_add(string(&r.val));
-            if let Some(dis) = &r.dis {
-                size = size.saturating_add(string(dis));
-            }
-        }
-        Kind::Buf(bytes) => size = size.saturating_add(bytes.len().saturating_mul(2)),
-        Kind::List(values) => {
-            for value in values {
-                size = size.saturating_add(bound(value, budget, depth + 1)?);
-            }
-        }
-        Kind::Dict(dict) => {
-            for (key, value) in dict.iter() {
-                // A null dict member disappears on Jeto decode; a spec member
-                // is structural. Reject instead of silently changing identity.
-                if key == "spec" || matches!(value, Kind::Null) {
-                    return Err(ApiError::NotAcceptable);
-                }
-                size = size.saturating_add(string(key)).saturating_add(bound(
-                    value,
-                    budget,
-                    depth + 1,
-                )?);
-            }
-        }
-        _ => return Err(ApiError::NotAcceptable),
-    }
-    if size > budget.limits.max_output_bytes {
-        return Err(ApiError::InvalidArgs);
-    }
-    Ok(size)
-}
-fn boxed(spec: &str, val: String) -> Value {
-    serde_json::json!({"spec":spec,"val":val})
-}
-fn json(value: &Kind) -> Value {
-    use base64::Engine;
-    match value {
-        Kind::Null => Value::Null,
-        Kind::Bool(v) => Value::Bool(*v),
-        Kind::Str(v) => Value::String(v.clone()),
-        Kind::Marker => boxed("sys::Marker", "✓".into()),
-        Kind::None => boxed("sys::None", "∅".into()),
-        Kind::NA => boxed("sys::NA", "NA".into()),
-        Kind::Int(v) => Value::Number((*v).into()),
-        Kind::Float(v) => {
-            Value::Number(serde_json::Number::from_f64(v.value()).expect("finite preflight"))
-        }
-        Kind::Number(v) => boxed("sys::Number", v.to_string()),
-        Kind::Buf(v) => boxed(
-            "sys::Buf",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v),
-        ),
-        Kind::Ref(v) => {
-            let mut val = boxed("sys::Ref", v.val.clone());
-            if let Some(dis) = &v.dis {
-                val["dis"] = Value::String(dis.clone());
-            }
-            val
-        }
-        Kind::List(values) => Value::Array(values.iter().map(json).collect()),
-        Kind::Dict(dict) => {
-            Value::Object(dict.iter().map(|(k, v)| (k.to_owned(), json(v))).collect())
-        }
-        _ => unreachable!("preflight rejects unsupported values"),
-    }
-}
 pub(crate) fn encode(
     value: Kind,
     request: &Request,
+    profile: &WireProfile,
     budget: &mut Budget,
 ) -> Result<TypedReadResponse, ApiError> {
     #[cfg(test)]
@@ -616,15 +579,20 @@ pub(crate) fn encode(
         hook();
     }
     let body = match request.output {
-        Media::Jeto => {
-            let bound = bound(&value, budget, 0)?;
-            budget.charge(BudgetKind::Retained, bound.saturating_mul(8))?;
-            let body = serde_json::to_vec(&json(&value)).map_err(|_| ApiError::Internal)?;
-            budget.check()?;
-            if body.len() > bound {
-                return Err(ApiError::Internal);
-            }
-            body
+        Media::Jeto(boxing) => {
+            // This HTTP profile serves only exact output, including box=none.
+            // Callers that deliberately want lossy unboxing use the core API's
+            // explicit Encoding::Lossy result and its path-specific assessment.
+            jeto::encode_metered(
+                &value,
+                &profile.context,
+                Some(&profile.result),
+                boxing,
+                &mut JetoMeter(budget),
+            )
+            .map_err(|e| codec_error(e, true))?
+            .into_exact()
+            .map_err(|_| ApiError::NotAcceptable)?
         }
         Media::Grid(codec) => {
             let rows = match value {
@@ -809,33 +777,131 @@ mod tests {
     }
     #[tokio::test]
     async fn transport_reservations_and_encoding_use_one_cumulative_budget() {
-        let reads = ReadService::new(
-            SharedGraph::new(EntityGraph::new()),
-            Arc::new(AllowAll),
-            ReadLimits {
-                max_retained_bytes: 12_288,
-                ..ReadLimits::default()
-            },
-        )
-        .unwrap();
-        let context = || ReadContext::with_timeout(Principal::Anonymous, Duration::from_secs(1));
-        let plain = reads
-            .begin(context())
-            .await
+        let service = |limits| {
+            ReadService::new(
+                SharedGraph::new(EntityGraph::new()),
+                Arc::new(AllowAll),
+                limits,
+            )
             .unwrap()
-            .read_by_id_wire(input())
-            .await
-            .unwrap();
-        assert_eq!(plain.body, b"null");
+        };
+        let context = || ReadContext::with_timeout(Principal::Anonymous, Duration::from_secs(1));
+        // Measure the complete request's budget reservations. This is an
+        // accounting receipt, not a heap allocation/performance measurement.
+        let controls = service(ReadLimits::default());
+        let mut request = controls.begin(context()).await.unwrap();
+        let observer = request.budget_mut().clone();
+        assert_eq!(
+            request.read_by_id_wire(input()).await.unwrap().body,
+            b"null"
+        );
+        let request_cost = observer.limits.max_retained_bytes - observer.retained_remaining();
+        drop(observer);
+        let mut transport = controls.begin(context()).await.unwrap();
+        let before = transport.budget_mut().retained_remaining();
+        transport.reserve_wire_input(512).unwrap();
+        let transport_cost = before - transport.budget_mut().retained_remaining();
+        drop(transport);
+        assert_eq!(controls.load().admitted, 0);
+        let ceiling = request_cost.max(transport_cost) + 1;
+        assert!(request_cost + transport_cost > ceiling);
+        let reads = service(ReadLimits {
+            max_retained_bytes: ceiling,
+            ..ReadLimits::default()
+        });
+        // Each component fits by itself, while combined transport and later
+        // request/codec reservations exhaust the same cumulative allowance.
+        assert_eq!(
+            reads
+                .begin(context())
+                .await
+                .unwrap()
+                .read_by_id_wire(input())
+                .await
+                .unwrap()
+                .body,
+            b"null"
+        );
         let mut admission = reads.begin(context()).await.unwrap();
-        // Still enough for argument decode/binding; the final encoder's
-        // reservation crosses the original cumulative ceiling.
         admission.reserve_wire_input(512).unwrap();
         assert!(matches!(
             admission.read_by_id_wire(input()).await,
             Err(ApiError::InvalidArgs)
         ));
         assert_eq!(reads.load().admitted, 0);
+    }
+    #[test]
+    fn core_codec_meter_preserves_original_interruptions_and_generated_output_limits() {
+        use std::time::Instant;
+        let profile = WireProfile::new(&ReadByIdProfile::load_http_pinned().unwrap()).unwrap();
+        let fresh = |limits| {
+            Budget::new(
+                Arc::new(limits),
+                Instant::now() + Duration::from_secs(1),
+                CancellationToken::new(),
+            )
+        };
+        let mut cancelled = fresh(ReadLimits::default());
+        cancelled.cancel.cancel();
+        let error = jeto::decode_metered(
+            b"null",
+            &profile.context,
+            None,
+            &mut JetoMeter(&mut cancelled),
+        )
+        .unwrap_err();
+        assert!(matches!(error, jeto::Error::Budget(ReadError::Cancelled)));
+        assert_eq!(codec_error(error, false), ApiError::Unavailable);
+        let mut expired = fresh(ReadLimits::default());
+        expired.deadline = Instant::now();
+        let error = jeto::encode_metered(
+            &Kind::Bool(true),
+            &profile.context,
+            None,
+            jeto::Boxing::All,
+            &mut JetoMeter(&mut expired),
+        )
+        .unwrap_err();
+        assert!(matches!(error, jeto::Error::Budget(ReadError::Deadline)));
+        assert_eq!(codec_error(error, true), ApiError::Timeout);
+        let native = Kind::List(vec![Kind::Bool(true); 64]);
+        for (limits, expected) in [
+            (
+                ReadLimits {
+                    max_value_depth: 1,
+                    ..ReadLimits::default()
+                },
+                BudgetKind::Depth,
+            ),
+            (
+                ReadLimits {
+                    max_value_nodes: 64 * 3,
+                    ..ReadLimits::default()
+                },
+                BudgetKind::Values,
+            ),
+            (
+                ReadLimits {
+                    max_output_bytes: 16,
+                    ..ReadLimits::default()
+                },
+                BudgetKind::Output,
+            ),
+        ] {
+            let mut budget = fresh(limits);
+            let error = jeto::encode_metered(
+                &native,
+                &profile.context,
+                None,
+                jeto::Boxing::All,
+                &mut JetoMeter(&mut budget),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, jeto::Error::Budget(ReadError::Budget(found)) if found == expected)
+            );
+            assert_eq!(codec_error(error, true), ApiError::InvalidArgs);
+        }
     }
     #[test]
     fn cancelling_during_typed_encoding_keeps_the_slot_and_owner_registration_until_exit() {

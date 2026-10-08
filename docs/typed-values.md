@@ -166,3 +166,7 @@ linked trusted CPython library; normal extension rebuild/pytest validation is a
 separate check. Existing H4 codec and Python suites remain the compatibility
 corpus. Neither these local checks nor this payload establishes H5, database,
 Arrow, external-client or release-artifact qualification.
+
+The separate [contextual Jeto codec](jeto.md) encodes these native values under
+a closed admitted context with explicit exact, lossy and unsupported outcomes.
+Typed payload v1 remains the project-owned lossless identity envelope.

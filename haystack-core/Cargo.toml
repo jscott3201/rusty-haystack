@@ -37,6 +37,7 @@ base64.workspace = true
 rand.workspace = true
 subtle.workspace = true
 regex.workspace = true
+regex-automata.workspace = true
 roaring.workspace = true
 rustc-hash.workspace = true
 zeroize.workspace = true
