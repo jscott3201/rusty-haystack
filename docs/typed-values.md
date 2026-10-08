@@ -106,8 +106,9 @@ names. Null and typed None are objects, not bare JSON null values.
 | `number` | `bits`: same binary64 format; `unit`: string or null |
 | `str`, `uri`, `symbol` | `value`: string |
 | `ref` | `value`: identifier string; `display`: string or null |
-| `date`, `time` | `value`: Chrono date/time string, with fractional precision retained |
-| `dateTime` | `seconds`: canonical i64 Unix timestamp string; `nanos`: u32 subsecond value; `offset`: i32 seconds east of UTC; `timezone`: exact source name |
+| `date` | `value`: Chrono date string |
+| `time` | `seconds`: u32 whole seconds since midnight, less than 86,400; `nanos`: u32 nanoseconds, less than 2,000,000,000 |
+| `dateTime` | `seconds`: canonical i64 Unix timestamp string; `nanos`: u32 nanoseconds, less than 2,000,000,000; `offset`: i32 seconds east of UTC; `timezone`: exact source name |
 | `coord` | `lat`, `lng`: binary64 bit strings |
 | `xstr` | `name`, `value`: strings |
 | `buf` | `base64`: standard alphabet, canonical padding and trailing bits |
@@ -118,9 +119,15 @@ names. Null and typed None are objects, not bare JSON null values.
 
 The encoder emits nullable `unit` and `display` fields; the decoder also accepts
 those optional fields when absent. It never interprets a Number as Int. Date/time
-validation uses Chrono's representable ranges, including supported leap-second
-representations. Grid rows retain all supplied tags, including tags outside the
-column list. Duplicate column names are rejected by both encoder and decoder.
+validation uses Chrono's representable ranges. Time stores the whole second and
+nanosecond fields independently, including leap nanoseconds after a non-minute
+second; display text can make these values indistinguishable from an ordinary
+following second. Decoding constructs the checked whole second, then applies the
+checked nanosecond field. DateTime does this in UTC before restoring its exact
+fixed offset and timezone name, including historical offsets containing seconds.
+The Time payload does not accept a text `value` alias. Grid rows retain all
+supplied tags, including tags outside the column list. Duplicate column names
+are rejected by both encoder and decoder.
 
 Encoding orders dictionary keys lexically and preserves all sequence order.
 `decode_with_limits` checks bytes before parsing and uses a bounded JSON visitor

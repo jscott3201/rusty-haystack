@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, NaiveTime, Timelike};
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,7 +94,8 @@ enum WireValue {
         value: String,
     },
     Time {
-        value: String,
+        seconds: u32,
+        nanos: u32,
     },
     DateTime {
         seconds: String,
@@ -240,7 +241,8 @@ fn to_wire(value: &Kind, depth: usize) -> Result<WireValue, TypedPayloadError> {
             value: v.to_string(),
         },
         Kind::Time(v) => WireValue::Time {
-            value: v.to_string(),
+            seconds: v.num_seconds_from_midnight(),
+            nanos: v.nanosecond(),
         },
         Kind::DateTime(v) => WireValue::DateTime {
             seconds: v.dt.timestamp().to_string(),
@@ -325,8 +327,15 @@ fn from_wire(value: WireValue) -> Result<Kind, TypedPayloadError> {
         WireValue::Date { value } => {
             Kind::Date(value.parse().map_err(|_| invalid("invalid date"))?)
         }
-        WireValue::Time { value } => {
-            Kind::Time(value.parse().map_err(|_| invalid("invalid time"))?)
+        WireValue::Time { seconds, nanos } => {
+            // Chrono permits leap nanoseconds after any whole second through
+            // Timelike setters, including historical offsets with seconds.
+            // Display text and combined constructors cannot retain every such
+            // representation. Both steps below check their respective ranges.
+            let time = NaiveTime::from_num_seconds_from_midnight_opt(seconds, 0)
+                .and_then(|time| time.with_nanosecond(nanos))
+                .ok_or_else(|| invalid("invalid time seconds or nanoseconds"))?;
+            Kind::Time(time)
         }
         WireValue::DateTime {
             seconds,
@@ -336,8 +345,12 @@ fn from_wire(value: WireValue) -> Result<Kind, TypedPayloadError> {
         } => {
             let offset =
                 FixedOffset::east_opt(offset).ok_or_else(|| invalid("invalid datetime offset"))?;
-            let dt = DateTime::from_timestamp(parse_int(&seconds)?, nanos)
-                .ok_or_else(|| invalid("invalid datetime timestamp"))?;
+            // Apply nanos in UTC before restoring the exact stored offset.
+            // The combined constructor restricts leap nanos to minute ends,
+            // while the setter accepts the full existing DateTime domain.
+            let dt = DateTime::from_timestamp(parse_int(&seconds)?, 0)
+                .and_then(|dt| dt.with_nanosecond(nanos))
+                .ok_or_else(|| invalid("invalid datetime timestamp or nanoseconds"))?;
             Kind::DateTime(HDateTime::new(dt.with_timezone(&offset), timezone))
         }
         WireValue::Coord { lat, lng } => {

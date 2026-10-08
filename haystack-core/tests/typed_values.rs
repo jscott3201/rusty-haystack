@@ -670,7 +670,7 @@ fn existing_h4_scalars_have_independent_typed_payload_shapes() {
             Kind::Date(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap()),
         ),
         (
-            r#"{"kind":"time","value":"01:02:03.123456789"}"#,
+            r#"{"kind":"time","seconds":3723,"nanos":123456789}"#,
             Kind::Time(NaiveTime::from_hms_nano_opt(1, 2, 3, 123456789).unwrap()),
         ),
         (
@@ -766,4 +766,108 @@ fn deep_projection_fails_boundedly_without_rewriting_source() {
             .is_err()
     );
     assert!(typed::encode(&value).is_err());
+}
+
+#[test]
+fn typed_time_preserves_non_minute_leap_representation_and_wire_fields() {
+    use chrono::{NaiveTime, Timelike};
+    let exotic = NaiveTime::from_hms_opt(23, 56, 4)
+        .unwrap()
+        .with_nanosecond(1_333_333_333)
+        .unwrap();
+    let following = NaiveTime::from_hms_nano_opt(23, 56, 5, 333_333_333).unwrap();
+    assert_eq!(exotic.to_string(), following.to_string());
+    assert_ne!(exotic, following);
+    let value = Kind::Time(exotic);
+    let decoded = typed::decode(&typed::encode(&value).unwrap()).unwrap();
+    assert_eq!(decoded, value);
+    assert_ne!(decoded, Kind::Time(following));
+
+    let fixture = br#"{"version":1,"value":{"kind":"time","seconds":86164,"nanos":1333333333}}"#;
+    assert_eq!(typed::decode(fixture).unwrap(), value);
+    assert_eq!(typed::encode(&value).unwrap(), fixture);
+    let Kind::Time(decoded) = decoded else {
+        panic!("time fixture");
+    };
+    assert_eq!(decoded.num_seconds_from_midnight(), 86164);
+    assert_eq!(decoded.nanosecond(), 1_333_333_333);
+}
+
+#[test]
+fn typed_datetime_preserves_setter_admitted_non_minute_leap() {
+    use chrono::{DateTime, FixedOffset, Timelike};
+    use haystack_core::kinds::HDateTime;
+    let dt = DateTime::from_timestamp(30, 0)
+        .unwrap()
+        .with_nanosecond(1_000_000_000)
+        .unwrap()
+        .with_timezone(&FixedOffset::east_opt(0).unwrap());
+    let value = Kind::DateTime(HDateTime::new(dt, "UTC-source"));
+    let fixture = br#"{"version":1,"value":{"kind":"dateTime","seconds":"30","nanos":1000000000,"offset":0,"timezone":"UTC-source"}}"#;
+    assert_eq!(typed::encode(&value).unwrap(), fixture);
+    let decoded = typed::decode(fixture).unwrap();
+    assert_eq!(decoded, value);
+    let Kind::DateTime(decoded) = decoded else {
+        panic!("datetime fixture");
+    };
+    assert_eq!(decoded.dt.timestamp(), 30);
+    assert_eq!(decoded.dt.nanosecond(), 1_000_000_000);
+    assert_eq!(decoded.dt.offset().local_minus_utc(), 0);
+    assert_eq!(decoded.tz_name, "UTC-source");
+}
+
+#[test]
+fn typed_time_and_datetime_preserve_minute_leaps_and_second_offsets() {
+    use chrono::{DateTime, FixedOffset, NaiveTime, Timelike};
+    use haystack_core::kinds::HDateTime;
+    let ordinary_leap = NaiveTime::from_hms_nano_opt(23, 59, 59, 1_999_999_999).unwrap();
+    let fixture = br#"{"version":1,"value":{"kind":"time","seconds":86399,"nanos":1999999999}}"#;
+    assert_eq!(typed::decode(fixture).unwrap(), Kind::Time(ordinary_leap));
+    assert_eq!(typed::encode(&Kind::Time(ordinary_leap)).unwrap(), fixture);
+
+    let utc_leap = DateTime::from_timestamp(59, 1_250_000_000).unwrap();
+    // Historical fixed offsets can include seconds. No timezone lookup is used.
+    let offset = FixedOffset::east_opt(1234).unwrap();
+    let local = utc_leap.with_timezone(&offset);
+    let local_time = local.time();
+    assert_eq!(local_time.num_seconds_from_midnight(), 1293);
+    assert_eq!(local_time.nanosecond(), 1_250_000_000);
+    let time_fixture =
+        br#"{"version":1,"value":{"kind":"time","seconds":1293,"nanos":1250000000}}"#;
+    assert_eq!(typed::decode(time_fixture).unwrap(), Kind::Time(local_time));
+    assert_eq!(
+        typed::encode(&Kind::Time(local_time)).unwrap(),
+        time_fixture
+    );
+
+    let value = Kind::DateTime(HDateTime::new(local, "historic-offset-source"));
+    let dt_fixture = br#"{"version":1,"value":{"kind":"dateTime","seconds":"59","nanos":1250000000,"offset":1234,"timezone":"historic-offset-source"}}"#;
+    assert_eq!(typed::encode(&value).unwrap(), dt_fixture);
+    let decoded = typed::decode(dt_fixture).unwrap();
+    assert_eq!(decoded, value);
+    let Kind::DateTime(decoded) = decoded else {
+        panic!("datetime fixture");
+    };
+    assert_eq!(decoded.dt.timestamp_subsec_nanos(), 1_250_000_000);
+    assert_eq!(decoded.dt.offset().local_minus_utc(), 1234);
+    assert_eq!(decoded.tz_name, "historic-offset-source");
+    assert_eq!(decoded.dt.time(), local_time);
+}
+
+#[test]
+fn typed_temporal_fields_reject_out_of_range_values_and_old_time_text() {
+    for wire in [
+        r#"{"kind":"time","seconds":86400,"nanos":0}"#,
+        r#"{"kind":"time","seconds":-1,"nanos":0}"#,
+        r#"{"kind":"time","seconds":30,"nanos":2000000000}"#,
+        r#"{"kind":"time","seconds":30,"nanos":4294967295}"#,
+        r#"{"kind":"time","seconds":30,"nanos":-1}"#,
+        r#"{"kind":"time","value":"23:56:05.333333333"}"#,
+        r#"{"kind":"dateTime","seconds":"30","nanos":2000000000,"offset":0,"timezone":"UTC"}"#,
+        r#"{"kind":"dateTime","seconds":"59","nanos":4294967295,"offset":0,"timezone":"UTC"}"#,
+        r#"{"kind":"dateTime","seconds":"9223372036854775807","nanos":0,"offset":0,"timezone":"UTC"}"#,
+        r#"{"kind":"dateTime","seconds":"0","nanos":0,"offset":86400,"timezone":"UTC"}"#,
+    ] {
+        assert!(scalar(wire).is_err(), "{wire}");
+    }
 }
