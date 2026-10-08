@@ -33,6 +33,10 @@ impl TestServer {
             ReadLimits {
                 max_rows: 10_000,
                 max_output_bytes: 8 * 1024 * 1024,
+                // This fixture validates a full 1,440-row day, including the
+                // collector's conservative grid/codec construction reserves.
+                max_retained_bytes: 64 * 1024 * 1024,
+                max_work: 32 * 1024 * 1024,
                 ..ReadLimits::default()
             },
         )
@@ -43,6 +47,7 @@ impl TestServer {
             HistoryLimits {
                 total_rows: 10_000,
                 total_bytes: 8 * 1024 * 1024,
+                total_work: 32 * 1024 * 1024,
                 ..HistoryLimits::default()
             },
         )

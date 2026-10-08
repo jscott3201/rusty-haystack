@@ -39,7 +39,13 @@ lists does not evade the same authenticated subject's limit. Response metadata
 reports the selected batch, total, work and collector response bounds. Byte
 accounting reserves structural overhead and worst-case H4 escaping; it is a
 conservative source-size allowance, not a promise of a specific payload size.
-Actual limits may stop a result below its row ceiling.
+Actual limits may stop a result below its row ceiling. The HTTP collector shares
+its cumulative budget and work lease through result-grid construction and final
+encoding. Before provider copies it reserves metadata, original/grid copies,
+codec temporary values, worst-case escaping and buffer growth. These conservative
+reservations can return a partial `Limited` response under a small budget; they
+are source-based accounting bounds, not allocator measurements. Absolute deadline
+and cancellation checks run between final construction stages and before return.
 
 ## Range, schema and identity
 
@@ -49,15 +55,23 @@ pair, the final date is included through its following midnight. `today` and
 `yesterday` use the point-local date; `HistoryClock` makes the current instant
 injectable. A zero-width explicit DateTime range is empty and complete; a
 reversed range is invalid. DST days can contain 23 or 25 hours. Ambiguous or
-nonexistent calendar midnights produce an explicit validation error.
+nonexistent calendar midnights produce an explicit validation error. The scoped
+client requires the same unique point-local midnight and matching offset for
+calendar and relative-date replies; explicit DateTime bounds retain their
+instant-based cross-zone semantics.
 
-The point must declare `his`, `kind` and `tz`. H4 supports Bool, Number and Str
+The point must declare `his`, `kind` and `tz`. This selected strict H4 profile
+also requires a registered `unit` on every Number point, checked before provider
+access and in shared wire/client schema validation. H4 supports Bool, Number and Str
 schemas, plus NA error samples. Values retain their original Kind: Int/Float,
 Null/None/Remove, Ref, nominal and other rich values are unsupported by this
 selected profile. Nothing is coerced, silently dropped, or replaced with Null.
 A Number sample can be unitless or use the same registered unit identity as the
-point. Unit spelling and numeric bits are preserved; unit-bearing NaN is
-unsupported. A present non-string JSON v4 Number unit is a codec error.
+point. Unit spelling and admitted numeric bits are preserved. The selected H4
+profile admits only the canonical unitless `f64::NAN` NaN representation; other
+NaN bit patterns and every unit-bearing NaN are unsupported. Canonical unitless
+NaN, infinities, and finite Number bits are preserved. A present non-string JSON
+v4 Number unit is a codec error.
 
 Timezone handling uses the existing optional core chrono-tz implementation and
 Haystack short-name table. The app and client opt into that feature; core's
@@ -84,7 +98,10 @@ published batch; policy or graph/schema changes interrupt the session. Missing
 and denied points have the same unavailable result before provider access.
 
 Coverage reports retained first/last timestamps, retained count, and the largest
-evicted timestamp. `Complete` covers retained records in the requested interval;
+evicted timestamp. `Complete` must include each known retained first/last endpoint lying inside the
+requested half-open interval, and the retained count when both are enclosed.
+These checks span all batches; a contradiction fails while preserving admitted
+partial samples. `Complete` covers retained records in the requested interval;
 it never claims to reconstruct data removed by retention. The native memory
 store retains at most one million items per point by default. Its trusted
 `write` and inclusive-end, materializing `read` compatibility methods are outside

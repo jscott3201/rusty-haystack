@@ -29,7 +29,7 @@ fn result() -> HistoryReadResult {
             end: date("2024-06-02T00:00:00Z UTC"),
             schema: HistorySchema {
                 kind: HistoryKind::Number,
-                unit: None,
+                unit: Some("°C".into()),
                 timezone: "UTC".into(),
             },
             capabilities: HistoryCapabilities::BOUNDED_LIVE,
@@ -131,4 +131,130 @@ async fn thin_helper_preserves_partial_failure_and_rejects_foreign_or_inconsiste
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
+}
+
+#[tokio::test]
+async fn review_calendar_replies_require_unique_midnights_without_replay() {
+    // Independent IANA transition fixtures already used by the application:
+    // Havana repeated midnight 2015-11-01; Apia skipped 2011-12-30.
+    for (zone, day, next, evaluated, offsets) in [
+        (
+            "Havana",
+            "2015-11-01",
+            "2015-11-02",
+            "2015-11-01T12:00:00-05:00",
+            vec!["-04:00", "-05:00"],
+        ),
+        (
+            "Apia",
+            "2011-12-30",
+            "2011-12-31",
+            "2011-12-31T12:00:00+14:00",
+            vec!["-10:00", "+14:00"],
+        ),
+    ] {
+        for offset in offsets {
+            for range in [
+                day.to_string(),
+                format!("{day},{day}"),
+                "today".into(),
+                "yesterday".into(),
+            ] {
+                let mut response = result();
+                response.samples.clear();
+                response.terminal = HistoryTerminal::Complete;
+                let m = &mut response.metadata;
+                m.requested_range = range.clone();
+                m.schema.timezone = zone.into();
+                m.start = date(&format!("{day}T00:00:00{offset} {zone}"));
+                let end_offset = if zone == "Havana" { "-05:00" } else { "+14:00" };
+                m.end = date(&format!("{next}T00:00:00{end_offset} {zone}"));
+                m.evaluated_at = date(&format!("{evaluated} {zone}"));
+                if range == "yesterday" && zone == "Havana" {
+                    m.evaluated_at = date("2015-11-02T12:00:00-05:00 Havana");
+                }
+                m.coverage = HistoryCoverage {
+                    retained_start: None,
+                    retained_end: None,
+                    retained_count: 0,
+                    evicted_through: None,
+                };
+                // Bypass the response validator, as an independent hostile transport can.
+                let mut seed = response.clone();
+                seed.metadata.schema.timezone = "UTC".into();
+                seed.metadata.start = date("2015-11-01T00:00:00Z UTC");
+                seed.metadata.end = date("2015-11-02T00:00:00Z UTC");
+                seed.metadata.evaluated_at = date("2015-11-01T12:00:00Z UTC");
+                let mut grid = result_grid(&seed).unwrap();
+                let Some(Kind::Str(control)) = grid.meta.get("history") else {
+                    panic!()
+                };
+                let Kind::Dict(mut control) = typed::decode(control.as_bytes()).unwrap() else {
+                    panic!()
+                };
+                control.set("timezone", Kind::Str(zone.into()));
+                control.set(
+                    "evaluatedAt",
+                    Kind::DateTime(response.metadata.evaluated_at.clone()),
+                );
+                grid.meta.set(
+                    "history",
+                    Kind::Str(
+                        String::from_utf8(typed::encode(&Kind::Dict(control)).unwrap()).unwrap(),
+                    ),
+                );
+                grid.meta
+                    .set("hisStart", Kind::DateTime(response.metadata.start));
+                grid.meta
+                    .set("hisEnd", Kind::DateTime(response.metadata.end));
+                let calls = Arc::new(AtomicUsize::new(0));
+                let client = HaystackClient::from_transport(Fixture {
+                    grid,
+                    calls: calls.clone(),
+                });
+                assert!(
+                    matches!(
+                        client
+                            .his_read_scoped(&HistoryReadRequest {
+                                id: "p".into(),
+                                range: range.clone()
+                            })
+                            .await,
+                        Err(ClientError::Codec(_))
+                    ),
+                    "{zone} {offset} {range}"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn review_explicit_cross_zone_instants_can_span_repeated_local_midnight() {
+    let mut response = result();
+    response.samples.clear();
+    response.terminal = HistoryTerminal::Complete;
+    response.metadata.requested_range = "2015-11-01T04:00:00Z GMT,2015-11-01T05:00:00Z GMT".into();
+    response.metadata.schema.timezone = "Havana".into();
+    response.metadata.start = date("2015-11-01T00:00:00-04:00 Havana");
+    response.metadata.end = date("2015-11-01T00:00:00-05:00 Havana");
+    response.metadata.evaluated_at = date("2015-11-01T12:00:00-05:00 Havana");
+    response.metadata.coverage = HistoryCoverage {
+        retained_start: None,
+        retained_end: None,
+        retained_count: 0,
+        evicted_through: None,
+    };
+    let request = HistoryReadRequest {
+        id: "p".into(),
+        range: response.metadata.requested_range.clone(),
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = HaystackClient::from_transport(Fixture {
+        grid: result_grid(&response).unwrap(),
+        calls: calls.clone(),
+    });
+    assert_eq!(client.his_read_scoped(&request).await.unwrap(), response);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

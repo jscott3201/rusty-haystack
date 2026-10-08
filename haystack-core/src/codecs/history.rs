@@ -773,9 +773,11 @@ pub fn validate_result(result: &HistoryReadResult) -> Result<(), TypedPayloadErr
     {
         return Err(invalid());
     }
-    if m.schema.unit.as_ref().is_some_and(|unit| {
-        unit.len() > 128 || m.schema.kind != HistoryKind::Number || unit_for(unit).is_none()
-    }) {
+    if (m.schema.kind == HistoryKind::Number && m.schema.unit.is_none())
+        || m.schema.unit.as_ref().is_some_and(|unit| {
+            unit.len() > 128 || m.schema.kind != HistoryKind::Number || unit_for(unit).is_none()
+        })
+    {
         return Err(invalid());
     }
     for time in [&m.start, &m.end, &m.evaluated_at]
@@ -795,12 +797,19 @@ pub fn validate_result(result: &HistoryReadResult) -> Result<(), TypedPayloadErr
         {
             return Err(invalid());
         }
-        if result.terminal == HistoryTerminal::Complete
-            && m.start.dt <= start.dt
-            && m.end.dt > end.dt
-            && result.samples.len() as u64 != c.retained_count
-        {
-            return Err(invalid());
+        if result.terminal == HistoryTerminal::Complete {
+            let includes_first = m.start.dt <= start.dt && start.dt < m.end.dt;
+            let includes_last = m.start.dt <= end.dt && end.dt < m.end.dt;
+            if (includes_first
+                && result.samples.first().map(|sample| sample.ts.dt) != Some(start.dt))
+                || (includes_last
+                    && result.samples.last().map(|sample| sample.ts.dt) != Some(end.dt))
+                || (includes_first
+                    && includes_last
+                    && result.samples.len() as u64 != c.retained_count)
+            {
+                return Err(invalid());
+            }
         }
     }
     let mut budget = crate::graph::size::ValueBudget::new(MAX_ROWS * 8, MAX_GRID_BYTES, 8);
@@ -827,7 +836,7 @@ pub fn validate_result(result: &HistoryReadResult) -> Result<(), TypedPayloadErr
             | (Kind::Bool(_), HistoryKind::Bool)
             | (Kind::Str(_), HistoryKind::Str) => true,
             (Kind::Number(value), HistoryKind::Number) => match &value.unit {
-                None => true,
+                None => !value.val.is_nan() || value.val.to_bits() == f64::NAN.to_bits(),
                 Some(unit) => {
                     !value.val.is_nan()
                         && m.schema
@@ -882,6 +891,7 @@ fn validate_range(result: &HistoryReadResult) -> Result<(), TypedPayloadError> {
                 if actual.dt.date_naive() != date || actual.dt.time() != NaiveTime::MIN {
                     return Err(invalid());
                 }
+                validate_calendar_midnight(actual)?;
             } else {
                 let Kind::DateTime(expected) = super::zinc::ZincCodec
                     .decode_scalar(source.trim())
@@ -909,6 +919,8 @@ fn validate_range(result: &HistoryReadResult) -> Result<(), TypedPayloadError> {
         };
     match m.requested_range.trim() {
         "today" | "yesterday" => {
+            validate_calendar_midnight(&m.start)?;
+            validate_calendar_midnight(&m.end)?;
             let date = m.evaluated_at.dt.date_naive();
             let date = if m.requested_range.trim() == "yesterday" {
                 date.pred_opt().ok_or_else(invalid)?
@@ -932,6 +944,21 @@ fn validate_range(result: &HistoryReadResult) -> Result<(), TypedPayloadError> {
                 boundary(range, &m.end, true)?;
             }
         }
+    }
+    Ok(())
+}
+
+// Calendar boundaries require a unique local midnight. Explicit DateTime
+// boundaries deliberately keep their instant-based cross-zone validation.
+fn validate_calendar_midnight(actual: &HDateTime) -> Result<(), TypedPayloadError> {
+    if actual.dt.time() != chrono::NaiveTime::MIN {
+        return Err(invalid());
+    }
+    #[cfg(feature = "chrono-tz")]
+    if crate::kinds::resolve_local_offset(&actual.tz_name, actual.dt.naive_local())
+        != Some(chrono::LocalResult::Single(*actual.dt.offset()))
+    {
+        return Err(invalid());
     }
     Ok(())
 }

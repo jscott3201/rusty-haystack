@@ -146,6 +146,14 @@ impl HistoryService {
         admission: ReadAdmission,
         request: HistoryReadRequest,
     ) -> Result<HistoryReadSession, ReadError> {
+        self.open_configured(admission, request, false).await
+    }
+    async fn open_configured(
+        &self,
+        admission: ReadAdmission,
+        request: HistoryReadRequest,
+        wire: bool,
+    ) -> Result<HistoryReadSession, ReadError> {
         if !admission.belongs_to(&self.reads) {
             return Err(ReadError::Forbidden);
         }
@@ -207,7 +215,7 @@ impl HistoryService {
         let service = self.clone();
         runtime.spawn(async move {
             service
-                .coordinate(principal, request, budget, receiver, terminal, ready)
+                .coordinate(principal, request, budget, receiver, terminal, ready, wire)
                 .await;
             // Only actual provider/session completion releases these leases.
             drop(lease);
@@ -284,25 +292,27 @@ impl HistoryService {
         )
         .map_err(|_| ReadError::InvalidQuery("invalid bounded history request"))?;
         budget.check()?;
-        let result = self
-            .open_admitted(admission, request)
-            .await?
-            .collect()
-            .await?;
-        let codec = codec_for(output.mime()).ok_or(ReadError::Unavailable)?;
-        let bytes = if scoped {
-            history::encode_result(&result, codec).map_err(|_| ReadError::Projection)?
-        } else {
-            if result.terminal != HistoryTerminal::Complete {
-                return Err(ReadError::UnitTooLarge);
-            }
-            let mut grid = history::result_grid(&result).map_err(|_| ReadError::Projection)?;
+        // Keep the same cumulative counters, absolute deadline, cancellation
+        // and work lease through every response-construction stage. The
+        // coordinator reserves encoder headroom before granting source pulls.
+        let final_budget = budget.clone();
+        let mut session = self.open_configured(admission, request, true).await?;
+        let result = session.collect_borrowed().await?;
+        final_budget.check()?;
+        if !scoped && result.terminal != HistoryTerminal::Complete {
+            return Err(ReadError::UnitTooLarge);
+        }
+        let mut grid = history::result_grid(&result).map_err(|_| ReadError::Projection)?;
+        final_budget.check()?;
+        if !scoped {
             grid.meta.remove_tag("history");
-            codec
-                .encode_grid(&grid)
-                .map_err(|_| ReadError::Projection)?
-                .into_bytes()
-        };
+        }
+        let codec = codec_for(output.mime()).ok_or(ReadError::Unavailable)?;
+        let bytes = codec
+            .encode_grid(&grid)
+            .map_err(|_| ReadError::Projection)?
+            .into_bytes();
+        final_budget.check()?;
         if bytes.len() > max_output {
             return Err(ReadError::Budget(BudgetKind::Output));
         }
@@ -324,6 +334,7 @@ impl HistoryService {
         mut commands: mpsc::Receiver<oneshot::Sender<HistoryBatch>>,
         terminal_tx: watch::Sender<Option<HistoryTerminal>>,
         ready: oneshot::Sender<Result<HistoryMetadata, ReadError>>,
+        wire: bool,
     ) {
         let observation = self.observe(&principal, &request.id, &mut budget).await;
         let (schema, graph, scope) = match observation {
@@ -333,6 +344,10 @@ impl HistoryService {
                 return;
             }
         };
+        if wire && let Err(error) = reserve_wire_metadata(&mut budget, &request, &schema) {
+            let _ = ready.send(Err(error));
+            return;
+        }
         let now = self.clock.now();
         let (start, end) = match parse_range(&request.range, &schema.timezone, now) {
             Ok(value) => value,
@@ -341,7 +356,7 @@ impl HistoryService {
                 return;
             }
         };
-        let pull_budget = self.pull_budget(&budget, 0, 0, 0);
+        let pull_budget = self.pull_budget(&budget, 0, 0, 0, wire);
         let mut open = self
             .provider
             .open(request.id.clone(), start.dt, end.dt, pull_budget);
@@ -394,6 +409,7 @@ impl HistoryService {
         let mut rows = 0usize;
         let mut bytes = 0usize;
         let mut work = 0usize;
+        let mut first = None;
         let mut last = None;
         loop {
             let reply = tokio::select! {
@@ -407,7 +423,7 @@ impl HistoryService {
                 finish(reply, &terminal_tx, vec![], terminal);
                 break;
             }
-            let pull_budget = self.pull_budget(&budget, rows, bytes, work);
+            let pull_budget = self.pull_budget(&budget, rows, bytes, work, wire);
             let limited = if pull_budget.max_rows == 0 {
                 Some(HistoryReason::Rows)
             } else if pull_budget.max_bytes == 0 {
@@ -550,14 +566,19 @@ impl HistoryService {
                 }
                 // The original Kind is validated; there is no Int/Float erasure,
                 // reference/display masking, dropped row, or Null substitution.
-                if let Err(error) = budget
-                    .charge(BudgetKind::Values, 1)
-                    .and_then(|_| budget.charge(BudgetKind::Work, size))
-                {
+                if let Err(error) = budget.charge(BudgetKind::Values, 1).and_then(|_| {
+                    budget.charge(
+                        BudgetKind::Work,
+                        size.saturating_mul(if wire { WIRE_SAMPLE_WORK } else { 1 }),
+                    )
+                }) {
                     terminal = Some(budget_terminal(error, &budget));
                     break;
                 }
-                if let Err(error) = budget.charge(BudgetKind::Retained, size) {
+                if let Err(error) = budget.charge(
+                    BudgetKind::Retained,
+                    size.saturating_mul(if wire { WIRE_SAMPLE_RETAINED } else { 1 }),
+                ) {
                     terminal = Some(budget_terminal(error, &budget));
                     break;
                 }
@@ -568,6 +589,7 @@ impl HistoryService {
                         break;
                     }
                 };
+                first.get_or_insert(item.ts);
                 last = Some(item.ts);
                 batch_bytes += size;
                 batch_work += size;
@@ -577,17 +599,22 @@ impl HistoryService {
             bytes += batch_bytes;
             work += batch_work;
             if terminal == Some(HistoryTerminal::Complete)
-                && metadata
+                && let Some((start, end)) = metadata
                     .coverage
                     .retained_start
                     .as_ref()
                     .zip(metadata.coverage.retained_end.as_ref())
-                    .is_some_and(|(start, end)| {
-                        metadata.start.dt <= start.dt && metadata.end.dt > end.dt
-                    })
-                && rows as u64 != metadata.coverage.retained_count
             {
-                terminal = Some(HistoryTerminal::Failed(HistoryReason::InvalidProvider));
+                let includes_first = metadata.start.dt <= start.dt && start.dt < metadata.end.dt;
+                let includes_last = metadata.start.dt <= end.dt && end.dt < metadata.end.dt;
+                if (includes_first && first != Some(start.dt))
+                    || (includes_last && last != Some(end.dt))
+                    || (includes_first
+                        && includes_last
+                        && rows as u64 != metadata.coverage.retained_count)
+                {
+                    terminal = Some(HistoryTerminal::Failed(HistoryReason::InvalidProvider));
+                }
             }
             if let Some(terminal) = terminal {
                 finish_closed(
@@ -623,6 +650,7 @@ impl HistoryService {
         rows: usize,
         bytes: usize,
         work: usize,
+        wire: bool,
     ) -> HistoryPullBudget {
         HistoryPullBudget {
             max_rows: self.limits.batch_rows.min(
@@ -640,13 +668,13 @@ impl HistoryService {
                         .min(budget.limits.max_output_bytes.saturating_sub(128 * 1024) / 6)
                         .saturating_sub(bytes),
                 )
-                .min(budget.retained_remaining()),
+                .min(budget.retained_remaining() / if wire { WIRE_SAMPLE_RETAINED } else { 1 }),
             max_work: self
                 .limits
                 .total_work
                 .min(budget.limits.max_work)
                 .saturating_sub(work)
-                .min(budget.work_remaining()),
+                .min(budget.work_remaining() / if wire { WIRE_SAMPLE_WORK } else { 1 }),
             deadline: budget.deadline,
             cancellation: budget.cancel.clone(),
         }
@@ -694,7 +722,7 @@ impl HistoryService {
                 }
                 validate_zone(timezone)?;
                 let unit = match row.get("unit") {
-                    None => None,
+                    None if kind != HistoryKind::Number => None,
                     Some(Kind::Str(unit))
                         if kind == HistoryKind::Number
                             && unit.len() <= 128
@@ -815,12 +843,38 @@ impl HistoryService {
         })
     }
 }
+// Conservative source-based reservations for the selected scalar-only H4
+// codecs, charged before source copies. Per sample: the original and grid
+// clone, JSON value tree or Zinc scalar/row strings, worst-case 6x escaping,
+// output/string/Vec growth and fixed row nodes all fit within 64 times the
+// 512-byte structural allowance plus string/unit bytes. Work reserves 32
+// source traversals/escaped-output bytes. These are accounting bounds, not
+// measurements of allocator usage. No reservation is refunded between stages.
+const WIRE_SAMPLE_RETAINED: usize = 64;
+const WIRE_SAMPLE_WORK: usize = 32;
+fn reserve_wire_metadata(
+    budget: &mut Budget,
+    request: &HistoryReadRequest,
+    schema: &HistorySchema,
+) -> Result<(), ReadError> {
+    // Fixed control nodes, containers and numeric/identity fields plus up to
+    // eight timezone-bearing metadata timestamps and repeated dynamic text.
+    let text = request
+        .id
+        .len()
+        .saturating_add(request.range.len())
+        .saturating_add(schema.unit.as_ref().map_or(0, String::len))
+        .saturating_add(schema.timezone.len().saturating_mul(8));
+    let reserve = (64usize * 1024).saturating_add(text.saturating_mul(128));
+    budget.charge(BudgetKind::Retained, reserve)?;
+    budget.charge(BudgetKind::Work, reserve)
+}
 fn valid_value(value: &Kind, schema: &HistorySchema) -> bool {
     match (value, schema.kind) {
         (Kind::NA, _) => true,
         (Kind::Bool(_), HistoryKind::Bool) | (Kind::Str(_), HistoryKind::Str) => true,
         (Kind::Number(number), HistoryKind::Number) => match &number.unit {
-            None => true,
+            None => !number.val.is_nan() || number.val.to_bits() == f64::NAN.to_bits(),
             Some(unit) => {
                 !number.val.is_nan()
                     && schema
@@ -972,6 +1026,9 @@ impl HistoryReadSession {
         }
     }
     pub async fn collect(mut self) -> Result<HistoryReadResult, ReadError> {
+        self.collect_borrowed().await
+    }
+    async fn collect_borrowed(&mut self) -> Result<HistoryReadResult, ReadError> {
         let mut samples = Vec::new();
         loop {
             let mut batch = self.next().await;

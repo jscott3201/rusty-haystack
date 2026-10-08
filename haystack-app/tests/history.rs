@@ -836,3 +836,363 @@ async fn bool_and_string_schemas_preserve_original_values_and_na() {
         assert_eq!(result.samples[1].val, Kind::NA);
     }
 }
+
+struct ReviewProbe {
+    store: HisStore,
+    opens: Arc<AtomicUsize>,
+    max_bytes: Arc<AtomicUsize>,
+    omit_second: Option<i64>,
+}
+struct ReviewProbeSession {
+    inner: Box<dyn HistorySession>,
+    max_bytes: Arc<AtomicUsize>,
+    omit_second: Option<i64>,
+}
+impl HistoryProvider for ReviewProbe {
+    fn open(
+        &self,
+        id: String,
+        start: DateTime<FixedOffset>,
+        end: DateTime<FixedOffset>,
+        budget: HistoryPullBudget,
+    ) -> HistoryFuture<'_, Box<dyn HistorySession>> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(Box::new(ReviewProbeSession {
+                inner: self.store.open(id, start, end, budget).await?,
+                max_bytes: self.max_bytes.clone(),
+                omit_second: self.omit_second,
+            }) as Box<dyn HistorySession>)
+        })
+    }
+    fn his_write(&self, id: &str, items: Vec<HisItem>) -> HistoryFuture<'_, ()> {
+        self.store.his_write(id, items)
+    }
+}
+impl HistorySession for ReviewProbeSession {
+    fn metadata(&self) -> &ProviderHistoryMetadata {
+        self.inner.metadata()
+    }
+    fn pull(&mut self, budget: HistoryPullBudget) -> HistoryFuture<'_, ProviderHistoryBatch> {
+        self.max_bytes.fetch_max(budget.max_bytes, Ordering::SeqCst);
+        Box::pin(async move {
+            loop {
+                let mut batch = self.inner.pull(budget.clone()).await?;
+                if let Some(second) = self.omit_second {
+                    batch
+                        .items
+                        .retain(|sample| sample.ts != item(second, Kind::NA).ts);
+                }
+                if !batch.items.is_empty() || batch.terminal.is_some() {
+                    return Ok(batch);
+                }
+            }
+        })
+    }
+    fn close(&mut self) -> HistoryFuture<'_, ()> {
+        self.inner.close()
+    }
+}
+fn review_probe(items: Vec<HisItem>, omit_second: Option<i64>) -> Arc<ReviewProbe> {
+    let store = HisStore::new();
+    store.write("p", items).unwrap();
+    Arc::new(ReviewProbe {
+        store,
+        opens: Arc::new(AtomicUsize::new(0)),
+        max_bytes: Arc::new(AtomicUsize::new(0)),
+        omit_second,
+    })
+}
+#[tokio::test]
+async fn review_number_point_requires_unit_before_provider_but_sample_may_be_unitless() {
+    let graph = graph("Number", "UTC");
+    let mut change = HDict::new();
+    change.set("unit", Kind::Remove);
+    graph.update("p", change).unwrap();
+    let probe = review_probe(vec![item(0, number(3.0))], None);
+    let reader = service(probe.clone(), graph, HistoryLimits::default());
+    assert!(matches!(
+        reader.open(context("a"), request()).await,
+        Err(ReadError::Projection)
+    ));
+    assert_eq!(probe.opens.load(Ordering::SeqCst), 0);
+    let reader = service(
+        probe.clone(),
+        crate::graph("Number", "UTC"),
+        HistoryLimits::default(),
+    );
+    let result = reader.collect(context("a"), request()).await.unwrap();
+    assert_eq!(result.terminal, HistoryTerminal::Complete);
+    assert_eq!(result.samples[0].val, number(3.0));
+}
+#[tokio::test]
+async fn review_complete_requires_each_in_range_endpoint_across_batches() {
+    for (start, end, omit, batch_rows) in [
+        (0, 15, 0, 2),
+        (5, 21, 20, 2),
+        (5, 21, 20, 1),
+        (0, 21, 20, 1),
+    ] {
+        for omitted in [Some(omit), None] {
+            let probe = review_probe(
+                [0, 10, 20].map(|s| item(s, number(s as f64))).to_vec(),
+                omitted,
+            );
+            let reader = service(
+                probe,
+                graph("Number", "UTC"),
+                HistoryLimits {
+                    batch_rows,
+                    ..HistoryLimits::default()
+                },
+            );
+            let result = reader
+                .collect(
+                    context("a"),
+                    HistoryReadRequest {
+                        id: "p".into(),
+                        range: format!(
+                            "2024-06-01T00:00:{start:02}Z UTC,2024-06-01T00:00:{end:02}Z UTC"
+                        ),
+                    },
+                )
+                .await
+                .unwrap();
+            if omitted.is_some() {
+                assert_eq!(
+                    result.terminal,
+                    HistoryTerminal::Failed(HistoryReason::InvalidProvider),
+                    "range {start}..{end}, batch {batch_rows}"
+                );
+                assert!(
+                    !result.samples.is_empty(),
+                    "admitted partial samples survive"
+                );
+            } else {
+                assert_eq!(result.terminal, HistoryTerminal::Complete);
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn review_noncanonical_nan_is_unsupported_without_losing_prefix() {
+    for bits in [
+        0x7ff8_0000_0000_0001,
+        0xfff8_0000_0000_0000,
+        0x7ff0_0000_0000_0001,
+    ] {
+        let probe = review_probe(
+            vec![item(0, number(1.0)), item(1, number(f64::from_bits(bits)))],
+            None,
+        );
+        let result = service(probe, graph("Number", "UTC"), HistoryLimits::default())
+            .collect(context("a"), request())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.terminal,
+            HistoryTerminal::Failed(HistoryReason::UnsupportedValue)
+        );
+        assert_eq!(result.samples.len(), 1);
+    }
+    let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+    let probe = review_probe(
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, n)| item(i as i64, number(*n)))
+            .collect(),
+        None,
+    );
+    let result = service(probe, graph("Number", "UTC"), HistoryLimits::default())
+        .collect(context("a"), request())
+        .await
+        .unwrap();
+    assert_eq!(result.terminal, HistoryTerminal::Complete);
+    for (sample, expected) in result.samples.iter().zip(values) {
+        let Kind::Number(n) = &sample.val else {
+            panic!()
+        };
+        assert_eq!(n.val.to_bits(), expected.to_bits());
+    }
+}
+#[tokio::test]
+async fn review_wire_reserves_encoder_headroom_before_provider_copies_for_scoped_and_legacy() {
+    use haystack_core::codecs::{codec_for, history};
+    for scoped in [true, false] {
+        for max_retained_bytes in [128 * 1024, 16 * 1024 * 1024] {
+            for output in [H4Codec::Zinc, H4Codec::JsonV3, H4Codec::Json] {
+                let probe = review_probe(
+                    vec![
+                        item(0, Kind::Str("prefix".into())),
+                        item(1, Kind::Str("x".repeat(70_000))),
+                    ],
+                    None,
+                );
+                let reads = ReadService::new(
+                    graph("Str", "UTC"),
+                    Arc::new(AllowAll),
+                    ReadLimits {
+                        max_retained_bytes,
+                        ..ReadLimits::default()
+                    },
+                )
+                .unwrap();
+                let reader =
+                    HistoryService::new(reads.clone(), probe.clone(), HistoryLimits::default())
+                        .unwrap();
+                let codec = codec_for("text/zinc").unwrap();
+                let mut grid = history::request_grid(&request()).unwrap();
+                if !scoped {
+                    grid.meta.remove_tag("history");
+                }
+                let body = codec.encode_grid(&grid).unwrap().into_bytes();
+                let admission = reads.begin(context("a")).await.unwrap();
+                let reply = if scoped {
+                    reader
+                        .wire_admitted(admission, body, H4Codec::Zinc, output)
+                        .await
+                } else {
+                    reader
+                        .legacy_wire_admitted(admission, body, H4Codec::Zinc, output)
+                        .await
+                };
+                let small = max_retained_bytes == 128 * 1024;
+                if small {
+                    assert!(
+                        probe.max_bytes.load(Ordering::SeqCst) < 70_512,
+                        "source clone allowance must reserve final construction headroom first"
+                    );
+                }
+                if scoped {
+                    let result =
+                        history::decode_result(&reply.unwrap(), codec_for(output.mime()).unwrap())
+                            .unwrap();
+                    assert_eq!(result.samples.len(), if small { 1 } else { 2 });
+                    assert_eq!(
+                        result.terminal,
+                        if small {
+                            HistoryTerminal::Limited(HistoryReason::Bytes)
+                        } else {
+                            HistoryTerminal::Complete
+                        }
+                    );
+                } else if small {
+                    assert!(matches!(reply, Err(ReadError::UnitTooLarge)));
+                } else {
+                    let bytes = reply.unwrap();
+                    let grid = codec_for(output.mime())
+                        .unwrap()
+                        .decode_grid(std::str::from_utf8(&bytes).unwrap())
+                        .unwrap();
+                    assert_eq!(grid.rows.len(), 2);
+                }
+            }
+        }
+    }
+}
+
+struct FinalStopProvider {
+    store: HisStore,
+    cancel: CancellationToken,
+    expire_at: Option<std::time::Instant>,
+    closes: Arc<AtomicUsize>,
+}
+struct FinalStopSession {
+    inner: Box<dyn HistorySession>,
+    cancel: CancellationToken,
+    expire_at: Option<std::time::Instant>,
+    closes: Arc<AtomicUsize>,
+}
+impl HistoryProvider for FinalStopProvider {
+    fn open(
+        &self,
+        id: String,
+        start: DateTime<FixedOffset>,
+        end: DateTime<FixedOffset>,
+        budget: HistoryPullBudget,
+    ) -> HistoryFuture<'_, Box<dyn HistorySession>> {
+        Box::pin(async move {
+            Ok(Box::new(FinalStopSession {
+                inner: self.store.open(id, start, end, budget).await?,
+                cancel: self.cancel.clone(),
+                expire_at: self.expire_at,
+                closes: self.closes.clone(),
+            }) as Box<dyn HistorySession>)
+        })
+    }
+    fn his_write(&self, id: &str, items: Vec<HisItem>) -> HistoryFuture<'_, ()> {
+        self.store.his_write(id, items)
+    }
+}
+impl HistorySession for FinalStopSession {
+    fn metadata(&self) -> &ProviderHistoryMetadata {
+        self.inner.metadata()
+    }
+    fn pull(&mut self, budget: HistoryPullBudget) -> HistoryFuture<'_, ProviderHistoryBatch> {
+        self.inner.pull(budget)
+    }
+    fn close(&mut self) -> HistoryFuture<'_, ()> {
+        Box::pin(async move {
+            self.inner.close().await?;
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            if let Some(expire_at) = self.expire_at {
+                // A synchronous provider close can complete after the absolute
+                // deadline before this current-thread runtime polls its timer.
+                std::thread::sleep(expire_at.saturating_duration_since(std::time::Instant::now()));
+            } else {
+                self.cancel.cancel();
+            }
+            Ok(())
+        })
+    }
+}
+#[tokio::test]
+async fn review_final_collector_stage_honors_cancellation_and_absolute_deadline() {
+    use haystack_core::codecs::{codec_for, history};
+    for scoped in [true, false] {
+        for deadline in [false, true] {
+            let context =
+                ReadContext::with_timeout(Principal::Anonymous, Duration::from_millis(250));
+            let closes = Arc::new(AtomicUsize::new(0));
+            let store = HisStore::new();
+            store.write("p", vec![item(0, number(1.0))]).unwrap();
+            let provider = Arc::new(FinalStopProvider {
+                store,
+                cancel: context.cancellation.clone(),
+                expire_at: deadline.then_some(context.deadline + Duration::from_millis(1)),
+                closes: closes.clone(),
+            });
+            let reader = service(provider, graph("Number", "UTC"), HistoryLimits::default());
+            let mut grid = history::request_grid(&request()).unwrap();
+            if !scoped {
+                grid.meta.remove_tag("history");
+            }
+            let body = codec_for("text/zinc")
+                .unwrap()
+                .encode_grid(&grid)
+                .unwrap()
+                .into_bytes();
+            let admission = reader.read_service().begin(context).await.unwrap();
+            let reply = if scoped {
+                reader
+                    .wire_admitted(admission, body, H4Codec::Zinc, H4Codec::Zinc)
+                    .await
+            } else {
+                reader
+                    .legacy_wire_admitted(admission, body, H4Codec::Zinc, H4Codec::Zinc)
+                    .await
+            };
+            assert_eq!(
+                closes.load(Ordering::SeqCst),
+                1,
+                "provider reached final stage"
+            );
+            if deadline {
+                assert!(matches!(reply, Err(ReadError::Deadline)));
+            } else {
+                assert!(matches!(reply, Err(ReadError::Cancelled)));
+            }
+        }
+    }
+}

@@ -264,3 +264,51 @@ async fn missing_marker_unsupported_formats_and_denied_points_do_not_open_provid
     owner.close().await.unwrap();
     owner.terminated().await;
 }
+
+#[tokio::test]
+async fn noncanonical_nan_never_silently_changes_through_scoped_http() {
+    let (owner, url, service, _) = setup(100).await;
+    for value in [
+        f64::from_bits(0x7ff8_0000_0000_0001),
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        service
+            .provider()
+            .his_write(
+                "p",
+                vec![HisItem {
+                    ts: time("2024-06-01T12:00:00Z"),
+                    val: Kind::Number(Number::unitless(value)),
+                }],
+            )
+            .await
+            .unwrap();
+        for mime in ["text/zinc", "application/json", "application/json;v=3"] {
+            let client = HaystackClient::from_transport(HttpTransport::with_format(
+                &url,
+                String::new(),
+                mime,
+            ));
+            let result = client.his_read_scoped(&request()).await.unwrap();
+            if value.to_bits() == 0x7ff8_0000_0000_0001 {
+                assert_eq!(
+                    result.terminal,
+                    HistoryTerminal::Failed(HistoryReason::UnsupportedValue)
+                );
+                assert_eq!(result.samples.len(), 1);
+                assert_eq!(result.samples[0].val, Kind::Number(Number::unitless(0.0)));
+            } else {
+                assert_eq!(result.terminal, HistoryTerminal::Complete);
+                assert_eq!(result.samples.len(), 3);
+                let Kind::Number(actual) = &result.samples[1].val else {
+                    panic!()
+                };
+                assert_eq!(actual.val.to_bits(), value.to_bits());
+            }
+        }
+    }
+    owner.close().await.unwrap();
+    owner.terminated().await;
+}

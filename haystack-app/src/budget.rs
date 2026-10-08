@@ -5,6 +5,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Clones share cumulative counters and the original work lease.
+#[derive(Clone)]
 pub(crate) struct Budget {
     pub limits: Arc<ReadLimits>,
     pub deadline: Instant,
@@ -12,6 +14,10 @@ pub(crate) struct Budget {
     pub owner_cancel: Option<CancellationToken>,
     pub owner_sealed: Option<CancellationToken>,
     pub lease: Option<Arc<crate::service::WorkLease>>,
+    usage: Arc<parking_lot::Mutex<Usage>>,
+}
+#[derive(Default)]
+struct Usage {
     work: usize,
     retained: usize,
     values: usize,
@@ -19,6 +25,7 @@ pub(crate) struct Budget {
     forward: usize,
     inverse: usize,
 }
+
 impl Budget {
     pub fn new(limits: Arc<ReadLimits>, deadline: Instant, cancel: CancellationToken) -> Self {
         Self {
@@ -28,19 +35,16 @@ impl Budget {
             owner_cancel: None,
             owner_sealed: None,
             lease: None,
-            work: 0,
-            retained: 0,
-            values: 0,
-            candidates: 0,
-            forward: 0,
-            inverse: 0,
+            usage: Arc::new(parking_lot::Mutex::new(Usage::default())),
         }
     }
     pub fn work_remaining(&self) -> usize {
-        self.limits.max_work.saturating_sub(self.work)
+        self.limits.max_work.saturating_sub(self.usage.lock().work)
     }
     pub fn retained_remaining(&self) -> usize {
-        self.limits.max_retained_bytes.saturating_sub(self.retained)
+        self.limits
+            .max_retained_bytes
+            .saturating_sub(self.usage.lock().retained)
     }
     pub fn check(&self) -> Result<(), ReadError> {
         if Instant::now() >= self.deadline {
@@ -76,13 +80,14 @@ impl Budget {
     }
     pub fn charge(&mut self, kind: BudgetKind, amount: usize) -> Result<(), ReadError> {
         self.check()?;
+        let mut usage = self.usage.lock();
         let (used, limit) = match kind {
-            BudgetKind::Work => (&mut self.work, self.limits.max_work),
-            BudgetKind::Retained => (&mut self.retained, self.limits.max_retained_bytes),
-            BudgetKind::Values => (&mut self.values, self.limits.max_value_nodes),
-            BudgetKind::Candidates => (&mut self.candidates, self.limits.max_candidates),
-            BudgetKind::Forward => (&mut self.forward, self.limits.max_forward_edges),
-            BudgetKind::Inverse => (&mut self.inverse, self.limits.max_inverse_edges),
+            BudgetKind::Work => (&mut usage.work, self.limits.max_work),
+            BudgetKind::Retained => (&mut usage.retained, self.limits.max_retained_bytes),
+            BudgetKind::Values => (&mut usage.values, self.limits.max_value_nodes),
+            BudgetKind::Candidates => (&mut usage.candidates, self.limits.max_candidates),
+            BudgetKind::Forward => (&mut usage.forward, self.limits.max_forward_edges),
+            BudgetKind::Inverse => (&mut usage.inverse, self.limits.max_inverse_edges),
             _ => return Err(ReadError::Budget(kind)),
         };
         if amount > limit.saturating_sub(*used) {
@@ -103,5 +108,35 @@ impl Budget {
         self.charge(BudgetKind::Work, value.len().saturating_add(1))?;
         self.charge(BudgetKind::Retained, value.len().saturating_add(32))?;
         Ok(value.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn shared_budget_keeps_cumulative_charges_and_cancellation() {
+        let limits = Arc::new(ReadLimits {
+            max_work: 100,
+            max_retained_bytes: 100,
+            ..ReadLimits::default()
+        });
+        let mut producer = Budget::new(
+            limits,
+            Instant::now() + Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        producer.charge(BudgetKind::Retained, 20).unwrap();
+        let mut collector = producer.clone();
+        producer.charge(BudgetKind::Retained, 60).unwrap();
+        collector.charge(BudgetKind::Work, 70).unwrap();
+        assert_eq!(collector.retained_remaining(), 20);
+        assert_eq!(producer.work_remaining(), 30);
+        assert!(matches!(
+            collector.charge(BudgetKind::Retained, 21),
+            Err(ReadError::Budget(BudgetKind::Retained))
+        ));
+        producer.cancel.cancel();
+        assert!(matches!(collector.check(), Err(ReadError::Cancelled)));
     }
 }

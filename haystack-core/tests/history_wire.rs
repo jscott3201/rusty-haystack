@@ -162,3 +162,82 @@ fn schema_order_range_and_control_version_are_strict() {
         .is_err()
     );
 }
+
+#[test]
+fn review_number_point_unit_is_required_but_samples_can_be_unitless() {
+    let mut value = result();
+    value.metadata.schema.unit = None;
+    value.samples[0].val = Kind::Number(Number::unitless(12.5));
+    assert!(result_grid(&value).is_err());
+    value.metadata.schema.unit = Some("°C".into());
+    let mut grid = result_grid(&value).unwrap();
+    rewrite_control(&mut grid, "unit", Kind::Null);
+    assert!(result_from_grid(&grid).is_err());
+}
+fn rewrite_control(grid: &mut haystack_core::data::HGrid, key: &str, value: Kind) {
+    let Some(Kind::Str(control)) = grid.meta.get("history") else {
+        panic!()
+    };
+    let Kind::Dict(mut control) = typed::decode(control.as_bytes()).unwrap() else {
+        panic!()
+    };
+    control.set(key, value);
+    grid.meta.set(
+        "history",
+        Kind::Str(String::from_utf8(typed::encode(&Kind::Dict(control)).unwrap()).unwrap()),
+    );
+}
+#[test]
+fn review_complete_requires_prefix_and_suffix_retained_endpoints() {
+    for prefix in [true, false] {
+        let mut value = result();
+        if prefix {
+            value.metadata.end = dt("2024-06-01T13:00:00Z");
+            value.samples.pop();
+            value.samples.remove(0);
+        } else {
+            value.metadata.start = dt("2024-06-01T01:00:00Z");
+            value.samples.remove(0);
+            value.samples.pop();
+        }
+        assert!(result_grid(&value).is_err(), "missing known endpoint");
+        for terminal in [
+            HistoryTerminal::Limited(HistoryReason::Rows),
+            HistoryTerminal::Interrupted(HistoryReason::Cancelled),
+            HistoryTerminal::Failed(HistoryReason::Provider),
+        ] {
+            value.terminal = terminal;
+            let mut grid = result_grid(&value).unwrap();
+            rewrite_control(&mut grid, "terminal", Kind::Str("complete".into()));
+            rewrite_control(&mut grid, "reason", Kind::Str("none".into()));
+            assert!(result_from_grid(&grid).is_err());
+        }
+    }
+}
+#[test]
+fn review_h4_nan_identity_in_all_three_codecs() {
+    for mime in ["text/zinc", "application/json", "application/json;v=3"] {
+        let codec = codec_for(mime).unwrap();
+        for bits in [
+            0x7ff8_0000_0000_0001,
+            0xfff8_0000_0000_0000,
+            0x7ff0_0000_0000_0001,
+        ] {
+            let mut value = result();
+            value.samples[0].val = Kind::Number(Number::unitless(f64::from_bits(bits)));
+            assert!(
+                encode_result(&value, codec).is_err(),
+                "noncanonical NaN admitted by {mime}"
+            );
+        }
+        for n in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut value = result();
+            value.samples[0].val = Kind::Number(Number::unitless(n));
+            let decoded = decode_result(&encode_result(&value, codec).unwrap(), codec).unwrap();
+            let Kind::Number(actual) = &decoded.samples[0].val else {
+                panic!()
+            };
+            assert_eq!(actual.val.to_bits(), n.to_bits());
+        }
+    }
+}
