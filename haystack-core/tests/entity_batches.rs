@@ -460,3 +460,81 @@ fn lower_equal_and_higher_revision_replacements_all_emit_reset_wakes() {
         );
     }
 }
+
+#[test]
+fn zero_plan_allowance_rejects_before_target_validation() {
+    let graph = EntityGraph::new();
+    let operations = vec![EntityOperation::Add(HDict::new()); 16_384];
+    for (max_work, max_retained_bytes) in [(0, usize::MAX), (usize::MAX, 0)] {
+        assert!(matches!(
+            graph.prepare_batch(
+                0,
+                &operations,
+                BatchLimits {
+                    max_operations: operations.len(),
+                    max_work,
+                    max_retained_bytes,
+                    ..BatchLimits::default()
+                }
+            ),
+            Err(BatchError::Limit)
+        ));
+    }
+    assert!(graph.is_empty());
+    assert_eq!(graph.version(), 0);
+    assert!(graph.change_units_since(0).unwrap().next().is_none());
+}
+
+#[test]
+fn large_existing_value_bucket_respects_public_preparation_byte_limit() {
+    const COUNT: usize = 100_000;
+    let mut graph = EntityGraph::with_changelog_capacity(2);
+    graph.index_field("n");
+    for id in 0..COUNT {
+        let mut row = HDict::new();
+        row.set("id", Kind::Ref(HRef::from_val(format!("p{id}"))));
+        row.set("n", Kind::Number(Number::unitless(1.0)));
+        graph.add(row).unwrap();
+    }
+    let before = graph.state();
+    let mut row = HDict::new();
+    row.set("id", Kind::Ref(HRef::from_val("added")));
+    row.set("n", Kind::Number(Number::unitless(1.0)));
+    let operations = [EntityOperation::Add(row)];
+    let required_ids = (COUNT + 1) * std::mem::size_of::<usize>();
+    assert!(matches!(
+        graph.prepare_batch(
+            before.revision,
+            &operations,
+            BatchLimits {
+                max_retained_bytes: required_ids - 1,
+                ..BatchLimits::default()
+            }
+        ),
+        Err(BatchError::Limit)
+    ));
+    assert_eq!(graph.state(), before);
+    assert!(graph.get("added").is_none());
+    assert!(
+        graph
+            .change_units_since(before.revision)
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    let prepared = graph
+        .prepare_batch(
+            before.revision,
+            &operations,
+            BatchLimits {
+                max_retained_bytes: 1024 * 1024,
+                ..BatchLimits::default()
+            },
+        )
+        .unwrap();
+    assert!(prepared.retained_bytes() >= required_ids);
+    assert!(prepared.retained_bytes() <= 1024 * 1024);
+    graph.apply_prepared(prepared).unwrap();
+    assert_eq!(graph.version(), before.revision + 1);
+    assert_eq!(graph.read_all("n == 1", 0).unwrap().len(), COUNT + 1);
+}

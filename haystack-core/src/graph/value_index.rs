@@ -262,6 +262,12 @@ impl ValueIndex {
         changes: &[super::entity_graph::IndexChange<'_>],
         budget: &mut super::size::ValueBudget,
     ) -> Result<PreparedValues, ()> {
+        budget.charge(changes.len(), 0)?;
+        // Each changed row can add at most one ID to any particular bucket.
+        let possible_additions = changes
+            .iter()
+            .filter(|change| change.after.is_some())
+            .count();
         let mut entries = BTreeMap::new();
         for change in changes {
             for (row, add) in [(change.before, false), (change.after, true)] {
@@ -299,12 +305,20 @@ impl ValueIndex {
                         if !entries.contains_key(&slot) {
                             let current = tree.get(&slot.1);
                             let len = current.map_or(0, Vec::len);
-                            budget.charge(
-                                len,
-                                len.saturating_mul(std::mem::size_of::<usize>())
-                                    .saturating_add(64),
-                            )?;
-                            entries.insert(slot.clone(), current.cloned().unwrap_or_default());
+                            let capacity = len.checked_add(possible_additions).ok_or(())?;
+                            let bytes = std::alloc::Layout::array::<usize>(capacity)
+                                .map_err(|_| ())?
+                                .size()
+                                .checked_add(64)
+                                .ok_or(())?;
+                            budget.charge(len, bytes)?;
+                            // Copy directly into the final capacity. Cloning a full
+                            // Vec and then pushing would double its allocation.
+                            let mut ids = Vec::with_capacity(capacity);
+                            if let Some(current) = current {
+                                ids.extend_from_slice(current);
+                            }
+                            entries.insert(slot.clone(), ids);
                         }
                         let ids = entries.get_mut(&slot).expect("prepared value bucket");
                         if add {
@@ -338,6 +352,43 @@ impl ValueIndex {
 mod tests {
     use super::*;
     use crate::kinds::Number;
+
+    #[test]
+    fn prepared_bucket_capacity_is_charged_before_copy_and_growth() {
+        use crate::{
+            data::HDict,
+            graph::{entity_graph::IndexChange, size::ValueBudget},
+        };
+        const COUNT: usize = 100_000;
+        let mut index = ValueIndex::new();
+        index.index_field("n");
+        let value = Kind::Number(Number::unitless(1.0));
+        for id in 0..COUNT {
+            index.add(id, "n", &value);
+        }
+        let mut row = HDict::new();
+        row.set("n", value);
+        let changes = [IndexChange {
+            id: COUNT,
+            before: None,
+            after: Some(&row),
+        }];
+        let mut budget = ValueBudget::new(1_000_000, 1024 * 1024, 32);
+        let prepared = index.prepare_changes(&changes, &mut budget).unwrap();
+        let bucket = prepared.entries.values().next().unwrap();
+        let allocated = bucket.capacity() * std::mem::size_of::<usize>();
+        assert!(
+            allocated <= budget.used_bytes(),
+            "bucket capacity retains {allocated} bytes, but preparation charged only {}",
+            budget.used_bytes()
+        );
+        assert!(budget.used_bytes() <= 1024 * 1024);
+        assert!(bucket.iter().copied().eq(0..=COUNT));
+        let required_ids = (COUNT + 1) * std::mem::size_of::<usize>();
+        let mut too_small = ValueBudget::new(1_000_000, required_ids - 1, 32);
+        assert!(index.prepare_changes(&changes, &mut too_small).is_err());
+        assert_eq!(index.indexes["n"].values().next().unwrap().len(), COUNT);
+    }
 
     #[test]
     fn eq_lookup_returns_matching_ids() {

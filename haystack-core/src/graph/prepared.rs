@@ -1,6 +1,6 @@
 //! Opaque atomic entity plans. Preparation is fallible; publication moves a
 //! completely validated plan without CRUD callbacks, awaits, or rollback.
-use std::collections::HashSet;
+use std::{alloc::Layout, collections::HashSet};
 
 use super::super::{
     adjacency::PreparedAdjacency,
@@ -118,6 +118,24 @@ impl PreparedBatch {
     }
 }
 
+/// Heap storage for every operation-sized vector, including temporary index
+/// inputs and reusable numeric IDs. Layout rejects capacity overflow without
+/// allocating; the summed charge must succeed before any vector is constructed.
+fn plan_buffer_bytes(operations: usize) -> Result<usize, BatchError> {
+    [
+        Layout::array::<PreparedChange>(operations),
+        Layout::array::<GraphDiff>(operations),
+        Layout::array::<usize>(operations),
+        Layout::array::<IndexChange<'_>>(operations),
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, layout| {
+        total
+            .checked_add(layout.map_err(|_| BatchError::Limit)?.size())
+            .ok_or(BatchError::Limit)
+    })
+}
+
 impl EntityGraph {
     pub fn prepare_batch(
         &self,
@@ -142,11 +160,14 @@ impl EntityGraph {
             limits.max_retained_bytes,
             limits.max_value_depth,
         );
+        budget
+            .charge(operations.len(), plan_buffer_bytes(operations.len())?)
+            .map_err(|_| BatchError::Limit)?;
         let mut seen = HashSet::new();
         let mut changes = Vec::with_capacity(operations.len());
         let mut diffs = Vec::with_capacity(operations.len());
         let mut free_ids_consumed = 0;
-        let mut freed_ids = Vec::new();
+        let mut freed_ids = Vec::with_capacity(operations.len());
         let mut next_id = self.next_id;
         let mut revision = self.version;
         for operation in operations {
@@ -342,15 +363,17 @@ impl EntityGraph {
                 )
                 .map_err(|_| BatchError::Limit)?;
         }
-        let indexed: Vec<_> = changes
-            .iter()
-            .filter(|change| change.changed)
-            .map(|change| IndexChange {
-                id: change.numeric_id,
-                before: change.before.as_ref(),
-                after: change.after.as_ref(),
-            })
-            .collect();
+        let mut indexed = Vec::with_capacity(operations.len());
+        indexed.extend(
+            changes
+                .iter()
+                .filter(|change| change.changed)
+                .map(|change| IndexChange {
+                    id: change.numeric_id,
+                    before: change.before.as_ref(),
+                    after: change.after.as_ref(),
+                }),
+        );
         let tags = self
             .tag_index
             .prepare_changes(&indexed, &mut budget)
@@ -478,6 +501,11 @@ mod tests {
         row.set("id", Kind::Ref(HRef::from_val(id)));
         row
     }
+    #[test]
+    fn plan_vector_layout_overflow_is_a_limit_error_without_allocation() {
+        assert_eq!(plan_buffer_bytes(usize::MAX), Err(BatchError::Limit));
+    }
+
     #[test]
     fn revision_capacity_is_checked_before_native_or_batch_effects() {
         let mut graph = EntityGraph::new();

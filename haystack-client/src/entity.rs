@@ -5,9 +5,10 @@ use crate::{
     transport::{Transport, http::HttpTransport},
 };
 use haystack_core::codecs::entity::{
-    self, ChangesPage, ChangesRequest, EntityBatchRequest, MutationOutcome, OperationIdentity,
-    UnknownCause,
+    self, ChangesPage, ChangesRequest, EntityBatchRequest, EntityReceipt, MutationOutcome,
+    OperationIdentity, UnknownCause,
 };
+use haystack_core::graph::{CommitSpan, EntityOperation};
 
 /// Opt-in contract for entity extension requests. A `call` sends at most once;
 /// it must not retry a mutation after a connection/body/acknowledgement failure.
@@ -46,7 +47,7 @@ impl<T: EntityTransport> HaystackClient<T> {
             Err(_) => return Ok(unknown(UnknownCause::InvalidAcknowledgement)),
         };
         if outcome.identity() != &request.identity
-            || matches!(&outcome,MutationOutcome::Committed(r) if r.before_revision!=request.expected_revision)
+            || matches!(&outcome,MutationOutcome::Committed(r) if !matches_request(request, r))
         {
             return Ok(unknown(UnknownCause::InvalidAcknowledgement));
         }
@@ -83,4 +84,29 @@ impl<T: EntityTransport> HaystackClient<T> {
         entity::from_grid(&response)
             .map_err(|_| ClientError::Codec("invalid entity changes acknowledgement".into()))
     }
+}
+
+/// A committed result must account for every requested revision. Equality of
+/// row values does not suppress a nonempty patch; only an empty patch is a no-op.
+fn matches_request(request: &EntityBatchRequest, receipt: &EntityReceipt) -> bool {
+    let changed = request.operations.iter().filter(|operation| {
+        !matches!(operation, EntityOperation::Patch { changes, .. } if changes.is_empty())
+    }).count();
+    let Ok(changed) = u64::try_from(changed) else {
+        return false;
+    };
+    let Some(after) = request.expected_revision.checked_add(changed) else {
+        return false;
+    };
+    let span = if changed == 0 {
+        None
+    } else {
+        let Some(first) = request.expected_revision.checked_add(1) else {
+            return false;
+        };
+        Some(CommitSpan { first, last: after })
+    };
+    receipt.before_revision == request.expected_revision
+        && receipt.after_revision == after
+        && receipt.span == span
 }

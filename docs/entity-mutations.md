@@ -71,7 +71,10 @@ evicted to make an ID reusable. Failures before provider admission create no
 binding; a provider-admitted guaranteed rejection remains bound to its original
 intent. Dropping an admitted provider plan leaves a pending binding. Missing
 receipts are `Unknown`, including after recreation of the store, and never prove
-no effect. No mutation is automatically replayed after uncertainty.
+no effect. No mutation is automatically replayed after uncertainty. The submitting client
+checks the committed revision range and span against the exact request: adds,
+removes and nonempty patches each advance once; empty patches do not. An
+inconsistent acknowledgement remains `Unknown` with its original identity.
 
 The selected store is **ephemeral process memory**. Retaining its handle permits a
 new service to reconcile the same surviving state. A new store gets a new dataset;
