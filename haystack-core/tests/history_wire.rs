@@ -241,3 +241,28 @@ fn review_h4_nan_identity_in_all_three_codecs() {
         }
     }
 }
+
+#[path = "fixtures/finite_numbers.rs"]
+mod finite_numbers;
+#[test]
+fn second_review_finite_number_oracle_preserves_original_bits_in_all_h4_formats() {
+    for (number, bits) in finite_numbers::FINITE_NUMBERS {
+        assert_eq!(number.to_bits(), bits, "independent fixture bits");
+        for unit in [None, Some("°C".to_owned())] {
+            let mut original = result();
+            original.samples[0].val = Kind::Number(Number::new(number, unit.clone()));
+            for mime in ["text/zinc", "application/json", "application/json;v=3"] {
+                let codec = codec_for(mime).unwrap();
+                let decoded =
+                    decode_result(&encode_result(&original, codec).unwrap(), codec).unwrap();
+                validate_for_request(&decoded, &request()).unwrap();
+                assert_eq!(decoded.terminal, HistoryTerminal::Complete);
+                let Kind::Number(actual) = &decoded.samples[0].val else {
+                    panic!()
+                };
+                assert_eq!(actual.val.to_bits(), bits, "{mime}: {number:?}");
+                assert_eq!(actual.unit, unit);
+            }
+        }
+    }
+}

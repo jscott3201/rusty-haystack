@@ -70,7 +70,9 @@ A Number sample can be unitless or use the same registered unit identity as the
 point. Unit spelling and admitted numeric bits are preserved. The selected H4
 profile admits only the canonical unitless `f64::NAN` NaN representation; other
 NaN bit patterns and every unit-bearing NaN are unsupported. Canonical unitless
-NaN, infinities, and finite Number bits are preserved. A present non-string JSON
+NaN, infinities, and finite Number bits are preserved. The pinned JSON dependency
+uses its `float_roundtrip` parser feature to preserve finite IEEE-754 originals;
+this changes no dependency version or core default feature. A present non-string JSON
 v4 Number unit is a codec error.
 
 Timezone handling uses the existing optional core chrono-tz implementation and

@@ -52,7 +52,8 @@ rustc-hash = "2"
 # Security floor: GHSA-2mjx-qc3c-rqvc is fixed in 0.23.45.
 rustls = { version = "0.23.45", default-features = false }
 serde = "1.0"
-serde_json = "1.0"
+# H4 Number decoding must preserve the original finite f64 bit pattern.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 sha2 = "0.11"
 slotmap = "1.1"
 smallvec = "1.15"

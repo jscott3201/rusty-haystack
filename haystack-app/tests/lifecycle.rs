@@ -597,3 +597,62 @@ async fn cleanup_deadline_reports_failure_without_cancelling_cleanup_or_restarti
     assert_eq!(*probe.events.lock().unwrap(), vec!["cleanup completed"]);
     assert_eq!(probe.closed.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn second_review_drain_tracks_completed_worker_until_caller_observes_result() {
+    use std::{future::Future, task::Poll};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new(Barrier::new(2));
+        let app = ApplicationBuilder::new(
+            graph(),
+            Arc::new(Paused {
+                entered: entered_tx,
+                release: release.clone(),
+            }),
+            ReadLimits::default(),
+        )
+        .unwrap();
+        let handle = app.handle();
+        let owner = Arc::new(app.start(runtime.handle()).unwrap());
+        owner.ready().await.unwrap();
+        let reads = handle.read_service();
+        let body = reads.begin(context()).await.unwrap();
+        let closing = {
+            let owner = owner.clone();
+            tokio::spawn(async move { owner.close().await })
+        };
+        state(&handle, ApplicationState::Closing).await;
+        let mut result = Box::pin(body.read(request()));
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(result.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sentinel = tokio::task::spawn_blocking(|| ());
+        release.wait();
+        sentinel.await.unwrap();
+        // The original worker is finished, but its completed response has not
+        // been observed. Quiescence must not overtake this admitted caller.
+        let pending_load = reads.load().admitted;
+        let pending_tasks = handle.outstanding_tasks();
+        let outcome = result.await;
+        let close = closing.await.unwrap().unwrap();
+        owner.terminated().await;
+        assert_eq!(pending_load, 1, "request owns completion handoff");
+        assert_eq!(
+            pending_tasks, 1,
+            "same registration spans completion handoff"
+        );
+        assert_eq!(outcome.unwrap().row_count, 1);
+        assert!(!close.drain_expired);
+        assert_eq!(reads.load().admitted, 0);
+        assert_eq!(handle.outstanding_tasks(), 0);
+    });
+}

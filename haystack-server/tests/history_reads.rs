@@ -312,3 +312,49 @@ async fn noncanonical_nan_never_silently_changes_through_scoped_http() {
     owner.close().await.unwrap();
     owner.terminated().await;
 }
+
+#[path = "../../haystack-core/tests/fixtures/finite_numbers.rs"]
+mod finite_numbers;
+#[tokio::test]
+async fn second_review_finite_number_oracle_preserves_bits_through_scoped_http() {
+    let (owner, url, service, _) = setup(100).await;
+    let originals = finite_numbers::FINITE_NUMBERS;
+    service
+        .provider()
+        .his_write(
+            "p",
+            originals
+                .iter()
+                .enumerate()
+                .map(|(i, (value, bits))| {
+                    assert_eq!(value.to_bits(), *bits, "independent fixture bits");
+                    HisItem {
+                        ts: time("2024-06-01T04:00:00Z") + chrono::Duration::seconds(i as i64),
+                        val: Kind::Number(Number::unitless(*value)),
+                    }
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    let request = HistoryReadRequest {
+        id: "p".into(),
+        range: "2024-06-01T04:00:00Z GMT,2024-06-01T04:00:10Z GMT".into(),
+    };
+    for mime in ["text/zinc", "application/json", "application/json;v=3"] {
+        let client =
+            HaystackClient::from_transport(HttpTransport::with_format(&url, String::new(), mime));
+        let result = client.his_read_scoped(&request).await.unwrap();
+        assert_eq!(result.terminal, HistoryTerminal::Complete);
+        assert_eq!(result.samples.len(), originals.len());
+        for (sample, (_, bits)) in result.samples.iter().zip(originals) {
+            let Kind::Number(actual) = &sample.val else {
+                panic!()
+            };
+            assert_eq!(actual.val.to_bits(), bits, "{mime}");
+            assert_eq!(actual.unit, None);
+        }
+    }
+    owner.close().await.unwrap();
+    owner.terminated().await;
+}
