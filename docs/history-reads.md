@@ -144,7 +144,11 @@ interrupted or failed collection is an explicit error, never an ordinary
 partial grid. The server's standalone `start()` convenience method selects its
 legacy provider through the same application ownership path.
 
-Scoped H4 history output preserves leap-second fractions. Sample timestamps with
-second-level UTC offsets cannot be projected into the selected H4 forms and fail
-explicitly rather than changing the instant. Native typed collection and trusted
-stored timestamps retain those original offsets and values.
+Scoped H4 history output checks every timestamp before projection: `hisStart`,
+`hisEnd`, evaluated time, coverage boundaries and samples. Each must have a checked
+local conversion into calendar years 0000 through 9999, a whole-minute UTC offset,
+and leap nanoseconds only on a stored second field of 59. Representable leap
+fractions keep their exact nanoseconds. Unsupported timestamps fail explicitly,
+including in empty read responses whose headers contain historical second-level
+offsets. Native typed collection and trusted stored timestamps retain their
+original fields and values.

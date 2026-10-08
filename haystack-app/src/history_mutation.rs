@@ -534,7 +534,7 @@ impl HistoryMutationInner {
         for sample in &request.samples {
             budget.check().map_err(read_reason)?;
             if !valid_value(&sample.val, &schema)
-                || !haystack_core::codecs::shared::has_minute_offset(&sample.ts.dt)
+                || !haystack_core::codecs::shared::h4_datetime_representable(&sample.ts.dt)
             {
                 return Err(HistoryWriteRejection::Unsupported);
             }

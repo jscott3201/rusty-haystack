@@ -518,15 +518,22 @@ const RESPONSE_FIELDS: &[&str] = &[
     "responseBytes",
 ];
 pub fn result_grid(result: &HistoryReadResult) -> Result<HGrid, TypedPayloadError> {
-    validate_result(result)?;
-    if result
-        .samples
-        .iter()
-        .any(|sample| !super::shared::has_minute_offset(&sample.ts.dt))
-    {
+    if result.samples.len() > MAX_ROWS {
         return Err(invalid());
     }
     let metadata = &result.metadata;
+    let coverage = &metadata.coverage;
+    if [&metadata.start, &metadata.end, &metadata.evaluated_at]
+        .into_iter()
+        .chain(coverage.retained_start.iter())
+        .chain(coverage.retained_end.iter())
+        .chain(coverage.evicted_through.iter())
+        .chain(result.samples.iter().map(|sample| &sample.ts))
+        .any(|time| !super::shared::h4_datetime_representable(&time.dt))
+    {
+        return Err(invalid());
+    }
+    validate_result(result)?;
     let (terminal, reason) = terminal_parts(result.terminal);
     let control = control(dict([
         ("profile", text(PROFILE)),

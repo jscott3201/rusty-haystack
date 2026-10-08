@@ -496,3 +496,64 @@ async fn review_http_leap_timestamp_is_stored_at_its_exact_original_instant() {
         assert_eq!(stored[0].ts, timestamp.dt, "{format}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn second_review_empty_historical_read_fails_projection_explicitly_over_http() {
+    let (graph, builder, store, writes) = setup(true);
+    graph.write(|graph| {
+        let mut row = HDict::new();
+        row.set("tz", Kind::Str("New_York".into()));
+        graph.update("p", row).unwrap();
+    });
+    let before = store.state("p").unwrap();
+    let request = HistoryReadRequest {
+        id: "p".into(),
+        range: "1880-06-01T00:00:00Z GMT,1880-06-01T01:00:00Z GMT".into(),
+    };
+    let running = Running::start(graph, builder, 0, Arc::new(AtomicUsize::new(0))).await;
+    let context = ReadContext::with_timeout(
+        Principal::TrustedEmbedding {
+            subject: "owner".into(),
+        },
+        Duration::from_secs(3),
+    );
+    let native = writes
+        .history_service()
+        .collect(context, request.clone())
+        .await
+        .unwrap();
+    assert!(native.samples.is_empty());
+    assert_eq!(native.terminal, HistoryTerminal::Complete);
+    assert_eq!(native.metadata.start.dt.timestamp(), -2_827_008_000);
+    assert_eq!(native.metadata.end.dt.timestamp(), -2_827_004_400);
+    assert_eq!(native.metadata.start.dt.offset().local_minus_utc(), -17_762);
+    assert_eq!(native.metadata.end.dt.offset().local_minus_utc(), -17_762);
+    let http = haystack_client::ClientConfig::default()
+        .build_reqwest_client()
+        .unwrap();
+    let mut statuses = Vec::new();
+    for format in ["text/zinc", "application/json;v=3", "application/json"] {
+        let codec = codec_for(format).unwrap();
+        let response = http
+            .post(format!("{}/hisRead", running.url))
+            .header("Content-Type", format)
+            .header("Accept", format)
+            .body(haystack_core::codecs::history::encode_request(&request, codec).unwrap())
+            .send()
+            .await
+            .unwrap();
+        statuses.push((format, response.status()));
+        response.bytes().await.unwrap();
+    }
+    running.close().await;
+    for (format, status) in statuses {
+        assert_eq!(
+            status,
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "{format}"
+        );
+    }
+    assert_eq!(store.state("p").unwrap(), before);
+    assert_eq!(store.receipt_count(), 0);
+    assert!(store.retained_changes().is_empty());
+}

@@ -1,6 +1,6 @@
 //! Shared formatting helpers used by multiple codecs.
 
-use chrono::{NaiveTime, Timelike};
+use chrono::{Datelike, NaiveTime, Timelike};
 
 /// Format a float value compactly: no trailing ".0" for integers.
 ///
@@ -44,11 +44,24 @@ pub fn format_frac_seconds(nanos: u32) -> String {
     }
 }
 
-/// The H4 DateTime forms used by the history profile encode offsets to the
-/// minute. Keep native second offsets intact and reject that projection instead
-/// of silently shifting the original instant through `%:z` formatting.
-pub fn has_minute_offset(time: &chrono::DateTime<chrono::FixedOffset>) -> bool {
-    time.offset().local_minus_utc() % 60 == 0
+/// Whether the selected H4 history codecs can preserve every DateTime field.
+/// Native typed values have a wider domain: keep them intact and reject a lossy
+/// H4 projection. In particular, Chrono can hold excess nanoseconds away from
+/// second 59, but the calendar text would normalize those fields on decoding.
+pub fn h4_datetime_representable(time: &chrono::DateTime<chrono::FixedOffset>) -> bool {
+    let utc = time.naive_utc();
+    if time.offset().local_minus_utc() % 60 != 0
+        || utc.nanosecond() >= 2_000_000_000
+        || (utc.nanosecond() >= 1_000_000_000 && utc.second() != 59)
+    {
+        return false;
+    }
+    // `naive_local()` can panic at Chrono's date boundary. Check the conversion
+    // before inspecting the local calendar or invoking any codec formatter.
+    utc.checked_add_offset(*time.offset()).is_some_and(|local| {
+        (0..=9999).contains(&local.year())
+            && (local.nanosecond() < 1_000_000_000 || local.second() == 59)
+    })
 }
 
 #[cfg(test)]

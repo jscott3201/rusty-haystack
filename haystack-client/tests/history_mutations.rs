@@ -149,3 +149,47 @@ async fn review_unrepresentable_timestamp_offsets_never_dispatch() {
         assert_eq!(canonical_request(&original).unwrap(), canonical);
     }
 }
+
+fn native_timestamp(
+    seconds: i64,
+    nanos: u32,
+    offset: i32,
+    zone: &str,
+) -> haystack_core::kinds::HDateTime {
+    let source = format!(
+        r#"{{"version":1,"value":{{"kind":"dateTime","seconds":"{seconds}","nanos":{nanos},"offset":{offset},"timezone":"{zone}"}}}}"#
+    );
+    let Kind::DateTime(value) = haystack_core::codecs::typed::decode(source.as_bytes()).unwrap()
+    else {
+        panic!()
+    };
+    value
+}
+
+#[tokio::test]
+async fn second_review_unrepresentable_timestamp_fields_never_dispatch() {
+    let mut original = request();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = HaystackClient::from_transport(Counting {
+        calls: calls.clone(),
+        receipt: receipt(&original),
+        mode: 5,
+    });
+    for (seconds, nanos, offset, zone) in [
+        (58, 1_500_000_000, 0, "UTC"),
+        (253_402_300_800, 500_000_000, 0, "UTC"),
+        (8_210_266_876_799, 0, 3600, "GMT-1"),
+    ] {
+        original.samples[0].ts = native_timestamp(seconds, nanos, offset, zone);
+        let canonical = canonical_request(&original).unwrap();
+        assert!(
+            matches!(
+                client.his_write_scoped(&original).await,
+                Err(ClientError::Codec(_))
+            ),
+            "seconds={seconds}, nanos={nanos}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(canonical_request(&original).unwrap(), canonical);
+    }
+}

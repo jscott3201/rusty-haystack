@@ -94,12 +94,15 @@ Each submitted `HDateTime.tz_name` must exactly match the configured spelling.
 `GMT`/`UTC`, `Calcutta`/`Kolkata` and short/full IANA forms are not equated. The
 submitted offset must match the locked timezone rules at that timestamp. Both
 explicitly valid offsets in a DST overlap are admitted; a nonexistent local time
-or inconsistent offset rejects. Leap-second fractions retain their original
-nanoseconds. Historical offsets containing seconds cannot be represented by the
-selected H4 wire forms and reject before dispatch or scoped admission; native
-typed timestamps and trusted store values are preserved. `Rel` and full IANA
-spellings remain unsupported in this H4 profile. This is distinct from read ranges, whose explicit boundaries
-may use another supported zone. No global timezone codec normalization is added.
+or inconsistent offset rejects. The shared H4 timestamp check requires a checked
+local conversion into calendar years 0000 through 9999 and whole-minute UTC
+offsets. Leap-second fractions retain their original nanoseconds when the stored
+second field is 59; excess nanoseconds on any other second cannot round-trip.
+Unsupported dates, second-level offsets and non-minute leap fields reject before
+dispatch or scoped admission. Native typed timestamps and trusted store values
+are preserved. `Rel` and full IANA spellings remain unsupported in this H4
+profile. This is distinct from read ranges, whose explicit boundaries may use
+another supported zone. No global timezone codec normalization is added.
 
 Samples are upserts ordered by instant. Original duplicate timestamps use the
 last input value. Retention evicts the oldest samples and reports that loss. Each

@@ -296,3 +296,63 @@ fn review_second_precision_offsets_remain_typed_but_never_project_to_h4_mutation
         assert_eq!(canonical_request(&original).unwrap(), canonical);
     }
 }
+
+fn native_timestamp(
+    seconds: i64,
+    nanos: u32,
+    offset: i32,
+    zone: &str,
+) -> haystack_core::kinds::HDateTime {
+    let source = format!(
+        r#"{{"version":1,"value":{{"kind":"dateTime","seconds":"{seconds}","nanos":{nanos},"offset":{offset},"timezone":"{zone}"}}}}"#
+    );
+    let Kind::DateTime(value) = haystack_core::codecs::typed::decode(source.as_bytes()).unwrap()
+    else {
+        panic!()
+    };
+    value
+}
+
+#[test]
+fn second_review_scoped_timestamp_domain_rejects_lossy_native_shapes() {
+    for (seconds, nanos, offset, zone) in [
+        (58, 1_500_000_000, 0, "UTC"),
+        (253_402_300_800, 500_000_000, 0, "UTC"),
+        (8_210_266_876_799, 0, 3600, "GMT-1"),
+        (-62_167_219_201, 0, 0, "UTC"),
+    ] {
+        let mut original = request();
+        original.samples[0].ts = native_timestamp(seconds, nanos, offset, zone);
+        let canonical = canonical_request(&original).unwrap();
+        for mime in ["text/zinc", "application/json;v=3", "application/json"] {
+            assert!(
+                encode_request(&original, codec_for(mime).unwrap()).is_err(),
+                "{mime}: seconds={seconds}, nanos={nanos}, offset={offset}"
+            );
+        }
+        assert_eq!(canonical_request(&original).unwrap(), canonical);
+        assert_eq!(original.samples[0].ts.dt.timestamp(), seconds);
+        assert_eq!(original.samples[0].ts.dt.timestamp_subsec_nanos(), nanos);
+    }
+}
+#[test]
+fn second_review_four_digit_edges_and_real_minute_leaps_keep_exact_identity() {
+    for (seconds, nanos, offset, zone) in [
+        (-62_167_219_200, 1, 0, "UTC"),
+        (253_402_300_799, 999_999_999, 0, "UTC"),
+        (1_483_228_799, 1_500_000_000, 0, "UTC"),
+        (1_483_228_799, 1_999_999_999, 3600, "GMT-1"),
+    ] {
+        let mut original = request();
+        original.samples[0].ts = native_timestamp(seconds, nanos, offset, zone);
+        let canonical = canonical_request(&original).unwrap();
+        for mime in ["text/zinc", "application/json;v=3", "application/json"] {
+            let codec = codec_for(mime).unwrap();
+            let actual = decode_request(&encode_request(&original, codec).unwrap(), codec).unwrap();
+            assert_eq!(canonical_request(&actual).unwrap(), canonical, "{mime}");
+            assert_eq!(actual.samples[0].ts.dt.timestamp(), seconds);
+            assert_eq!(actual.samples[0].ts.dt.timestamp_subsec_nanos(), nanos);
+            assert_eq!(actual.samples[0].ts.dt.offset().local_minus_utc(), offset);
+        }
+    }
+}

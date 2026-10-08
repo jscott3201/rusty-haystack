@@ -1438,3 +1438,87 @@ async fn review_scoped_admission_rejects_second_offsets_without_changing_native_
     assert_eq!(store.state("p").unwrap(), before);
     assert_eq!(store.read("p", None, None)[0].ts, timestamp.dt);
 }
+
+fn native_timestamp(
+    seconds: i64,
+    nanos: u32,
+    offset: i32,
+    zone: &str,
+) -> haystack_core::kinds::HDateTime {
+    let source = format!(
+        r#"{{"version":1,"value":{{"kind":"dateTime","seconds":"{seconds}","nanos":{nanos},"offset":{offset},"timezone":"{zone}"}}}}"#
+    );
+    let Kind::DateTime(value) = haystack_core::codecs::typed::decode(source.as_bytes()).unwrap()
+    else {
+        panic!()
+    };
+    value
+}
+
+#[tokio::test]
+async fn second_review_scoped_admission_preserves_but_rejects_unrepresentable_native_times() {
+    for (seconds, nanos, offset, zone) in [
+        (58, 1_500_000_000, 0, "UTC"),
+        (253_402_300_800, 500_000_000, 0, "UTC"),
+        (8_210_266_876_799, 0, 3600, "GMT-1"),
+    ] {
+        let graph = SharedGraph::new(EntityGraph::new());
+        graph.add(point("Number", zone, Some("°F"))).unwrap();
+        let store = HisStore::new();
+        let provider = Arc::new(Fixture::new(store.clone(), 0));
+        let timestamp = native_timestamp(seconds, nanos, offset, zone);
+        store
+            .write(
+                "p",
+                vec![HisItem {
+                    ts: timestamp.dt,
+                    val: num(1.0),
+                }],
+            )
+            .unwrap();
+        let before = store.state("p").unwrap();
+        let changes = store.retained_changes();
+        let writes = service(graph, provider.clone(), Arc::new(AllowAllHistoryMutations));
+        let submitted = request(
+            &store,
+            "unsupported-time",
+            vec![HistorySample {
+                ts: timestamp.clone(),
+                val: num(2.0),
+            }],
+        );
+        let canonical =
+            haystack_core::codecs::history_mutation::canonical_request(&submitted).unwrap();
+        rejected(
+            writes.submit(context(), submitted.clone()).await.unwrap(),
+            HistoryWriteRejection::Unsupported,
+        );
+        assert_eq!(
+            haystack_core::codecs::history_mutation::canonical_request(&submitted).unwrap(),
+            canonical
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.receipt_count(), 0);
+        assert_eq!(store.state("p").unwrap(), before);
+        assert_eq!(store.retained_changes(), changes);
+        let native = store.read("p", None, None);
+        assert_eq!(native[0].ts.timestamp(), seconds);
+        assert_eq!(native[0].ts.timestamp_subsec_nanos(), nanos);
+        assert_eq!(native[0].ts.offset().local_minus_utc(), offset);
+        if seconds == 58 {
+            let read = writes
+                .history_service()
+                .collect(
+                    context(),
+                    HistoryReadRequest {
+                        id: "p".into(),
+                        range: "1970-01-01".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(read.samples[0].ts.dt.timestamp(), seconds);
+            assert_eq!(read.samples[0].ts.dt.timestamp_subsec_nanos(), nanos);
+        }
+    }
+}

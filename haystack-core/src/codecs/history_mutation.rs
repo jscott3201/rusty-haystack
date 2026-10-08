@@ -279,7 +279,7 @@ pub fn request_grid(request: &HistoryWriteRequest) -> Result<HGrid, TypedPayload
     request.source_bytes()?;
     if request.samples.iter().any(|sample| {
         !wire_value(&sample.val)
-            || !super::shared::has_minute_offset(&sample.ts.dt)
+            || !super::shared::h4_datetime_representable(&sample.ts.dt)
             || sample.ts.tz_name == "Rel"
             || sample.ts.tz_name.contains('/')
             || crate::kinds::tz_for(&sample.ts.tz_name).is_none()
