@@ -1196,3 +1196,27 @@ async fn review_final_collector_stage_honors_cancellation_and_absolute_deadline(
         }
     }
 }
+
+#[tokio::test]
+async fn empty_point_history_state_is_stable_until_a_real_write() {
+    let store = Arc::new(HisStore::new());
+    let service = service(
+        store.clone(),
+        graph("Number", "UTC"),
+        HistoryLimits::default(),
+    );
+    let first = service.collect(context("a"), request()).await.unwrap();
+    let second = service.collect(context("a"), request()).await.unwrap();
+    assert_eq!(first.metadata.history, second.metadata.history);
+    assert_eq!(first.metadata.history.generation, 0);
+    store.write("p", vec![]).unwrap();
+    let empty = service.collect(context("a"), request()).await.unwrap();
+    assert_eq!(empty.metadata.history, first.metadata.history);
+    store.write("p", vec![item(0, number(1.0))]).unwrap();
+    let written = service.collect(context("a"), request()).await.unwrap();
+    assert_eq!(
+        written.metadata.history.incarnation,
+        first.metadata.history.incarnation
+    );
+    assert_eq!(written.metadata.history.generation, 1);
+}

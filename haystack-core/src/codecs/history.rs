@@ -518,8 +518,22 @@ const RESPONSE_FIELDS: &[&str] = &[
     "responseBytes",
 ];
 pub fn result_grid(result: &HistoryReadResult) -> Result<HGrid, TypedPayloadError> {
-    validate_result(result)?;
+    if result.samples.len() > MAX_ROWS {
+        return Err(invalid());
+    }
     let metadata = &result.metadata;
+    let coverage = &metadata.coverage;
+    if [&metadata.start, &metadata.end, &metadata.evaluated_at]
+        .into_iter()
+        .chain(coverage.retained_start.iter())
+        .chain(coverage.retained_end.iter())
+        .chain(coverage.evicted_through.iter())
+        .chain(result.samples.iter().map(|sample| &sample.ts))
+        .any(|time| !super::shared::h4_datetime_representable(&time.dt))
+    {
+        return Err(invalid());
+    }
+    validate_result(result)?;
     let (terminal, reason) = terminal_parts(result.terminal);
     let control = control(dict([
         ("profile", text(PROFILE)),
@@ -716,11 +730,14 @@ pub fn decode_result(
     codec: &dyn Codec,
 ) -> Result<HistoryReadResult, TypedPayloadError> {
     allowed(codec)?;
-    let result = result_from_grid(
-        &codec
-            .decode_grid(preflight(bytes, false)?)
-            .map_err(|_| invalid())?,
-    )?;
+    let text = preflight(bytes, false)?;
+    let grid = if codec.mime_type() == "text/zinc" {
+        super::zinc::decode_grid_complete_rows(text)
+    } else {
+        codec.decode_grid(text)
+    }
+    .map_err(|_| invalid())?;
+    let result = result_from_grid(&grid)?;
     if bytes.len() as u64 > result.metadata.bounds.response_bytes {
         return Err(invalid());
     }
@@ -831,25 +848,7 @@ pub fn validate_result(result: &HistoryReadResult) -> Result<(), TypedPayloadErr
         }
         previous = Some(sample.ts.dt);
         budget.value(&sample.val, 0).map_err(|_| invalid())?;
-        let valid = match (&sample.val, m.schema.kind) {
-            (Kind::NA, _)
-            | (Kind::Bool(_), HistoryKind::Bool)
-            | (Kind::Str(_), HistoryKind::Str) => true,
-            (Kind::Number(value), HistoryKind::Number) => match &value.unit {
-                None => !value.val.is_nan() || value.val.to_bits() == f64::NAN.to_bits(),
-                Some(unit) => {
-                    !value.val.is_nan()
-                        && m.schema
-                            .unit
-                            .as_ref()
-                            .and_then(|unit| unit_for(unit))
-                            .zip(unit_for(unit))
-                            .is_some_and(|(point, sample)| point.name == sample.name)
-                }
-            },
-            _ => false,
-        };
-        if !valid {
+        if !valid_value(&sample.val, &m.schema) {
             return Err(invalid());
         }
         admitted_bytes = admitted_bytes.saturating_add(
@@ -961,4 +960,25 @@ fn validate_calendar_midnight(actual: &HDateTime) -> Result<(), TypedPayloadErro
         return Err(invalid());
     }
     Ok(())
+}
+
+/// Shared strict H4 history value admission against an already validated schema.
+pub fn valid_value(value: &Kind, schema: &HistorySchema) -> bool {
+    match (value, schema.kind) {
+        (Kind::NA, _) => true,
+        (Kind::Bool(_), HistoryKind::Bool) | (Kind::Str(_), HistoryKind::Str) => true,
+        (Kind::Number(number), HistoryKind::Number) => match &number.unit {
+            None => !number.val.is_nan() || number.val.to_bits() == f64::NAN.to_bits(),
+            Some(unit) => {
+                !number.val.is_nan()
+                    && schema
+                        .unit
+                        .as_ref()
+                        .and_then(|unit| unit_for(unit))
+                        .zip(unit_for(unit))
+                        .is_some_and(|(point, sample)| point.name == sample.name)
+            }
+        },
+        _ => false,
+    }
 }

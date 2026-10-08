@@ -1,4 +1,4 @@
-//! Bounded shared history reads and explicit legacy native history writes.
+//! Bounded shared history reads/writes and explicit legacy native compatibility.
 use super::shared_read::{ReadStarted, http_error};
 use crate::{auth::AuthUser, content, error::HaystackError, state::SharedState};
 use axum::{
@@ -113,6 +113,98 @@ async fn read(
             .legacy_wire_admitted(admission, bytes.to_vec(), input, output)
             .await?
     };
+    Ok(([(axum::http::header::CONTENT_TYPE, output.mime())], bytes).into_response())
+}
+
+pub async fn handle_scoped_write(
+    State(state): State<SharedState>,
+    request: Request<Body>,
+) -> Result<Response, HaystackError> {
+    mutation(
+        state,
+        request,
+        haystack_app::HistoryMutationWireOperation::Submit,
+    )
+    .await
+    .map_err(http_error)
+}
+pub async fn handle_receipt(
+    State(state): State<SharedState>,
+    request: Request<Body>,
+) -> Result<Response, HaystackError> {
+    mutation(
+        state,
+        request,
+        haystack_app::HistoryMutationWireOperation::Receipt,
+    )
+    .await
+    .map_err(http_error)
+}
+async fn mutation(
+    state: SharedState,
+    request: Request<Body>,
+    operation: haystack_app::HistoryMutationWireOperation,
+) -> Result<Response, ReadError> {
+    let service = state
+        .history_mutation_service
+        .as_ref()
+        .ok_or(ReadError::Unavailable)?;
+    let reads = service.read_service();
+    let started = request
+        .extensions()
+        .get::<ReadStarted>()
+        .map(|value| value.0)
+        .unwrap_or_else(Instant::now);
+    let principal = request
+        .extensions()
+        .get::<AuthUser>()
+        .map(|user| Principal::authenticated(user.username.clone(), user.permissions.clone()))
+        .unwrap_or(Principal::Anonymous);
+    let context = ReadContext::new(
+        principal,
+        started + reads.limits().max_duration,
+        CancellationToken::new(),
+    );
+    let guard = request
+        .extensions()
+        .get::<std::sync::Arc<haystack_app::WorkGuard>>()
+        .ok_or(ReadError::Closed)?
+        .child();
+    let admission = reads.begin_admitted(context, guard).await?;
+    let (parts, body) = request.into_parts();
+    let input = parts
+        .headers
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let output = parts
+        .headers
+        .get("Accept")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if input.len().saturating_add(output.len()) > reads.limits().max_input_bytes {
+        return Err(ReadError::Budget(BudgetKind::Input));
+    }
+    let input = history_codec(input)?;
+    let output = history_codec(output)?;
+    let limit = match operation {
+        haystack_app::HistoryMutationWireOperation::Submit => {
+            haystack_core::codecs::history_mutation::MAX_GRID_BYTES
+        }
+        haystack_app::HistoryMutationWireOperation::Receipt => {
+            haystack_core::codecs::history_mutation::MAX_RECEIPT_BYTES
+        }
+    }
+    .min(reads.limits().max_input_bytes);
+    let bytes = tokio::select! {
+        biased;
+        _ = admission.cancelled() => return Err(ReadError::Cancelled),
+        _ = tokio::time::sleep_until(admission.deadline().into()) => return Err(ReadError::Deadline),
+        result = to_bytes(body, limit) => result.map_err(|_| ReadError::Budget(BudgetKind::Input))?,
+    };
+    let bytes = service
+        .wire_admitted(admission, operation, bytes.to_vec(), input, output)
+        .await?;
     Ok(([(axum::http::header::CONTENT_TYPE, output.mime())], bytes).into_response())
 }
 

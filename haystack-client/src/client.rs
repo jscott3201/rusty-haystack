@@ -104,6 +104,11 @@ impl HaystackClient<HttpTransport> {
     }
 }
 
+impl<T: crate::history_mutation::HistoryMutationTransport> HaystackClient<T> {
+    pub(crate) fn transport_history_mutation_check(&self) -> Result<(), ClientError> {
+        self.transport.check_history_submission()
+    }
+}
 impl<T: crate::history::HistoryTransport> HaystackClient<T> {
     pub(crate) fn transport_history_check(&self) -> Result<(), ClientError> {
         self.transport.check_history_read()
@@ -343,7 +348,9 @@ impl<T: Transport> HaystackClient<T> {
         self.call("hisRead", &grid).await
     }
 
-    /// Call the `hisWrite` op to write time-series samples for a point.
+    /// Explicit legacy `hisWrite` call. Scoped servers require
+    /// `his_write_scoped` with operation identity and expected history state.
+    /// This helper cannot bypass scoped admission or reconcile a receipt.
     ///
     /// `id` is the point ref. `items` must be dicts each containing a `ts`
     /// (DateTime) and `val` tag. Returns an empty grid on success or an

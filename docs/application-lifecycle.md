@@ -80,6 +80,10 @@ opt-in. Legacy standalone `HaystackServer::start()` translates its
 `with_history_provider(Box)` or `with_borrowed_history_provider(Arc)` convenience
 configuration into the same application ownership path. See
 [bounded history reads](history-reads.md) for session and collector contracts.
+`history_mutations(writes)` separately selects writes over that exact history
+service. It adds no second provider lifecycle; opaque prepared writes retain the
+original tracked work until publication, rejection or drop, and reject after
+owner sealing. See [history mutations](history-mutations.md).
 
 ## Seal, drain, stop and completion
 

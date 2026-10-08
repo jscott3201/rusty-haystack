@@ -36,6 +36,8 @@ pub struct AppState {
     pub actions: ActionRegistry,
     /// Pluggable time-series history store for hisRead/hisWrite.
     pub his: Option<Arc<dyn HistoryProvider>>,
+    /// Authorized scoped writes captured with the same history selection.
+    pub history_mutation_service: Option<haystack_app::HistoryMutationService>,
     /// Exact history selection captured from the owning application.
     pub history_service: Option<haystack_app::HistoryService>,
     /// Instant when the server was started, used for uptime calculation.

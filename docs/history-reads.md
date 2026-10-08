@@ -107,8 +107,9 @@ partial samples. `Complete` covers retained records in the requested interval;
 it never claims to reconstruct data removed by retention. The native memory
 store retains at most one million items per point by default. Its trusted
 `write` and inclusive-end, materializing `read` compatibility methods are outside
-the authorized bounded service. History write authorization and receipts are
-separate future work.
+the authorized bounded service. Missing-series observations now allocate one
+bounded, stable generation-zero identity. Authorized scoped writes and retained
+receipts use that same authority; see [history mutations](history-mutations.md).
 
 ## HTTP and client contract
 
@@ -123,8 +124,8 @@ H4 wire format or an Arrow/Parquet encoding.
 This HTTP adapter collects **one bounded response**. It does not implement a
 remote open/pull/close protocol or progressive HTTP streaming. Zinc and JSON
 v3/v4 are admitted; unsupported negotiation fails before provider work. Only
-selected history appears in scoped operation discovery; scoped `hisWrite`
-remains disabled. External routers and owned listeners consume the exact
+selected history appears in scoped operation discovery. Scoped `hisWrite` and
+`hisReceipt` require a separate explicit history mutation selection. External routers and owned listeners consume the exact
 application selection, and reject independently configured providers.
 
 `Complete`, `Limited`, `Interrupted` and `Failed` are explicit terminal outcomes.
@@ -142,3 +143,12 @@ returns a plain grid only after complete bounded collection; a limited,
 interrupted or failed collection is an explicit error, never an ordinary
 partial grid. The server's standalone `start()` convenience method selects its
 legacy provider through the same application ownership path.
+
+Scoped H4 history output checks every timestamp before projection: `hisStart`,
+`hisEnd`, evaluated time, coverage boundaries and samples. Each must have a checked
+local conversion into calendar years 0000 through 9999, a whole-minute UTC offset,
+and leap nanoseconds only on a stored second field of 59. Representable leap
+fractions keep their exact nanoseconds. Unsupported timestamps fail explicitly,
+including in empty read responses whose headers contain historical second-level
+offsets. Native typed collection and trusted stored timestamps retain their
+original fields and values.

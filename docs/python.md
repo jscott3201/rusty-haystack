@@ -452,7 +452,8 @@ children = client.nav(nav_id="site-1")  # -> HGrid (children)
 all_defs = client.defs()
 equip_defs = client.defs(filter="equip")
 
-# Legacy history grids; this helper does not select bounded-history-v1.
+# Legacy history grids; these helpers do not select bounded-history-v1
+# or scoped history-write-v1 receipts. his_write requires a legacy server.
 his = client.his_read("point-1", "today")
 his = client.his_read("point-1", "2024-01-01,2024-02-01")
 client.his_write("point-1", [

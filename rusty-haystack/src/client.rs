@@ -313,7 +313,8 @@ impl PyHaystackClient {
         PyHGrid::from_core(&grid)
     }
 
-    /// Write historical time-series data for a point.
+    /// Write historical time-series data through the legacy grid API.
+    /// This helper does not provide scoped history mutation receipts.
     ///
     /// Args:
     ///     id: Point entity ref value.

@@ -4,15 +4,11 @@ use crate::{
     ReadService,
     budget::Budget,
     history_provider::*,
-    history_range::{parse_range, point_time, validate_zone},
+    history_range::{parse_range, point_time},
     history_store::sample_bytes,
 };
 use chrono::{DateTime, FixedOffset, Utc};
-use haystack_core::{
-    codecs::history::*,
-    graph::GraphState,
-    kinds::{Kind, unit_for},
-};
+use haystack_core::{codecs::history::*, graph::GraphState};
 use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -125,6 +121,11 @@ impl HistoryService {
     }
     pub fn read_service(&self) -> &ReadService {
         &self.reads
+    }
+    pub(crate) fn same_selection(&self, other: &Self) -> bool {
+        self.reads.same_service(&other.reads)
+            && Arc::ptr_eq(&self.sessions, &other.sessions)
+            && Arc::ptr_eq(&self.provider, &other.provider)
     }
     pub fn active_sessions(&self) -> usize {
         self.sessions.lock().total
@@ -705,38 +706,7 @@ impl HistoryService {
             }
             if let Some(result) = graph.read_for(std::time::Duration::ZERO, |graph| {
                 let row = graph.get(id).ok_or(ReadError::Unavailable)?;
-                if !matches!(row.get("his"), Some(Kind::Marker)) {
-                    return Err(ReadError::InvalidQuery("point does not declare history"));
-                }
-                let kind = match row.get("kind") {
-                    Some(Kind::Str(value)) if value == "Bool" => HistoryKind::Bool,
-                    Some(Kind::Str(value)) if value == "Number" => HistoryKind::Number,
-                    Some(Kind::Str(value)) if value == "Str" => HistoryKind::Str,
-                    _ => return Err(ReadError::Projection),
-                };
-                let Some(Kind::Str(timezone)) = row.get("tz") else {
-                    return Err(ReadError::InvalidQuery("point requires history timezone"));
-                };
-                if timezone.len() > 128 {
-                    return Err(ReadError::InvalidQuery("invalid history timezone"));
-                }
-                validate_zone(timezone)?;
-                let unit = match row.get("unit") {
-                    None if kind != HistoryKind::Number => None,
-                    Some(Kind::Str(unit))
-                        if kind == HistoryKind::Number
-                            && unit.len() <= 128
-                            && unit_for(unit).is_some() =>
-                    {
-                        Some(budget.copy_string(unit)?)
-                    }
-                    _ => return Err(ReadError::Projection),
-                };
-                let schema = HistorySchema {
-                    kind,
-                    unit,
-                    timezone: budget.copy_string(timezone)?,
-                };
+                let schema = crate::history_admission::schema(row, budget)?;
                 Ok((
                     schema,
                     graph.state(),
@@ -868,25 +838,6 @@ fn reserve_wire_metadata(
     let reserve = (64usize * 1024).saturating_add(text.saturating_mul(128));
     budget.charge(BudgetKind::Retained, reserve)?;
     budget.charge(BudgetKind::Work, reserve)
-}
-fn valid_value(value: &Kind, schema: &HistorySchema) -> bool {
-    match (value, schema.kind) {
-        (Kind::NA, _) => true,
-        (Kind::Bool(_), HistoryKind::Bool) | (Kind::Str(_), HistoryKind::Str) => true,
-        (Kind::Number(number), HistoryKind::Number) => match &number.unit {
-            None => !number.val.is_nan() || number.val.to_bits() == f64::NAN.to_bits(),
-            Some(unit) => {
-                !number.val.is_nan()
-                    && schema
-                        .unit
-                        .as_ref()
-                        .and_then(|unit| unit_for(unit))
-                        .zip(unit_for(unit))
-                        .is_some_and(|(point, sample)| point.name == sample.name)
-            }
-        },
-        _ => false,
-    }
 }
 fn budget_terminal(error: ReadError, budget: &Budget) -> HistoryTerminal {
     match error {
