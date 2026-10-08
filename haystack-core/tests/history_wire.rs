@@ -278,3 +278,51 @@ fn scoped_zinc_history_response_requires_complete_rows_and_scalars() {
     assert_ne!(malformed, encoded);
     assert!(decode_result(malformed.as_bytes(), codec).is_err());
 }
+
+#[test]
+fn review_scoped_read_output_preserves_leaps_and_rejects_second_offsets() {
+    let leap = dt("2016-12-31T23:59:60.500Z");
+    let mut value = result();
+    value.metadata.requested_range = "2016-12-31".into();
+    value.metadata.evaluated_at = dt("2016-12-31T12:00:00Z");
+    value.metadata.start = dt("2016-12-31T00:00:00Z");
+    value.metadata.end = dt("2017-01-01T00:00:00Z");
+    value.metadata.coverage = HistoryCoverage {
+        retained_start: Some(leap.clone()),
+        retained_end: Some(leap.clone()),
+        retained_count: 1,
+        evicted_through: None,
+    };
+    value.samples = vec![HistorySample {
+        ts: leap.clone(),
+        val: Kind::Number(Number::unitless(1.0)),
+    }];
+    for mime in ["text/zinc", "application/json;v=3", "application/json"] {
+        let codec = codec_for(mime).unwrap();
+        let decoded = decode_result(&encode_result(&value, codec).unwrap(), codec).unwrap();
+        assert_eq!(decoded.samples[0].ts, leap, "{mime}");
+    }
+    let offset = chrono::FixedOffset::west_opt(17_762).unwrap();
+    let historic = HDateTime::new(
+        chrono::DateTime::parse_from_rfc3339("1880-06-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&offset),
+        "New_York",
+    );
+    value.metadata.schema.timezone = "New_York".into();
+    value.metadata.requested_range = "1880-05-31".into();
+    value.metadata.evaluated_at = historic.clone();
+    value.metadata.start = HDateTime::new(historic.dt - chrono::Duration::hours(1), "New_York");
+    value.metadata.end = HDateTime::new(historic.dt + chrono::Duration::hours(1), "New_York");
+    value.metadata.coverage.retained_start = Some(historic.clone());
+    value.metadata.coverage.retained_end = Some(historic.clone());
+    value.samples[0].ts = historic.clone();
+    validate_result(&value).unwrap();
+    for mime in ["text/zinc", "application/json;v=3", "application/json"] {
+        assert!(
+            encode_result(&value, codec_for(mime).unwrap()).is_err(),
+            "{mime}"
+        );
+    }
+    assert_eq!(value.samples[0].ts, historic);
+}

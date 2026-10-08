@@ -26,25 +26,29 @@ pub fn format_number_val(val: f64) -> String {
 
 /// Format a NaiveTime as `HH:MM:SS[.frac]`, trimming trailing fractional zeros.
 pub fn format_time(t: &NaiveTime) -> String {
-    let nanos = t.nanosecond();
-    if nanos == 0 {
-        t.format("%H:%M:%S").to_string()
-    } else {
-        let base = t.format("%H:%M:%S").to_string();
-        let frac = format!(".{:09}", nanos);
-        let trimmed = frac.trim_end_matches('0');
-        format!("{base}{trimmed}")
-    }
+    let base = t.format("%H:%M:%S");
+    let frac = format_frac_seconds(t.nanosecond());
+    format!("{base}{frac}")
 }
 
-/// Format fractional seconds from nanoseconds, or empty string if zero.
+/// Format Chrono's fractional nanosecond field, or empty string if zero.
+/// Chrono stores a leap second with an extra billion nanoseconds; `%S` already
+/// renders that as second 60, so only its fractional remainder belongs here.
 pub fn format_frac_seconds(nanos: u32) -> String {
+    let nanos = nanos % 1_000_000_000;
     if nanos > 0 {
         let s = format!(".{:09}", nanos);
         s.trim_end_matches('0').to_string()
     } else {
         String::new()
     }
+}
+
+/// The H4 DateTime forms used by the history profile encode offsets to the
+/// minute. Keep native second offsets intact and reject that projection instead
+/// of silently shifting the original instant through `%:z` formatting.
+pub fn has_minute_offset(time: &chrono::DateTime<chrono::FixedOffset>) -> bool {
+    time.offset().local_minus_utc() % 60 == 0
 }
 
 #[cfg(test)]

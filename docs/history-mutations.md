@@ -94,8 +94,11 @@ Each submitted `HDateTime.tz_name` must exactly match the configured spelling.
 `GMT`/`UTC`, `Calcutta`/`Kolkata` and short/full IANA forms are not equated. The
 submitted offset must match the locked timezone rules at that timestamp. Both
 explicitly valid offsets in a DST overlap are admitted; a nonexistent local time
-or inconsistent offset rejects. `Rel` and full IANA spellings remain unsupported
-in this H4 profile. This is distinct from read ranges, whose explicit boundaries
+or inconsistent offset rejects. Leap-second fractions retain their original
+nanoseconds. Historical offsets containing seconds cannot be represented by the
+selected H4 wire forms and reject before dispatch or scoped admission; native
+typed timestamps and trusted store values are preserved. `Rel` and full IANA
+spellings remain unsupported in this H4 profile. This is distinct from read ranges, whose explicit boundaries
 may use another supported zone. No global timezone codec normalization is added.
 
 Samples are upserts ordered by instant. Original duplicate timestamps use the
@@ -106,6 +109,10 @@ combined entity/history transactions and equipment commands are unsupported.
 
 Preparation checks incoming rows/bytes, existing-series source sizes, sorting
 and merge work, retained memory and one absolute deadline before publication.
+Submission and receipt lookup reserve principal/binding hashing, copying and
+outcome storage before those operations. Existing-series discovery admits each
+row's conservative work and source bytes before value/unit validation, then
+reserves clone and merge work separately.
 Limits are conservative source-size budgets, not allocator measurements; a small
 request can fail when the existing series is too large to prepare within bounds.
 The default mutation limits allow up to 128 incoming samples, 65,536 source bytes,

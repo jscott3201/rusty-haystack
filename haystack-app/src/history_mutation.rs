@@ -199,12 +199,17 @@ impl HistoryMutationService {
     }
     pub async fn submit_admitted(
         &self,
-        admission: ReadAdmission,
+        mut admission: ReadAdmission,
         request: HistoryWriteRequest,
     ) -> Result<HistoryWriteOutcome, ReadError> {
         if !admission.belongs_to(self.read_service()) {
             return Err(ReadError::Forbidden);
         }
+        // The caller-side ambiguity fallback also owns a copy of the identity.
+        // Admit it before validation/copying, using only constant-time lengths.
+        let bytes = identity_bytes(&request.identity);
+        admission.budget_mut().charge(BudgetKind::Work, bytes)?;
+        admission.budget_mut().charge(BudgetKind::Retained, bytes)?;
         validate_identity(&request.identity)
             .map_err(|_| ReadError::InvalidQuery("invalid history operation identity"))?;
         let identity = request.identity.clone();
@@ -253,21 +258,40 @@ impl HistoryMutationInner {
         request: HistoryWriteRequest,
         budget: &mut Budget,
     ) -> HistoryWriteOutcome {
+        if let Err(error) = self.reserve_binding(&principal, &request.identity, budget) {
+            return HistoryWriteOutcome::Rejected {
+                identity: request.identity,
+                reason: read_reason(error),
+            };
+        }
         let identity = request.identity.clone();
         match self.prepare_submit(&principal, request, budget) {
             Ok(outcome) => outcome,
             Err(reason) => HistoryWriteOutcome::Rejected { identity, reason },
         }
     }
-    fn principal_bounds(&self, principal: &Principal, budget: &Budget) -> Result<(), ReadError> {
+    fn reserve_binding(
+        &self,
+        principal: &Principal,
+        identity: &HistoryOperationIdentity,
+        budget: &mut Budget,
+    ) -> Result<(), ReadError> {
         budget.check()?;
-        if principal.bytes() > budget.limits.max_input_bytes
-            || matches!(principal, Principal::Authenticated { permissions, .. } if permissions.len() > budget.limits.max_ids)
+        if matches!(principal, Principal::Authenticated { permissions, .. } if permissions.len() > budget.limits.max_ids)
         {
-            Err(ReadError::Budget(BudgetKind::Input))
-        } else {
-            Ok(())
+            return Err(ReadError::Budget(BudgetKind::Input));
         }
+        let principal_bytes = principal.bytes();
+        if principal_bytes > budget.limits.max_input_bytes {
+            return Err(ReadError::Budget(BudgetKind::Input));
+        }
+        // Reserve the complete bounded key/receipt path before its first copy
+        // or hash: lookup/rechecks, key insertion, retained plan, publication and
+        // returned outcome. Arc-held original requests/canonical bytes are not
+        // copied by lookup. Work includes hashing and equality as well as copies.
+        let bytes = principal_bytes.saturating_add(identity_bytes(identity));
+        budget.charge(BudgetKind::Work, bytes.saturating_mul(32))?;
+        budget.charge(BudgetKind::Retained, bytes.saturating_mul(8))
     }
     fn lookup(
         &self,
@@ -305,8 +329,6 @@ impl HistoryMutationInner {
         request: HistoryWriteRequest,
         budget: &mut Budget,
     ) -> Result<HistoryWriteOutcome, HistoryWriteRejection> {
-        self.principal_bounds(principal, budget)
-            .map_err(read_reason)?;
         let source = request
             .source_bytes()
             .map_err(|_| HistoryWriteRejection::Limit)?;
@@ -329,6 +351,9 @@ impl HistoryMutationInner {
             .charge(BudgetKind::Work, source)
             .map_err(read_reason)?;
         let canonical = canonical_request(&request).map_err(|_| HistoryWriteRejection::Invalid)?;
+        budget
+            .charge(BudgetKind::Work, canonical.len().saturating_mul(2))
+            .map_err(read_reason)?;
         budget
             .charge(BudgetKind::Retained, canonical.len().saturating_mul(8))
             .map_err(read_reason)?;
@@ -508,7 +533,9 @@ impl HistoryMutationInner {
         }
         for sample in &request.samples {
             budget.check().map_err(read_reason)?;
-            if !valid_value(&sample.val, &schema) {
+            if !valid_value(&sample.val, &schema)
+                || !haystack_core::codecs::shared::has_minute_offset(&sample.ts.dt)
+            {
                 return Err(HistoryWriteRejection::Unsupported);
             }
             if sample.ts.tz_name != schema.timezone
@@ -558,16 +585,23 @@ impl HistoryMutationInner {
             budget.check().map_err(read_reason)?;
             let size = crate::history_store::sample_bytes(&item.val)
                 .ok_or(HistoryWriteRejection::Unsupported)?;
-            if !valid_value(&item.val, &schema) {
-                return Err(HistoryWriteRejection::Unsupported);
-            }
             bytes = bytes.saturating_add(size);
             if bytes.saturating_add(source) > self.limits.max_prepared_bytes {
                 return Err(HistoryWriteRejection::Limit);
             }
+            // Admit this source row before inspecting/hashing its value. A
+            // later invalid value must not let discovery bypass a work limit.
+            budget.charge(BudgetKind::Work, size).map_err(read_reason)?;
+            budget
+                .charge(BudgetKind::Retained, size)
+                .map_err(read_reason)?;
+            if !valid_value(&item.val, &schema) {
+                return Err(HistoryWriteRejection::Unsupported);
+            }
         }
-        // Source-sized bounds precede the first existing-series clone. Original
-        // request accounting already reserved incoming values and sorting space.
+        // Discovery is already charged per row. Reserve the separate full
+        // clone/merge allocations and work before copying any existing value.
+        // Original request accounting covers incoming values and sorting space.
         budget
             .charge(
                 BudgetKind::Retained,
@@ -679,7 +713,7 @@ impl HistoryMutationInner {
         identity: HistoryOperationIdentity,
         budget: &mut Budget,
     ) -> Result<HistoryWriteOutcome, ReadError> {
-        self.principal_bounds(principal, budget)?;
+        self.reserve_binding(principal, &identity, budget)?;
         validate_identity(&identity)
             .map_err(|_| ReadError::InvalidQuery("invalid history operation identity"))?;
         let policy = loop {
@@ -871,4 +905,10 @@ fn provider_reason(error: crate::HistoryProviderError) -> HistoryWriteRejection 
         }
         crate::HistoryProviderError::Failed => HistoryWriteRejection::Provider,
     }
+}
+
+fn identity_bytes(identity: &HistoryOperationIdentity) -> usize {
+    256usize
+        .saturating_add(identity.point.len())
+        .saturating_add(identity.operation_id.len())
 }

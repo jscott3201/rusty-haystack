@@ -232,3 +232,67 @@ fn zinc_special_number_scalar_units_and_inf_prefixed_xstr_remain_distinct() {
         ));
     }
 }
+
+#[test]
+fn review_leap_fraction_datetime_and_time_round_trip_without_changing_original_intent() {
+    for nanos in [
+        1_000_000_000,
+        1_000_000_001,
+        1_123_456_789,
+        1_500_000_000,
+        1_999_999_999,
+    ] {
+        let timestamp = chrono::DateTime::from_timestamp(1_483_228_799, nanos)
+            .unwrap()
+            .fixed_offset();
+        let mut original = request();
+        original.samples[0].ts = HDateTime::new(timestamp, "UTC");
+        let canonical = canonical_request(&original).unwrap();
+        for mime in ["text/zinc", "application/json;v=3", "application/json"] {
+            let codec = codec_for(mime).unwrap();
+            let decoded =
+                decode_request(&encode_request(&original, codec).unwrap(), codec).unwrap();
+            assert_eq!(
+                decoded.samples[0].ts.dt.timestamp_subsec_nanos(),
+                nanos,
+                "{mime}"
+            );
+            assert_eq!(decoded.samples[0].ts, original.samples[0].ts, "{mime}");
+            assert_eq!(canonical_request(&decoded).unwrap(), canonical, "{mime}");
+            for scalar in [
+                Kind::DateTime(original.samples[0].ts.clone()),
+                Kind::Time(timestamp.time()),
+            ] {
+                let encoded = codec.encode_scalar(&scalar).unwrap();
+                assert_eq!(
+                    codec.decode_scalar(&encoded).unwrap(),
+                    scalar,
+                    "{mime}: {encoded}"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn review_second_precision_offsets_remain_typed_but_never_project_to_h4_mutations() {
+    for (stamp, offset, zone) in [
+        ("1880-06-01T00:00:00Z", -17_762, "New_York"),
+        ("1850-01-01T00:00:00Z", 21_208, "Calcutta"),
+    ] {
+        let mut original = request();
+        original.samples[0].ts = HDateTime::new(
+            chrono::DateTime::parse_from_rfc3339(stamp)
+                .unwrap()
+                .with_timezone(&chrono::FixedOffset::east_opt(offset).unwrap()),
+            zone,
+        );
+        let canonical = canonical_request(&original).unwrap();
+        for mime in ["text/zinc", "application/json;v=3", "application/json"] {
+            assert!(
+                encode_request(&original, codec_for(mime).unwrap()).is_err(),
+                "{mime}"
+            );
+        }
+        assert_eq!(canonical_request(&original).unwrap(), canonical);
+    }
+}

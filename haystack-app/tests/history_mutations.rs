@@ -1137,3 +1137,304 @@ async fn history_mutation_selection_requires_the_exact_owned_read_provider_servi
         Err(ReadError::Forbidden)
     ));
 }
+
+fn service_with_read_limits(
+    graph: SharedGraph,
+    provider: Arc<dyn HistoryProvider>,
+    read_limits: ReadLimits,
+    mutation_limits: HistoryMutationLimits,
+) -> HistoryMutationService {
+    let reads = ReadService::new(graph, Arc::new(AllowAll), read_limits).unwrap();
+    let history = HistoryService::new(reads, provider, HistoryLimits::default()).unwrap();
+    HistoryMutationService::new(history, Arc::new(AllowAllHistoryMutations), mutation_limits)
+        .unwrap()
+}
+fn large_principal_context() -> ReadContext {
+    ReadContext::with_timeout(
+        Principal::TrustedEmbedding {
+            subject: "s".repeat(64_000),
+        },
+        Duration::from_secs(3),
+    )
+}
+#[tokio::test]
+async fn review_receipt_lookup_admits_principal_and_outcome_before_missing_or_recognized_copy() {
+    let store = HisStore::new();
+    let provider = Arc::new(Fixture::new(store.clone(), 0));
+    let graph = graph();
+    let original = request(&store, "large-principal", vec![sample(0, num(1.0))]);
+    committed(
+        service(
+            graph.clone(),
+            provider.clone(),
+            Arc::new(AllowAllHistoryMutations),
+        )
+        .submit(large_principal_context(), original.clone())
+        .await
+        .unwrap(),
+    );
+    let before = store.state("p").unwrap();
+    let changes = store.retained_changes();
+    for retained in [false, true] {
+        let limits = if retained {
+            ReadLimits {
+                max_retained_bytes: 1,
+                ..ReadLimits::default()
+            }
+        } else {
+            ReadLimits {
+                max_work: 1,
+                ..ReadLimits::default()
+            }
+        };
+        let narrow = service_with_read_limits(
+            graph.clone(),
+            provider.clone(),
+            limits,
+            HistoryMutationLimits::default(),
+        );
+        for recognized in [false, true] {
+            let mut identity = original.identity.clone();
+            if !recognized {
+                identity.operation_id = "missing".into();
+            }
+            let result = narrow.reconcile(large_principal_context(), identity).await;
+            assert!(
+                matches!(result, Err(ReadError::Budget(_))),
+                "retained={retained}, recognized={recognized}: {result:?}"
+            );
+        }
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(store.receipt_count(), 1);
+    assert_eq!(store.state("p").unwrap(), before);
+    assert_eq!(store.retained_changes(), changes);
+}
+#[tokio::test]
+async fn review_submission_admits_large_principal_before_new_or_recognized_binding() {
+    let store = HisStore::new();
+    let provider = Arc::new(Fixture::new(store.clone(), 0));
+    let graph = graph();
+    let original = request(&store, "large-principal", vec![sample(0, num(1.0))]);
+    committed(
+        service(
+            graph.clone(),
+            provider.clone(),
+            Arc::new(AllowAllHistoryMutations),
+        )
+        .submit(large_principal_context(), original.clone())
+        .await
+        .unwrap(),
+    );
+    let before = store.state("p").unwrap();
+    let changes = store.retained_changes();
+    for retained in [false, true] {
+        let limits = if retained {
+            ReadLimits {
+                max_retained_bytes: 64_000,
+                ..ReadLimits::default()
+            }
+        } else {
+            ReadLimits {
+                max_work: 8_192,
+                ..ReadLimits::default()
+            }
+        };
+        let narrow = service_with_read_limits(
+            graph.clone(),
+            provider.clone(),
+            limits,
+            HistoryMutationLimits::default(),
+        );
+        for recognized in [false, true] {
+            let submitted = if recognized {
+                original.clone()
+            } else {
+                request(&store, "new-large-principal", vec![sample(1, num(2.0))])
+            };
+            let result = narrow.submit(large_principal_context(), submitted).await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(HistoryWriteOutcome::Rejected {
+                        reason: HistoryWriteRejection::Limit,
+                        ..
+                    }) | Err(ReadError::Budget(_))
+                ),
+                "retained={retained}, recognized={recognized}: {result:?}"
+            );
+        }
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(store.receipt_count(), 1);
+    assert_eq!(store.state("p").unwrap(), before);
+    assert_eq!(store.retained_changes(), changes);
+}
+#[tokio::test]
+async fn review_existing_series_stops_for_work_before_a_late_invalid_unit() {
+    let store = HisStore::new();
+    let provider = Arc::new(Fixture::new(store.clone(), 0));
+    let mut items: Vec<_> = (0..200)
+        .map(|second| HisItem {
+            ts: sample(second, num(1.0)).ts.dt,
+            val: num(1.0),
+        })
+        .collect();
+    items.last_mut().unwrap().val =
+        Kind::Number(Number::new(1.0, Some("invalid-unit-sentinel".into())));
+    store.write("p", items).unwrap();
+    let before = store.state("p").unwrap();
+    let changes = store.retained_changes();
+    let narrow = service_with_read_limits(
+        graph(),
+        provider.clone(),
+        ReadLimits {
+            max_work: 40_000,
+            ..ReadLimits::default()
+        },
+        HistoryMutationLimits::default(),
+    );
+    rejected(
+        narrow
+            .submit(
+                context(),
+                request(&store, "bounded-scan", vec![sample(201, num(2.0))]),
+            )
+            .await
+            .unwrap(),
+        HistoryWriteRejection::Limit,
+    );
+    // With sufficient work the same source reaches the independent sentinel.
+    rejected(
+        service(
+            graph(),
+            provider.clone(),
+            Arc::new(AllowAllHistoryMutations),
+        )
+        .submit(
+            context(),
+            request(&store, "sentinel-reached", vec![sample(201, num(2.0))]),
+        )
+        .await
+        .unwrap(),
+        HistoryWriteRejection::Unsupported,
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.receipt_count(), 0);
+    assert_eq!(store.state("p").unwrap(), before);
+    assert_eq!(store.retained_changes(), changes);
+}
+#[tokio::test]
+async fn review_oversized_native_unit_is_bounded_before_registry_lookup() {
+    let store = HisStore::new();
+    let provider = Arc::new(Fixture::new(store.clone(), 0));
+    store
+        .write(
+            "p",
+            vec![HisItem {
+                ts: sample(0, num(1.0)).ts.dt,
+                val: Kind::Number(Number::new(1.0, Some("x".repeat(2 * 1024 * 1024)))),
+            }],
+        )
+        .unwrap();
+    let before = store.state("p").unwrap();
+    let changes = store.retained_changes();
+    let narrow = service_with_read_limits(
+        graph(),
+        provider.clone(),
+        ReadLimits::default(),
+        HistoryMutationLimits {
+            max_prepared_bytes: 4096,
+            ..HistoryMutationLimits::default()
+        },
+    );
+    rejected(
+        narrow
+            .submit(
+                context(),
+                request(&store, "oversized-unit", vec![sample(1, num(2.0))]),
+            )
+            .await
+            .unwrap(),
+        HistoryWriteRejection::Limit,
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.receipt_count(), 0);
+    assert_eq!(store.state("p").unwrap(), before);
+    assert_eq!(store.retained_changes(), changes);
+}
+#[tokio::test]
+async fn review_scoped_admission_rejects_second_offsets_without_changing_native_history() {
+    let graph = graph();
+    graph.write(|graph| {
+        graph
+            .update("p", {
+                let mut row = HDict::new();
+                row.set("tz", Kind::Str("New_York".into()));
+                row
+            })
+            .unwrap();
+    });
+    let store = HisStore::new();
+    let provider = Arc::new(Fixture::new(store.clone(), 0));
+    let utc = chrono::DateTime::parse_from_rfc3339("1880-06-01T00:00:00Z").unwrap();
+    let offset = haystack_core::kinds::offset_at("New_York", utc).unwrap();
+    assert_ne!(offset.local_minus_utc() % 60, 0);
+    let timestamp = HDateTime::new(utc.with_timezone(&offset), "New_York");
+    store
+        .write(
+            "p",
+            vec![HisItem {
+                ts: timestamp.dt,
+                val: num(1.0),
+            }],
+        )
+        .unwrap();
+    let before = store.state("p").unwrap();
+    let changes = store.retained_changes();
+    let writes = service(graph, provider.clone(), Arc::new(AllowAllHistoryMutations));
+    let submitted = request(
+        &store,
+        "second-offset",
+        vec![HistorySample {
+            ts: timestamp.clone(),
+            val: num(2.0),
+        }],
+    );
+    rejected(
+        writes.submit(context(), submitted).await.unwrap(),
+        HistoryWriteRejection::Unsupported,
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(store.receipt_count(), 0);
+    assert_eq!(store.state("p").unwrap(), before);
+    assert_eq!(store.retained_changes(), changes);
+    assert_eq!(store.read("p", None, None)[0].ts, timestamp.dt);
+    let read_request = HistoryReadRequest {
+        id: "p".into(),
+        range: "1880-05-31".into(),
+    };
+    let history = writes.history_service();
+    let native = history
+        .collect(context(), read_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(native.samples.len(), 1);
+    assert_eq!(native.samples[0].ts, timestamp);
+    for output in [H4Codec::Zinc, H4Codec::JsonV3, H4Codec::Json] {
+        let body = haystack_core::codecs::history::encode_request(
+            &read_request,
+            haystack_core::codecs::codec_for("text/zinc").unwrap(),
+        )
+        .unwrap();
+        let admission = history.read_service().begin(context()).await.unwrap();
+        assert!(matches!(
+            history
+                .wire_admitted(admission, body, H4Codec::Zinc, output)
+                .await,
+            Err(ReadError::Projection)
+        ));
+    }
+    assert_eq!(store.state("p").unwrap(), before);
+    assert_eq!(store.read("p", None, None)[0].ts, timestamp.dt);
+}

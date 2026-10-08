@@ -118,3 +118,34 @@ async fn typed_committed_outcome_survives_error_marker_and_native_projection_nev
     assert!(client.his_write_scoped(&request).await.is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn review_unrepresentable_timestamp_offsets_never_dispatch() {
+    let mut original = request();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = HaystackClient::from_transport(Counting {
+        calls: calls.clone(),
+        receipt: receipt(&original),
+        mode: 5,
+    });
+    for (source, zone) in [
+        ("1880-06-01T00:00:00Z UTC", "New_York"),
+        ("1850-01-01T00:00:00Z UTC", "Calcutta"),
+    ] {
+        let Kind::DateTime(mut timestamp) = ZincCodec.decode_scalar(source).unwrap() else {
+            panic!()
+        };
+        let offset = haystack_core::kinds::offset_at(zone, timestamp.dt).unwrap();
+        assert_ne!(offset.local_minus_utc() % 60, 0);
+        timestamp.dt = timestamp.dt.with_timezone(&offset);
+        timestamp.tz_name = zone.into();
+        original.samples[0].ts = timestamp;
+        let canonical = canonical_request(&original).unwrap();
+        assert!(matches!(
+            client.his_write_scoped(&original).await,
+            Err(ClientError::Codec(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(canonical_request(&original).unwrap(), canonical);
+    }
+}

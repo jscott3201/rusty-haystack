@@ -519,6 +519,13 @@ const RESPONSE_FIELDS: &[&str] = &[
 ];
 pub fn result_grid(result: &HistoryReadResult) -> Result<HGrid, TypedPayloadError> {
     validate_result(result)?;
+    if result
+        .samples
+        .iter()
+        .any(|sample| !super::shared::has_minute_offset(&sample.ts.dt))
+    {
+        return Err(invalid());
+    }
     let metadata = &result.metadata;
     let (terminal, reason) = terminal_parts(result.terminal);
     let control = control(dict([

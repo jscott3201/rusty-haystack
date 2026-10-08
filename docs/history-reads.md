@@ -143,3 +143,8 @@ returns a plain grid only after complete bounded collection; a limited,
 interrupted or failed collection is an explicit error, never an ordinary
 partial grid. The server's standalone `start()` convenience method selects its
 legacy provider through the same application ownership path.
+
+Scoped H4 history output preserves leap-second fractions. Sample timestamps with
+second-level UTC offsets cannot be projected into the selected H4 forms and fail
+explicitly rather than changing the instant. Native typed collection and trusted
+stored timestamps retain those original offsets and values.

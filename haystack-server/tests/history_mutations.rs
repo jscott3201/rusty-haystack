@@ -451,3 +451,48 @@ async fn special_number_units_are_preserved_before_http_admission() {
     }
     running.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_http_leap_timestamp_is_stored_at_its_exact_original_instant() {
+    let (graph, builder, store, _) = setup(true);
+    let writes = Arc::new(AtomicUsize::new(0));
+    let running = Running::start(graph, builder, 0, writes.clone()).await;
+    let timestamp = HDateTime::new(
+        chrono::DateTime::from_timestamp(1_483_228_799, 1_500_000_000)
+            .unwrap()
+            .fixed_offset(),
+        "UTC",
+    );
+    let mut observed = Vec::new();
+    for format in ["text/zinc", "application/json;v=3", "application/json"] {
+        let mut original = request(&store, &format!("leap-{format}"));
+        original.samples = vec![HistorySample {
+            ts: timestamp.clone(),
+            val: Kind::Number(Number::unitless(2.0)),
+        }];
+        let client = client(&running.url, format);
+        let receipt = committed(client.his_write_scoped(&original).await.unwrap());
+        let read = client
+            .his_read_scoped(&HistoryReadRequest {
+                id: "p".into(),
+                range: "2016-12-31".into(),
+            })
+            .await
+            .unwrap();
+        observed.push((format, receipt, store.read("p", None, None), read));
+    }
+    running.close().await;
+    assert_eq!(writes.load(Ordering::SeqCst), 3);
+    for (format, receipt, stored, read) in observed {
+        assert_eq!(read.samples.len(), 1);
+        assert_eq!(read.samples[0].ts, timestamp, "{format}");
+        assert_eq!(receipt.submitted_samples, 1);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].ts.timestamp_subsec_nanos(),
+            1_500_000_000,
+            "{format}"
+        );
+        assert_eq!(stored[0].ts, timestamp.dt, "{format}");
+    }
+}
