@@ -1,10 +1,13 @@
 //! Transport-independent, authorized and bounded application reads.
 //!
-//! A service borrows the caller's Tokio runtime and shares an existing graph. It
-//! owns neither a listener nor runtime shutdown. Pure `EntityGraph` remains a
-//! separate trusted in-process API. HTTP adapters authenticate and select a wire
-//! profile; they do not implement resource authorization.
+//! [`ApplicationBuilder`] creates one managed [`ReadService`] and an explicit
+//! lifecycle owner. Adapters share its policy, cursor authority and admission;
+//! selected resources and actual worker completion precede termination.
+//! The runtime remains borrowed. Standalone callers await termination and then
+//! drop their owned runtime outside async. [`ReadService::new`] is an unmanaged
+//! compatibility API. Pure `EntityGraph` remains a trusted in-process API.
 mod budget;
+mod lifecycle;
 mod output;
 mod policy;
 mod sanitize;
@@ -13,6 +16,11 @@ mod types;
 mod wire;
 
 pub use haystack_core::filter::CatalogKind;
+pub use lifecycle::{
+    ApplicationBuilder, ApplicationError, ApplicationHandle, ApplicationOwner, ApplicationResource,
+    ApplicationState, CloseReport, ListenerInfo, ReadyInfo, ResourceContext, ResourceFuture,
+    ShutdownPhase, ShutdownPolicy, TerminationReport, WorkGuard,
+};
 pub use policy::{AllowAll, PolicySnapshot, ReadPolicy};
 pub use service::{ReadAdmission, ReadLoad, ReadService};
 pub use tokio_util::sync::CancellationToken;

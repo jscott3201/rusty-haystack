@@ -21,12 +21,8 @@ pub fn run(cfg: ServeConfig<'_>) {
         eprintln!("Error: failed to create runtime: {e}");
         std::process::exit(1);
     });
-    rt.block_on(async {
-        // Shared with every graph below. Without this the graph has no
-        // namespace and every spec-match filter (`ph::Point`) is refused, even
-        // though the server itself holds the ontology — they are separate
-        // owners, and only the graph's copy is consulted when evaluating a
-        // filter.
+    let result = rt.block_on(async {
+        // The graph is the catalog authority shared by application adapters.
         let ns = std::sync::Arc::new(DefNamespace::load_standard().unwrap_or_else(|e| {
             eprintln!("Error loading ontology: {}", e);
             std::process::exit(1);
@@ -102,23 +98,55 @@ pub fn run(cfg: ServeConfig<'_>) {
             CorsPolicy::Allow(cfg.cors_origins)
         };
 
-        HaystackServer::new(graph)
-            // The server keeps its own mutable copy: the lib load/unload
-            // endpoints mutate it, and the graphs must not see that shift.
+        let owner = HaystackServer::new(graph)
             .with_namespace((*ns).clone())
             .with_auth(auth)
             .with_cors(cors)
             .host(bind_host)
             .port(cfg.port)
-            // Printed after the bind succeeds, so it is a readiness signal as well
-            // as an address. The old banner was printed before binding and reported
-            // the REQUESTED port, which made it useless for both purposes and left
-            // `--port 0` undiscoverable.
-            .run_reporting_addr(|addr| println!("Listening on {addr}"))
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("Server error: {}", e);
-                std::process::exit(1);
-            });
+            .start()
+            .map_err(|error| error.to_string())?;
+        let ready = match owner.ready().await {
+            Ok(ready) => ready,
+            Err(error) => {
+                owner.terminated().await;
+                return Err(error.to_string());
+            }
+        };
+        println!("Listening on {}", ready.listeners[0].address);
+        let signal = tokio::select! {
+            result = shutdown_signal() => result,
+            report = owner.terminated() => return report.close.map(|_| ()).map_err(|error| error.to_string()),
+        };
+        let closed = owner.close().await;
+        if let Err(error) = &closed {
+            eprintln!("Application close: {error}; waiting for owned cleanup to finish");
+        }
+        // A timeout reports failure, not completion. Keep the runtime driving
+        // until queued/running work and cleanup hooks have actually finished.
+        owner.terminated().await;
+        signal.map_err(|error| error.to_string())?;
+        closed.map(|_| ()).map_err(|error| error.to_string())
     });
+    // Runtime destruction is outside the asynchronous context and follows the
+    // application's termination receipt, including late cleanup after timeout.
+    drop(rt);
+    if let Err(error) = result {
+        eprintln!("Server error: {error}");
+        std::process::exit(1);
+    }
+}
+
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

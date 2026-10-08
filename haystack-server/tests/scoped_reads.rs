@@ -37,15 +37,25 @@ struct Server {
     task: Option<JoinHandle<()>>,
 }
 impl Server {
-    fn start(server: HaystackServer) -> Self {
-        let (stop, mut stopped) = oneshot::channel();
+    fn start(application: ApplicationBuilder, server: HaystackServer) -> Self {
+        let (stop, stopped) = oneshot::channel();
         let (tx, rx) = mpsc::channel();
         let task = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(async move { tokio::select! { _=&mut stopped=>{}, result=server.port(0).run_reporting_addr(move|a|tx.send(a).unwrap())=>result.unwrap(), } });
+            runtime.block_on(async move {
+                let owner = application
+                    .owned_resource(server.port(0).into_listener())
+                    .start(&tokio::runtime::Handle::current())
+                    .unwrap();
+                let ready = owner.ready().await.unwrap();
+                tx.send(ready.listeners[0].address).unwrap();
+                let _ = stopped.await;
+                owner.close().await.unwrap();
+                owner.terminated().await;
+            });
         });
         let address = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         Self {
@@ -110,7 +120,7 @@ impl PolicySnapshot for Snapshot {
         true
     }
 }
-fn fixture() -> (SharedGraph, ReadService, Arc<AtomicUsize>) {
+fn fixture() -> (SharedGraph, ApplicationBuilder, Arc<AtomicUsize>) {
     let mut ns = DefNamespace::new();
     ns.load_xeto_str("Thing: Dict {\n  site\n}\n", "visible")
         .unwrap();
@@ -137,13 +147,13 @@ fn fixture() -> (SharedGraph, ReadService, Arc<AtomicUsize>) {
         graph.add(row).unwrap();
     }
     let calls = Arc::new(AtomicUsize::new(0));
-    let service = ReadService::new(
+    let application = ApplicationBuilder::new(
         graph.clone(),
         Arc::new(Rules(calls.clone())),
         ReadLimits::default(),
     )
     .unwrap();
-    (graph, service, calls)
+    (graph, application, calls)
 }
 fn auth() -> AuthManager {
     let users=HashMap::from([("user".into(),UserRecord { credentials: parse_password_hash("W22ZaJ0SNY7soEsUEjb6gQ==:4096:WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU=").unwrap(),permissions:vec!["read".into()] })]);
@@ -213,12 +223,13 @@ async fn compare(
 #[tokio::test]
 async fn real_http_and_embedded_reads_share_identity_policy_refs_and_catalogs() {
     for authenticated in [false, true] {
-        let (graph, svc, _) = fixture();
-        let mut builder = HaystackServer::new(graph).with_scoped_reads(svc.clone());
+        let (graph, application, _) = fixture();
+        let svc = application.handle().read_service();
+        let mut builder = HaystackServer::new(graph).with_scoped_reads(application.handle());
         if authenticated {
             builder = builder.with_auth(auth());
         }
-        let server = Server::start(builder);
+        let server = Server::start(application, builder);
         for codec in [H4Codec::Zinc, H4Codec::Json, H4Codec::JsonV3] {
             let ids = vec!["z", "a", "denied", "missing", "private", "a"];
             let body = format!(
@@ -353,17 +364,16 @@ impl ActionHandler for CountAction {
 }
 #[tokio::test]
 async fn scoped_capabilities_disable_every_bypass_before_decode_or_provider_invocation() {
-    let (graph, svc, policy_calls) = fixture();
+    let (graph, application, policy_calls) = fixture();
     let providers = Arc::new(AtomicUsize::new(0));
     let mut actions = ActionRegistry::new();
     actions.register(Box::new(CountAction(providers.clone())));
     let before = graph.read(|g| (g.version(), g.catalog_generation()));
-    let server = Server::start(
-        HaystackServer::new(graph.clone())
-            .with_scoped_reads(svc)
-            .with_actions(actions)
-            .with_history_provider(Box::new(CountHistory(providers.clone()))),
-    );
+    let server_builder = HaystackServer::new(graph.clone())
+        .with_scoped_reads(application.handle())
+        .with_actions(actions)
+        .with_history_provider(Box::new(CountHistory(providers.clone())));
+    let server = Server::start(application, server_builder);
     let client = haystack_client::ClientConfig::default()
         .build_reqwest_client()
         .unwrap();
@@ -456,29 +466,32 @@ async fn scoped_capabilities_disable_every_bypass_before_decode_or_provider_invo
 async fn scoped_custom_routes_require_explicit_external_authority_before_binding() {
     use axum::{Router, routing::get};
     for authenticated in [false, true] {
-        let (graph, svc, _) = fixture();
+        let (graph, application, _) = fixture();
         let before = graph.read(|g| g.catalog_generation());
         let custom = Router::new().route("/external", get(|| async { "external" }));
-        let builder = HaystackServer::new(graph.clone()).with_scoped_reads(svc);
+        let builder = HaystackServer::new(graph.clone()).with_scoped_reads(application.handle());
         let builder = if authenticated {
             builder.with_authenticated_router(custom)
         } else {
             builder.with_router(custom)
         };
-        let result = builder
-            .port(0)
-            .run_reporting_addr(|_| panic!("must reject before bind"))
-            .await;
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        let owner = application
+            .owned_resource(builder.port(0).into_listener())
+            .start(&tokio::runtime::Handle::current())
+            .unwrap();
+        let error = owner.ready().await.unwrap_err();
+        assert!(
+            matches!(error, ApplicationError::Resource { message, .. } if message.contains("explicit trusted external authority"))
+        );
+        assert!(owner.terminated().await.close.is_err());
         assert_eq!(before, graph.read(|g| g.catalog_generation()));
     }
-    let (graph, svc, _) = fixture();
-    let server = Server::start(
-        HaystackServer::new(graph)
-            .with_scoped_reads(svc)
-            .with_router(Router::new().route("/external", get(|| async { "external" })))
-            .with_trusted_external_routes(),
-    );
+    let (graph, application, _) = fixture();
+    let server_builder = HaystackServer::new(graph)
+        .with_scoped_reads(application.handle())
+        .with_router(Router::new().route("/external", get(|| async { "external" })))
+        .with_trusted_external_routes();
+    let server = Server::start(application, server_builder);
     let response = haystack_client::ClientConfig::default()
         .build_reqwest_client()
         .unwrap()
@@ -491,12 +504,14 @@ async fn scoped_custom_routes_require_explicit_external_authority_before_binding
 
 #[tokio::test]
 async fn wire_metadata_continuations_can_move_between_http_and_embedding() {
-    let (graph, service, _) = fixture();
+    let (graph, application, _) = fixture();
+    let service = application.handle().read_service();
     let mut extra = HDict::new();
     extra.set("id", Kind::Ref(HRef::from_val("b")));
     extra.set("site", Kind::Marker);
     graph.add(extra).unwrap();
-    let server = Server::start(HaystackServer::new(graph).with_scoped_reads(service.clone()));
+    let server_builder = HaystackServer::new(graph).with_scoped_reads(application.handle());
+    let server = Server::start(application, server_builder);
     let client = haystack_client::ClientConfig::default()
         .build_reqwest_client()
         .unwrap();

@@ -24,6 +24,7 @@ rand.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 regex.workspace = true
+futures-util.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 

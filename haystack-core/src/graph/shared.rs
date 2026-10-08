@@ -57,6 +57,12 @@ impl SharedGraph {
         }
     }
 
+    /// Whether both handles refer to the same graph storage, including after
+    /// graph replacement. This compares ownership, not entity contents.
+    pub fn shares_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Subscribe to graph change notifications.
     ///
     /// Returns a receiver that yields the new graph version after each

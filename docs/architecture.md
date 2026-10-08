@@ -5,7 +5,7 @@
 | Crate | Workspace dependencies | Responsibility |
 | --- | --- | --- |
 | `haystack-core` | None | Types, codecs, pure graph and query/catalog machinery |
-| `haystack-app` | core | Authorized, bounded application reads shared by embedding and HTTP |
+| `haystack-app` | core | Application lifecycle, resource ownership, and bounded shared reads |
 | `haystack-client` | core | HTTP/WebSocket client and authentication |
 | `haystack-server` | core, app, client | HTTP profiles, authentication and legacy providers |
 | `haystack-cli` | core, client, server | Command-line application |
@@ -14,7 +14,9 @@
 The application read service has no HTTP-framework dependency. Its scoped HTTP
 adapter and embedded callers share the same policy and execution contracts;
 see [shared reads](shared-reads.md). The legacy server profile remains explicit
-compatibility behavior.
+compatibility behavior. The [application lifecycle](application-lifecycle.md)
+owns admission, selected resources, and actual work completion; caller-provided
+Tokio runtimes remain borrowed.
 
 ## Core Abstractions
 

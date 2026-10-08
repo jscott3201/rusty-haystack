@@ -1,12 +1,12 @@
 use super::*;
-use haystack_app::{AllowAll, ReadLimits, ReadService};
+use haystack_app::{AllowAll, ApplicationBuilder, ApplicationOwner, ReadLimits, ReadService};
 use haystack_core::graph::EntityGraph;
 use std::time::Duration;
 use tower::ServiceExt;
 
-fn app(duration: Duration, bytes: usize) -> (Router, ReadService) {
+async fn app(duration: Duration, bytes: usize) -> (Router, ReadService, ApplicationOwner) {
     let graph = SharedGraph::new(EntityGraph::new());
-    let service = ReadService::new(
+    let application = ApplicationBuilder::new(
         graph.clone(),
         Arc::new(AllowAll),
         ReadLimits {
@@ -18,13 +18,16 @@ fn app(duration: Duration, bytes: usize) -> (Router, ReadService) {
         },
     )
     .unwrap();
-    (
-        HaystackServer::new(graph)
-            .with_scoped_reads(service.clone())
-            .build_router()
-            .unwrap(),
-        service,
-    )
+    let service = application.handle().read_service();
+    let router = HaystackServer::new(graph)
+        .with_scoped_reads(application.handle())
+        .into_external_router()
+        .unwrap();
+    let owner = application
+        .start(&tokio::runtime::Handle::current())
+        .unwrap();
+    owner.ready().await.unwrap();
+    (router, service, owner)
 }
 fn pending_request() -> Request<Body> {
     let body = Body::from_stream(futures_util::stream::pending::<
@@ -52,7 +55,7 @@ async fn wait_idle(service: &ReadService) {
 }
 #[tokio::test]
 async fn body_collection_is_admitted_and_abort_releases_its_single_slot() {
-    let (router, service) = app(Duration::from_secs(2), 1024);
+    let (router, service, owner) = app(Duration::from_secs(2), 1024).await;
     let first = tokio::spawn(router.clone().oneshot(pending_request()));
     wait_active(&service).await;
     let response = router.clone().oneshot(pending_request()).await.unwrap();
@@ -69,17 +72,19 @@ async fn body_collection_is_admitted_and_abort_releases_its_single_slot() {
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     wait_idle(&service).await;
+    owner.close().await.unwrap();
 }
 #[tokio::test]
 async fn deadline_and_input_ceiling_apply_while_collecting_body() {
-    let (router, service) = app(Duration::from_millis(50), 1024);
+    let (router, service, owner) = app(Duration::from_millis(50), 1024).await;
     let response = tokio::time::timeout(Duration::from_secs(1), router.oneshot(pending_request()))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     wait_idle(&service).await;
-    let (router, service) = app(Duration::from_secs(2), 16);
+    owner.close().await.unwrap();
+    let (router, service, owner) = app(Duration::from_secs(2), 16).await;
     let response = router
         .oneshot(
             Request::post("/api/read")
@@ -90,4 +95,5 @@ async fn deadline_and_input_ceiling_apply_while_collecting_body() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     wait_idle(&service).await;
+    owner.close().await.unwrap();
 }

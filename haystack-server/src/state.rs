@@ -15,6 +15,8 @@ pub type SharedState = Arc<AppState>;
 
 /// Shared application state injected into every Axum handler via `State`.
 pub struct AppState {
+    /// Application lifetime for requests and upgraded connections.
+    pub application: Option<haystack_app::ApplicationHandle>,
     /// Thread-safe entity graph.
     pub graph: SharedGraph,
     /// Application read authority, present only in the scoped service profile.
@@ -31,7 +33,7 @@ pub struct AppState {
     /// Action dispatch registry for the `invokeAction` op.
     pub actions: ActionRegistry,
     /// Pluggable time-series history store for hisRead/hisWrite.
-    pub his: Box<dyn HistoryProvider>,
+    pub his: Arc<dyn HistoryProvider>,
     /// Instant when the server was started, used for uptime calculation.
     pub started_at: std::time::Instant,
 }

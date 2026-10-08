@@ -114,6 +114,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | [Architecture](docs/architecture.md) | System design, crate dependencies, core abstractions |
 | [Getting Started](docs/getting-started.md) | Build, run, first API call, Docker |
 | [Shared reads](docs/shared-reads.md) | Read policy, paging, budgets, wire profiles, and scoped HTTP setup |
+| [Application lifecycle](docs/application-lifecycle.md) | Readiness, owned resources, shutdown, and borrowed runtime boundaries |
 | [Server API](docs/server-api.md) | All HTTP endpoints, auth flow, WebSocket protocol |
 | [Client Library](docs/client.md) | HaystackClient API, transports, authentication |
 | [CLI Reference](docs/cli.md) | All commands, flags, and examples |

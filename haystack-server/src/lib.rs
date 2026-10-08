@@ -42,6 +42,6 @@ pub mod ops;
 pub mod state;
 pub mod ws;
 
-pub use app::HaystackServer;
+pub use app::{HaystackServer, HttpListener};
 pub use capabilities::ServiceProfile;
 pub use his_provider::HistoryProvider;

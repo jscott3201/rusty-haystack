@@ -20,7 +20,7 @@ path = "src/main.rs"
 haystack-core.workspace = true
 haystack-server.workspace = true
 haystack-client.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 clap = { workspace = true, features = ["derive"] }
 toml.workspace = true
 serde = { workspace = true, features = ["derive"] }

@@ -11,7 +11,13 @@ cargo build -p haystack-cli --release
 
 ### `serve`
 
-Start the Haystack HTTP API server.
+Start the Haystack HTTP API server. The `Listening on` banner reports the actual
+bound address after application readiness, including when `--port 0` is used.
+Ctrl-C and, on Unix, SIGTERM seal admission and initiate shutdown. The CLI waits
+for owned HTTP/WebSocket work and provider cleanup before dropping its Tokio
+runtime outside the asynchronous context. If the close deadline expires, it
+reports the error and keeps waiting for actual termination; non-cooperative
+code can therefore delay process exit. See [application lifecycle](application-lifecycle.md).
 
 ```sh
 haystack serve [OPTIONS]

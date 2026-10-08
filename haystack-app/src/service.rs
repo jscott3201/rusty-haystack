@@ -1,5 +1,6 @@
 use crate::{
     budget::Budget,
+    lifecycle::{ApplicationError, Lifecycle, WorkGuard},
     output,
     policy::{PolicySnapshot, ReadPolicy},
     sanitize::{self, View},
@@ -37,6 +38,7 @@ pub struct ReadService {
     inner: Arc<Inner>,
 }
 struct Inner {
+    lifecycle: Option<Arc<Lifecycle>>,
     graph: SharedGraph,
     dataset: [u8; 16],
     policy: Arc<dyn ReadPolicy>,
@@ -103,6 +105,7 @@ impl ReadService {
         limits.validate()?;
         Ok(Self {
             inner: Arc::new(Inner {
+                lifecycle: None,
                 graph,
                 dataset: rand::random(),
                 policy,
@@ -113,6 +116,24 @@ impl ReadService {
                 cursors: Mutex::new(CursorTable::default()),
             }),
         })
+    }
+    pub(crate) fn managed(
+        graph: SharedGraph,
+        policy: Arc<dyn ReadPolicy>,
+        limits: ReadLimits,
+        lifecycle: Arc<Lifecycle>,
+    ) -> Result<Self, ReadError> {
+        let mut service = Self::new(graph, policy, limits)?;
+        Arc::get_mut(&mut service.inner)
+            .expect("new service")
+            .lifecycle = Some(lifecycle);
+        Ok(service)
+    }
+    /// Whether both handles share this exact service, including policy, cursor
+    /// authority and admission. Independently constructed services differ even
+    /// when they refer to the same graph.
+    pub fn same_service(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
     /// Administrative graph handle for the owning application, outside the
     /// resource-policy API. Native callers already holding it remain trusted.
@@ -159,10 +180,42 @@ impl ReadService {
     /// Register a logical request before body collection. Move this admission
     /// into `read_wire` after bounded collection; no second slot is acquired.
     pub async fn begin(&self, context: ReadContext) -> Result<ReadAdmission, ReadError> {
+        let guard = self
+            .inner
+            .lifecycle
+            .as_ref()
+            .map(|life| life.admit().map_err(application_read_error))
+            .transpose()?;
+        self.begin_with_guard(context, guard).await
+    }
+    /// Continue an operation already admitted by this application's transport.
+    /// The guard must belong to the exact application; no fresh admission is
+    /// made during drain, and the registration moves into body/worker lifetime.
+    pub async fn begin_admitted(
+        &self,
+        context: ReadContext,
+        guard: WorkGuard,
+    ) -> Result<ReadAdmission, ReadError> {
+        if !self
+            .inner
+            .lifecycle
+            .as_ref()
+            .is_some_and(|life| Arc::ptr_eq(life, &guard.lifecycle))
+        {
+            return Err(ReadError::Forbidden);
+        }
+        self.begin_with_guard(context, Some(guard)).await
+    }
+    async fn begin_with_guard(
+        &self,
+        context: ReadContext,
+        guard: Option<WorkGuard>,
+    ) -> Result<ReadAdmission, ReadError> {
         let now = Instant::now();
         let deadline = context.deadline.min(now + self.inner.limits.max_duration);
         let cancel = context.cancellation.child_token();
-        let budget = Budget::new(self.inner.limits.clone(), deadline, cancel);
+        let mut budget = Budget::new(self.inner.limits.clone(), deadline, cancel);
+        budget.owner_cancel = guard.as_ref().map(WorkGuard::cancellation);
         budget.check()?;
         let permit = self.admit(&budget).await?;
         Ok(ReadAdmission {
@@ -170,6 +223,7 @@ impl ReadService {
             principal: Some(context.principal),
             budget: Some(budget),
             permit: Some(permit),
+            guard,
         })
     }
     async fn run(&self, context: ReadContext, input: Input) -> Result<ReadPage, ReadError> {
@@ -188,7 +242,7 @@ impl ReadService {
             .map_err(|_| ReadError::Capacity)?;
         tokio::select! {
             permit = self.inner.active.clone().acquire_owned() => { budget.check()?; permit.map_err(|_| ReadError::Unavailable) },
-            _ = budget.cancel.cancelled() => Err(ReadError::Cancelled),
+            _ = budget.cancelled() => Err(ReadError::Cancelled),
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(budget.deadline)) => Err(ReadError::Deadline),
         }
     }
@@ -201,6 +255,7 @@ pub struct ReadAdmission {
     principal: Option<Principal>,
     budget: Option<Budget>,
     permit: Option<OwnedSemaphorePermit>,
+    guard: Option<WorkGuard>,
 }
 impl Drop for ReadAdmission {
     fn drop(&mut self) {
@@ -215,6 +270,14 @@ impl ReadAdmission {
     }
     pub fn cancellation(&self) -> CancellationToken {
         self.budget.as_ref().expect("live admission").cancel.clone()
+    }
+    /// Wait for either caller cancellation or the application cooperative stop.
+    pub async fn cancelled(&self) {
+        self.budget
+            .as_ref()
+            .expect("live admission")
+            .cancelled()
+            .await;
     }
     pub async fn read(self, request: ReadRequest) -> Result<ReadPage, ReadError> {
         self.run(Input::Request(request)).await
@@ -240,6 +303,7 @@ impl ReadAdmission {
         let permit = self.permit.take().expect("live admission");
         let cancel = budget.cancel.clone();
         let deadline = budget.deadline;
+        let owner_cancel = budget.owner_cancel.clone();
         let mut drop_guard = CancelOnDrop {
             token: cancel.clone(),
             armed: true,
@@ -247,6 +311,9 @@ impl ReadAdmission {
         budget.check()?;
         let inner = self.inner.clone();
         let mut job = spawn_read_worker(inner, principal, input, budget, permit);
+        // The tracked worker registration now exists, so this handoff cannot
+        // momentarily make the application appear empty during close.
+        drop(self.guard.take());
         let result = tokio::select! {
             biased;
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
@@ -255,6 +322,13 @@ impl ReadAdmission {
                 Err(ReadError::Deadline)
             },
             _ = cancel.cancelled() => {
+                job.abort();
+                Err(ReadError::Cancelled)
+            },
+            _ = async {
+                match owner_cancel { Some(token) => token.cancelled().await, None => std::future::pending::<()>().await }
+            } => {
+                cancel.cancel();
                 job.abort();
                 Err(ReadError::Cancelled)
             },
@@ -268,12 +342,11 @@ impl ReadAdmission {
     }
 }
 
-/// One spawn/completion-handle boundary for a future application lifecycle owner.
-/// The caller currently joins ordinary completion; stop or caller drop leaves
-/// execution owned by the caller's Tokio runtime. Neither abort nor a returned
-/// error is a join receipt. In particular, Tokio may keep an aborted closure in
-/// its blocking queue, so admission belongs in the closure capture, never in
-/// the awaiting caller. All captures release on real exit, panic or task drop.
+/// Managed workers carry a tracker registration through the runtime's actual
+/// closure lifetime; unmanaged workers keep their caller-runtime contract.
+/// Neither abort nor a returned request error is a join receipt. Tokio may keep
+/// an aborted closure in its blocking queue, so admission and registration
+/// belong to the closure capture rather than the awaiting caller.
 fn spawn_read_worker(
     inner: Arc<Inner>,
     principal: Principal,
@@ -281,11 +354,16 @@ fn spawn_read_worker(
     mut budget: Budget,
     permit: OwnedSemaphorePermit,
 ) -> tokio::task::JoinHandle<Result<ReadPage, ReadError>> {
-    tokio::task::spawn_blocking(move || {
+    let lifecycle = inner.lifecycle.clone();
+    let work = move || {
         let _permit = permit;
         budget.check()?;
         inner.execute(principal, input, &mut budget)
-    })
+    };
+    match lifecycle {
+        Some(life) => life.tasks.spawn_blocking_on(work, &life.runtime()),
+        None => tokio::task::spawn_blocking(work),
+    }
 }
 
 impl Inner {
@@ -928,4 +1006,11 @@ fn catalog_row(
         }
     }
     Ok(row)
+}
+
+fn application_read_error(error: ApplicationError) -> ReadError {
+    match error {
+        ApplicationError::NotReady => ReadError::NotReady,
+        _ => ReadError::Closed,
+    }
 }

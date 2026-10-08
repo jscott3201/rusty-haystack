@@ -9,6 +9,7 @@ pub(crate) struct Budget {
     pub limits: Arc<ReadLimits>,
     pub deadline: Instant,
     pub cancel: CancellationToken,
+    pub owner_cancel: Option<CancellationToken>,
     work: usize,
     retained: usize,
     values: usize,
@@ -22,6 +23,7 @@ impl Budget {
             limits,
             deadline,
             cancel,
+            owner_cancel: None,
             work: 0,
             retained: 0,
             values: 0,
@@ -33,10 +35,26 @@ impl Budget {
     pub fn check(&self) -> Result<(), ReadError> {
         if Instant::now() >= self.deadline {
             Err(ReadError::Deadline)
-        } else if self.cancel.is_cancelled() {
+        } else if self.cancel.is_cancelled()
+            || self
+                .owner_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
             Err(ReadError::Cancelled)
         } else {
             Ok(())
+        }
+    }
+    pub async fn cancelled(&self) {
+        tokio::select! {
+            _ = self.cancel.cancelled() => {},
+            _ = async {
+                match &self.owner_cancel {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {},
         }
     }
     pub fn wait_quantum(&self) -> Result<Duration, ReadError> {

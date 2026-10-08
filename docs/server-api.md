@@ -3,6 +3,12 @@
 This page describes the legacy compatibility profile. Embedders selecting
 `HaystackServer::with_scoped_reads` use the restricted operation set, policy,
 paging, and budget contracts documented in [shared reads](shared-reads.md).
+Both profiles can attach owned listeners to the [application lifecycle](application-lifecycle.md).
+`HaystackServer::start()` provides a legacy convenience owner; await `ready()`
+for the bound address and `close()`/`terminated()` for shutdown completion.
+`POST /api/close` continues to log out the bearer session and does not stop the
+application. New requests after application sealing return 503 when they reach
+an existing router; the owned listener stops accepting connections.
 
 The Haystack server (built on Axum) exposes all endpoints under `/api`. All POST endpoints accept and return grids in the negotiated wire format.
 
