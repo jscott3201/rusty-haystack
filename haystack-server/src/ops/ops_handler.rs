@@ -19,7 +19,7 @@ pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Res
 
     let ops = crate::capabilities::CAPABILITIES
         .iter()
-        .filter(|capability| capability.enabled(state.profile));
+        .filter(|capability| capability.enabled(state.profile, state.mutation_service.is_some()));
 
     let cols = vec![HCol::new("name"), HCol::new("summary")];
     let rows: Vec<HDict> = ops

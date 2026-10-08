@@ -140,6 +140,12 @@ impl ReadService {
     pub fn graph(&self) -> SharedGraph {
         self.inner.graph.clone()
     }
+    pub(crate) fn policy_snapshot(
+        &self,
+        principal: &Principal,
+    ) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
+        self.inner.policy.snapshot(principal)
+    }
     pub fn limits(&self) -> &ReadLimits {
         &self.inner.limits
     }
@@ -216,6 +222,7 @@ impl ReadService {
         let cancel = context.cancellation.child_token();
         let mut budget = Budget::new(self.inner.limits.clone(), deadline, cancel);
         budget.owner_cancel = guard.as_ref().map(WorkGuard::cancellation);
+        budget.owner_sealed = guard.as_ref().map(WorkGuard::closing);
         budget.check()?;
         let permit = self.admit(&budget).await?;
         Ok(ReadAdmission {
@@ -249,13 +256,20 @@ impl ReadService {
 }
 /// Owns one logical request slot through body collection and worker execution.
 /// Dropping before execution cancels collection and releases its slot; after the
-/// handoff the worker retains the permit until it actually exits.
+/// handoff the worker and any deferred mutation plan share ownership until both
+/// actually release it.
 pub struct ReadAdmission {
     inner: Arc<Inner>,
     principal: Option<Principal>,
     budget: Option<Budget>,
     permit: Option<OwnedSemaphorePermit>,
     guard: Option<WorkGuard>,
+}
+/// Shared execution ownership, also retained by a provider-held mutation plan.
+/// The original registration transfers here without an untracked handoff gap.
+pub(crate) struct WorkLease {
+    _permit: OwnedSemaphorePermit,
+    _guard: Option<WorkGuard>,
 }
 impl Drop for ReadAdmission {
     fn drop(&mut self) {
@@ -297,8 +311,19 @@ impl ReadAdmission {
         })
         .await
     }
-    async fn run(mut self, input: Input) -> Result<ReadPage, ReadError> {
-        let budget = self.budget.take().expect("live admission");
+    async fn run(self, input: Input) -> Result<ReadPage, ReadError> {
+        let inner = self.inner.clone();
+        self.run_task(move |principal, budget| inner.execute(principal, input, budget))
+            .await
+    }
+    pub(crate) fn belongs_to(&self, service: &ReadService) -> bool {
+        Arc::ptr_eq(&self.inner, &service.inner)
+    }
+    pub(crate) async fn run_task<T: Send + 'static>(
+        mut self,
+        task: impl FnOnce(Principal, &mut Budget) -> Result<T, ReadError> + Send + 'static,
+    ) -> Result<T, ReadError> {
+        let mut budget = self.budget.take().expect("live admission");
         let principal = self.principal.take().expect("live admission");
         let permit = self.permit.take().expect("live admission");
         let cancel = budget.cancel.clone();
@@ -310,10 +335,11 @@ impl ReadAdmission {
         };
         budget.check()?;
         let inner = self.inner.clone();
-        let mut job = spawn_read_worker(inner, principal, input, budget, permit);
-        // The tracked worker registration now exists, so this handoff cannot
-        // momentarily make the application appear empty during close.
-        drop(self.guard.take());
+        budget.lease = Some(Arc::new(WorkLease {
+            _permit: permit,
+            _guard: self.guard.take(),
+        }));
+        let mut job = spawn_worker(inner, principal, task, budget);
         let result = tokio::select! {
             biased;
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
@@ -347,21 +373,19 @@ impl ReadAdmission {
 /// Neither abort nor a returned request error is a join receipt. Tokio may keep
 /// an aborted closure in its blocking queue, so admission and registration
 /// belong to the closure capture rather than the awaiting caller.
-fn spawn_read_worker(
+fn spawn_worker<T: Send + 'static>(
     inner: Arc<Inner>,
     principal: Principal,
-    input: Input,
+    task: impl FnOnce(Principal, &mut Budget) -> Result<T, ReadError> + Send + 'static,
     mut budget: Budget,
-    permit: OwnedSemaphorePermit,
-) -> tokio::task::JoinHandle<Result<ReadPage, ReadError>> {
+) -> tokio::task::JoinHandle<Result<T, ReadError>> {
     let lifecycle = inner.lifecycle.clone();
     let work = move || {
-        let _permit = permit;
         budget.check()?;
-        inner.execute(principal, input, &mut budget)
+        task(principal, &mut budget)
     };
     match lifecycle {
-        Some(life) => life.tasks.spawn_blocking_on(work, &life.runtime()),
+        Some(life) => life.runtime().spawn_blocking(work),
         None => tokio::task::spawn_blocking(work),
     }
 }

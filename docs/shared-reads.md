@@ -56,9 +56,11 @@ selects the restricted capability set:
 | `defs`, `libs`, `specs`, `spec` | Bounded authorized catalog reads |
 | `about`, `ops`, `formats`, `close` | Static capability/authentication information and logout |
 
-`export`, `changes`, `ws`, every watch operation, `hisRead`, `hisWrite`, `pointWrite`,
+`export`, `ws`, every watch operation, `hisRead`, `hisWrite`, `pointWrite`,
 `invokeAction`, `import`, `loadLib`, `unloadLib`, `exportLib`, and `validate` have no
-routes in the scoped profile. A single capability registry drives routing and
+routes in the scoped profile. Explicitly selecting a `MutationService` adds
+`entityBatch`, `entityReceipt` and versioned `changes`; see [entity mutation and
+feed contracts](entity-mutations.md). A single capability registry drives routing and
 `ops`. Unavailable routes return 404 before body decoding or provider callbacks.
 
 Custom routers receive privileged application state. Both `with_router` and

@@ -1,4 +1,8 @@
 // EntityGraph — in-memory entity store with bitmap indexing and ref adjacency.
+#[path = "prepared.rs"]
+mod prepared;
+pub(crate) use prepared::IndexChange;
+pub use prepared::{BatchError, BatchLimits, EntityOperation, PreparedBatch, PreparedChange};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -14,11 +18,11 @@ use crate::ontology::{DefNamespace, ValidationIssue};
 
 use super::adjacency::RefAdjacency;
 use super::bitmap::TagBitmapIndex;
-use super::changelog::{ChangelogGap, DiffOp, GraphDiff};
+use super::changelog::{ChangelogGap, CommitSpan, DiffOp, GraphDiff};
 use super::value_index::ValueIndex;
 
 /// Errors returned by EntityGraph operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GraphError {
     #[error("entity missing 'id' tag")]
     MissingId,
@@ -34,6 +38,8 @@ pub enum GraphError {
     Filter(String),
     #[error("entity ID space exhausted (max {MAX_ENTITY_ID})")]
     IdExhausted,
+    #[error("entity revision space exhausted")]
+    RevisionExhausted,
 }
 
 /// A catalog publication was based on an obsolete generation.
@@ -72,6 +78,8 @@ pub struct EntityGraph {
     changelog: std::collections::VecDeque<GraphDiff>,
     /// Maximum number of changelog entries retained.
     changelog_capacity: usize,
+    changelog_byte_capacity: usize,
+    changelog_bytes: usize,
     /// Lowest version still present in the changelog (0 = no evictions yet).
     floor_version: u64,
     /// LRU query cache: (filter, version) → matching ref_vals.
@@ -81,6 +89,7 @@ pub struct EntityGraph {
     ast_cache: Mutex<HashMap<String, FilterNode>>,
     /// Optional B-Tree value indexes for comparison-based filter acceleration.
     value_index: ValueIndex,
+    index_generation: u64,
 }
 
 /// Fixed-capacity LRU cache for filter query results using IndexMap for O(1) ops.
@@ -173,11 +182,27 @@ impl EntityGraph {
             version: 0,
             changelog: std::collections::VecDeque::new(),
             changelog_capacity: capacity,
+            changelog_byte_capacity: super::changelog::DEFAULT_CHANGELOG_BYTES,
+            changelog_bytes: 0,
             floor_version: 0,
             query_cache: Mutex::new(QueryCache::new(DEFAULT_QUERY_CACHE_CAPACITY)),
             ast_cache: Mutex::new(HashMap::new()),
             value_index,
+            index_generation: 0,
         }
+    }
+
+    /// Configure count and conservative retained-value bytes. Retention evicts
+    /// complete commit units. A native unit too large to retain creates a gap.
+    pub fn with_changelog_limits(capacity: usize, bytes: usize) -> Self {
+        Self {
+            changelog_byte_capacity: bytes.max(1),
+            ..Self::with_changelog_capacity(capacity)
+        }
+    }
+
+    pub(crate) fn renew_incarnation(&mut self) {
+        self.incarnation = rand::random();
     }
 
     /// Create an entity graph with an ontology namespace.
@@ -207,6 +232,14 @@ impl EntityGraph {
     /// Catalog revision captured under the same graph guard as entity revision.
     pub fn catalog_generation(&self) -> u64 {
         self.catalog_generation
+    }
+
+    pub fn state(&self) -> super::changelog::GraphState {
+        super::changelog::GraphState {
+            incarnation: self.incarnation,
+            revision: self.version,
+            catalog_generation: self.catalog_generation,
+        }
     }
 
     /// Identity of this graph instance; replacing the graph changes this value.
@@ -324,6 +357,10 @@ impl EntityGraph {
         if self.value_index.has_index(field) {
             return;
         }
+        self.index_generation = self
+            .index_generation
+            .checked_add(1)
+            .expect("index generation exhausted");
         self.value_index.index_field(field);
         for (ref_val, entity) in &self.entities {
             if let Some(value) = entity.get(field) {
@@ -364,6 +401,11 @@ impl EntityGraph {
             return Err(GraphError::DuplicateRef(ref_val));
         }
 
+        let revision = self
+            .version
+            .checked_add(1)
+            .ok_or(GraphError::RevisionExhausted)?;
+        let log_bytes = super::size::diff_bytes(&ref_val, [&entity], self.changelog_byte_capacity);
         let eid = if let Some(recycled) = self.free_ids.pop() {
             recycled
         } else {
@@ -383,20 +425,26 @@ impl EntityGraph {
         self.index_refs(eid, &entity);
 
         // Clone for the changelog, then move the entity into the map.
-        let entity_for_log = entity.clone();
+        let entity_for_log = log_bytes.map(|_| entity.clone());
         self.entities.insert(ref_val.clone(), entity);
 
-        self.version += 1;
-        self.push_changelog(GraphDiff {
-            version: self.version,
-            timestamp: 0,
-            op: DiffOp::Add,
-            ref_val: ref_val.clone(),
-            old: None,
-            new: Some(entity_for_log),
-            changed_tags: None,
-            previous_tags: None,
-        });
+        self.version = revision;
+        if let (Some(entity), Some(retained_bytes)) = (entity_for_log, log_bytes) {
+            self.append_committed_unit(vec![GraphDiff {
+                version: revision,
+                span: CommitSpan::singleton(revision),
+                retained_bytes,
+                timestamp: 0,
+                op: DiffOp::Add,
+                ref_val: ref_val.clone(),
+                old: None,
+                new: Some(entity),
+                changed_tags: None,
+                previous_tags: None,
+            }]);
+        } else {
+            self.native_gap();
+        }
 
         // Resize query cache if entity count crossed a threshold.
         let target_cap = query_cache_capacity_for(self.entities.len());
@@ -438,79 +486,86 @@ impl EntityGraph {
             return Ok(());
         }
 
-        let mut old_entity = self
-            .entities
-            .remove(ref_val)
-            .ok_or_else(|| GraphError::NotFound(ref_val.to_string()))?;
-
-        // Compute delta for changelog before mutating.
-        let mut prev_tags = HDict::new();
-        let mut changed = HDict::new();
-        for (key, new_val) in changes.iter() {
-            if let Some(old_val) = old_entity.get(key) {
-                prev_tags.set(key, old_val.clone());
+        let revision = self
+            .version
+            .checked_add(1)
+            .ok_or(GraphError::RevisionExhausted)?;
+        let old = self.entities.get(ref_val).expect("existing entity");
+        let log_bytes =
+            super::size::patch_diff_bytes(ref_val, old, &changes, self.changelog_byte_capacity);
+        let delta = log_bytes.map(|_| {
+            let mut previous = HDict::new();
+            for (name, _) in changes.iter() {
+                if let Some(value) = old.get(name) {
+                    previous.set(name, value.clone());
+                }
             }
-            changed.set(key, new_val.clone());
-        }
-
-        // Clone old for delta comparison, then merge.
-        let old_snapshot = old_entity.clone();
-        old_entity.merge(&changes);
-
-        // Delta indexing: only update what changed.
-        self.update_tags_delta(eid, &old_snapshot, &old_entity);
-
-        // Re-index refs only if ref edges changed.
-        if Self::refs_changed(&old_snapshot, &old_entity) {
-            self.adjacency.remove(eid);
-            self.index_refs(eid, &old_entity);
-        }
-
-        self.entities.insert(ref_val.to_string(), old_entity);
-
-        self.version += 1;
-        self.push_changelog(GraphDiff {
-            version: self.version,
-            timestamp: 0,
-            op: DiffOp::Update,
-            ref_val: ref_val.to_string(),
-            old: None,
-            new: None,
-            changed_tags: Some(changed),
-            previous_tags: Some(prev_tags),
+            (changes.clone(), previous)
         });
+        let mut entity = self.entities.remove(ref_val).expect("existing entity");
+        self.remove_indexing(eid, &entity);
+        entity.merge(&changes);
+        self.index_tags(eid, &entity);
+        self.index_refs(eid, &entity);
+        self.entities.insert(ref_val.to_string(), entity);
+        self.version = revision;
+        if let (Some((changed, previous)), Some(retained_bytes)) = (delta, log_bytes) {
+            self.append_committed_unit(vec![GraphDiff {
+                version: revision,
+                span: CommitSpan::singleton(revision),
+                retained_bytes,
+                timestamp: 0,
+                op: DiffOp::Update,
+                ref_val: ref_val.to_string(),
+                old: None,
+                new: None,
+                changed_tags: Some(changed),
+                previous_tags: Some(previous),
+            }]);
+        } else {
+            self.native_gap();
+        }
 
         Ok(())
     }
 
     /// Remove an entity from the graph. Returns the removed entity.
     pub fn remove(&mut self, ref_val: &str) -> Result<HDict, GraphError> {
-        let eid = self
+        let eid = *self
             .id_map
-            .remove(ref_val)
+            .get(ref_val)
             .ok_or_else(|| GraphError::NotFound(ref_val.to_string()))?;
-
+        let revision = self
+            .version
+            .checked_add(1)
+            .ok_or(GraphError::RevisionExhausted)?;
+        let log_bytes = super::size::diff_bytes(
+            ref_val,
+            [self.entities.get(ref_val).expect("existing entity")],
+            self.changelog_byte_capacity,
+        );
+        self.id_map.remove(ref_val);
         self.reverse_id.remove(&eid);
-
-        let entity = self
-            .entities
-            .remove(ref_val)
-            .ok_or_else(|| GraphError::NotFound(ref_val.to_string()))?;
-
+        let entity = self.entities.remove(ref_val).expect("existing entity");
         self.remove_indexing(eid, &entity);
         self.free_ids.push(eid);
-
-        self.version += 1;
-        self.push_changelog(GraphDiff {
-            version: self.version,
-            timestamp: 0,
-            op: DiffOp::Remove,
-            ref_val: ref_val.to_string(),
-            old: Some(entity.clone()),
-            new: None,
-            changed_tags: None,
-            previous_tags: None,
-        });
+        self.version = revision;
+        if let Some(retained_bytes) = log_bytes {
+            self.append_committed_unit(vec![GraphDiff {
+                version: revision,
+                span: CommitSpan::singleton(revision),
+                retained_bytes,
+                timestamp: 0,
+                op: DiffOp::Remove,
+                ref_val: ref_val.to_string(),
+                old: Some(entity.clone()),
+                new: None,
+                changed_tags: None,
+                previous_tags: None,
+            }]);
+        } else {
+            self.native_gap();
+        }
 
         Ok(entity)
     }
@@ -881,7 +936,6 @@ impl EntityGraph {
     /// Returns `Err(ChangelogGap)` if the requested version has been evicted
     /// from the changelog, signalling the subscriber must do a full resync.
     pub fn changes_since(&self, version: u64) -> Result<Vec<&GraphDiff>, ChangelogGap> {
-        let target = version + 1;
         // If the floor has advanced past the requested version, the subscriber
         // has fallen behind and missed entries.
         if self.floor_version > 0 && version < self.floor_version {
@@ -891,12 +945,45 @@ impl EntityGraph {
             });
         }
         // Binary search: versions are monotonically increasing in the VecDeque.
-        // partition_point finds the first entry where version >= target.
-        let start = self.changelog.partition_point(|d| d.version < target);
+        // Comparing directly also accepts u64::MAX without arithmetic overflow.
+        let start = self.changelog.partition_point(|d| d.version <= version);
         Ok(self.changelog.iter().skip(start).collect())
     }
 
-    /// The lowest version still retained in the changelog.
+    /// Borrow complete retained commit units without cloning a suffix. The
+    /// caller's graph guard pins identity, head, floor, unit boundaries and data.
+    pub fn change_units_since(
+        &self,
+        version: u64,
+    ) -> Result<super::changelog::ChangeUnits<'_>, super::changelog::ChangeCursorError> {
+        use super::changelog::{ChangeCursorError, ChangeUnits};
+        if version > self.version {
+            return Err(ChangeCursorError::Future { head: self.version });
+        }
+        if version < self.floor_version {
+            return Err(ChangelogGap {
+                subscriber_version: version,
+                floor_version: self.floor_version,
+            }
+            .into());
+        }
+        let next = self
+            .changelog
+            .partition_point(|diff| diff.version <= version);
+        if next > 0 && self.changelog[next - 1].span.last != version {
+            return Err(ChangeCursorError::InsideUnit {
+                span: self.changelog[next - 1].span,
+            });
+        }
+        Ok(ChangeUnits {
+            state: self.state(),
+            floor: self.floor_version,
+            log: &self.changelog,
+            next,
+        })
+    }
+
+    /// Last revision wholly discarded from the changelog.
     ///
     /// Returns 0 if no entries have been evicted.
     pub fn floor_version(&self) -> u64 {
@@ -906,6 +993,14 @@ impl EntityGraph {
     /// The configured changelog capacity.
     pub fn changelog_capacity(&self) -> usize {
         self.changelog_capacity
+    }
+
+    /// Conservative retained-value bytes, including diff/value overhead.
+    pub fn changelog_bytes(&self) -> usize {
+        self.changelog_bytes
+    }
+    pub fn changelog_byte_capacity(&self) -> usize {
+        self.changelog_byte_capacity
     }
 
     /// Current query cache capacity.
@@ -990,75 +1085,6 @@ impl EntityGraph {
         }
     }
 
-    /// Update only the changed tags in the tag bitmap index.
-    fn update_tags_delta(&mut self, entity_id: usize, old: &HDict, new: &HDict) {
-        let old_tags: std::collections::HashSet<&str> = old.tag_names().collect();
-        let new_tags: std::collections::HashSet<&str> = new.tag_names().collect();
-
-        // Tags removed: clear bits.
-        let removed: Vec<String> = old_tags
-            .difference(&new_tags)
-            .map(|s| s.to_string())
-            .collect();
-        if !removed.is_empty() {
-            self.tag_index.remove(entity_id, &removed);
-        }
-
-        // Tags added: set bits.
-        let added: Vec<String> = new_tags
-            .difference(&old_tags)
-            .map(|s| s.to_string())
-            .collect();
-        if !added.is_empty() {
-            self.tag_index.add(entity_id, &added);
-        }
-
-        // Update value indexes for changed fields only.
-        for (name, new_val) in new.iter() {
-            if self.value_index.has_index(name) {
-                if let Some(old_val) = old.get(name) {
-                    if old_val != new_val {
-                        self.value_index.remove(entity_id, name, old_val);
-                        self.value_index.add(entity_id, name, new_val);
-                    }
-                } else {
-                    self.value_index.add(entity_id, name, new_val);
-                }
-            }
-        }
-
-        // Remove value indexes for removed fields.
-        for name in &removed {
-            if self.value_index.has_index(name)
-                && let Some(old_val) = old.get(name.as_str())
-            {
-                self.value_index.remove(entity_id, name, old_val);
-            }
-        }
-    }
-
-    /// Check if ref edges changed between old and new entity.
-    fn refs_changed(old: &HDict, new: &HDict) -> bool {
-        for (name, val) in new.iter() {
-            if name != "id"
-                && let Kind::Ref(_) = val
-                && old.get(name) != Some(val)
-            {
-                return true;
-            }
-        }
-        // Check for removed refs, including refs replaced by another kind.
-        for (name, val) in old.iter() {
-            if name != "id"
-                && let Kind::Ref(_) = val
-                && new.get(name) != Some(val)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
     /// Build a full hierarchy subtree as a structured tree.
     /// `root` is the entity ref, `max_depth` limits recursion (0 = root only).
     pub fn hierarchy_tree(&self, root: &str, max_depth: usize) -> Option<HierarchyNode> {
@@ -1107,15 +1133,41 @@ impl EntityGraph {
         classify_entity(entity)
     }
 
-    /// Append a diff to the changelog, capping at the configured capacity.
-    fn push_changelog(&mut self, mut diff: GraphDiff) {
-        diff.timestamp = GraphDiff::now_nanos();
-        self.changelog.push_back(diff);
-        while self.changelog.len() > self.changelog_capacity {
-            if let Some(evicted) = self.changelog.pop_front() {
-                self.floor_version = evicted.version;
-            }
+    /// Append a COMPLETE commit unit, then evict complete oldest units. No
+    /// observer can see a prefix of the incoming unit or retained old unit.
+    fn append_committed_unit(&mut self, mut diffs: Vec<GraphDiff>) {
+        let bytes = diffs.iter().map(|diff| diff.retained_bytes).sum::<usize>();
+        debug_assert!(
+            diffs.len() <= self.changelog_capacity && bytes <= self.changelog_byte_capacity
+        );
+        let timestamp = GraphDiff::now_nanos();
+        for diff in &mut diffs {
+            diff.timestamp = timestamp;
         }
+        self.changelog_bytes += bytes;
+        self.changelog.extend(diffs);
+        while self.changelog.len() > self.changelog_capacity
+            || self.changelog_bytes > self.changelog_byte_capacity
+        {
+            let last = self.changelog.front().expect("retained unit").span.last;
+            while self
+                .changelog
+                .front()
+                .is_some_and(|diff| diff.version <= last)
+            {
+                let diff = self.changelog.pop_front().expect("retained diff");
+                self.changelog_bytes -= diff.retained_bytes;
+            }
+            self.floor_version = last;
+        }
+    }
+
+    /// Oversized trusted writes remain usable but invalidate continuity. The
+    /// eligibility check happened before any changelog entity clone.
+    fn native_gap(&mut self) {
+        self.changelog.clear();
+        self.changelog_bytes = 0;
+        self.floor_version = self.version;
     }
 }
 

@@ -74,6 +74,7 @@ pub enum ReadOperation {
     Libraries,
     Specs,
     Spec,
+    Changes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +188,8 @@ pub enum ReadError {
     Forbidden,
     #[error("cursor is stale or invalid; restart the query")]
     StaleCursor,
+    #[error("next complete commit unit does not fit this page; cursor is unchanged")]
+    UnitTooLarge,
     #[error("read capacity exhausted")]
     Capacity,
     #[error("read cancelled")]

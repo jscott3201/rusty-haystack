@@ -21,6 +21,8 @@ pub struct AppState {
     pub graph: SharedGraph,
     /// Application read authority, present only in the scoped service profile.
     pub read_service: Option<haystack_app::ReadService>,
+    /// Selection captured when routing is built; discovery uses the same value.
+    pub mutation_service: Option<haystack_app::MutationService>,
     /// Built-in capability profile, also used by the ops advertisement.
     pub profile: crate::capabilities::ServiceProfile,
     /// Serializes legacy library updates. Catalog construction happens outside

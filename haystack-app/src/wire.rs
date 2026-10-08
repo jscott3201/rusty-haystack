@@ -44,6 +44,11 @@ pub(crate) fn decode(
     budget.check()?;
     let first = grid.rows.first();
     let query = match operation {
+        ReadOperation::Changes => {
+            return Err(ReadError::InvalidQuery(
+                "changes requires entity-v1 payload",
+            ));
+        }
         ReadOperation::Read => {
             if grid.rows.iter().any(|r| r.has("id")) {
                 if grid.rows.len() > budget.limits.max_ids {

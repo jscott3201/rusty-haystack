@@ -1,5 +1,5 @@
 //! Explicit ownership for application work, resources and shutdown.
-use crate::{ReadError, ReadLimits, ReadPolicy, ReadService};
+use crate::{MutationService, ReadError, ReadLimits, ReadPolicy, ReadService};
 use futures_util::FutureExt;
 use haystack_core::graph::SharedGraph;
 use parking_lot::Mutex;
@@ -151,7 +151,11 @@ impl ApplicationBuilder {
         let reads = ReadService::managed(graph, policy, limits, lifecycle.clone())?;
         Ok(Self {
             parts: Some(BuildParts {
-                application: ApplicationHandle { lifecycle, reads },
+                application: ApplicationHandle {
+                    lifecycle,
+                    reads,
+                    mutations: Arc::new(Mutex::new(None)),
+                },
                 resources: vec![],
             }),
             startup_timeout: Duration::from_secs(30),
@@ -164,6 +168,21 @@ impl ApplicationBuilder {
             .expect("unconsumed builder")
             .application
             .clone()
+    }
+    /// Attach an opt-in mutation service sharing this exact managed admission,
+    /// graph and read-policy authority. Early handle clones see the selection.
+    pub fn entity_mutations(self, service: MutationService) -> Result<Self, ReadError> {
+        let app = &self.parts.as_ref().expect("unconsumed builder").application;
+        if !service.read_service().same_service(&app.reads) {
+            return Err(ReadError::Forbidden);
+        }
+        let mut selected = app.mutations.lock();
+        if selected.is_some() {
+            return Err(ReadError::InvalidQuery("mutation service already selected"));
+        }
+        *selected = Some(service);
+        drop(selected);
+        Ok(self)
     }
     pub fn owned_resource(mut self, resource: impl ApplicationResource) -> Self {
         self.parts
@@ -243,8 +262,12 @@ impl Drop for ApplicationOwner {
 pub struct ApplicationHandle {
     pub(crate) lifecycle: Arc<Lifecycle>,
     reads: ReadService,
+    mutations: Arc<Mutex<Option<MutationService>>>,
 }
 impl ApplicationHandle {
+    pub fn mutation_service(&self) -> Option<MutationService> {
+        self.mutations.lock().clone()
+    }
     pub fn read_service(&self) -> ReadService {
         self.reads.clone()
     }
@@ -308,6 +331,9 @@ pub struct WorkGuard {
     _token: TaskTrackerToken,
 }
 impl WorkGuard {
+    pub(crate) fn closing(&self) -> CancellationToken {
+        self.lifecycle.sealed.clone()
+    }
     pub fn child(&self) -> Self {
         Self {
             lifecycle: self.lifecycle.clone(),

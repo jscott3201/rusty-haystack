@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 use crate::data::{HDict, HGrid};
 use crate::ontology::{DefNamespace, ValidationIssue};
 
+use super::changelog::{GraphState, GraphWake};
 use super::entity_graph::{EntityGraph, GraphError, HierarchyNode};
 
 /// Default broadcast channel capacity.
@@ -24,6 +25,7 @@ const BROADCAST_CAPACITY: usize = 256;
 pub struct SharedGraph {
     inner: Arc<RwLock<EntityGraph>>,
     tx: broadcast::Sender<u64>,
+    wakes: broadcast::Sender<GraphWake>,
 }
 
 /// Own the write lock until the closure finishes, including during unwinding.
@@ -31,17 +33,32 @@ pub struct SharedGraph {
 /// receiver wakers. Accepted mutations are observable even if the closure fails.
 struct WriteNotification<'a> {
     guard: Option<RwLockWriteGuard<'a, EntityGraph>>,
-    version_before: u64,
+    before: GraphState,
     tx: &'a broadcast::Sender<u64>,
+    wakes: &'a broadcast::Sender<GraphWake>,
 }
 
 impl Drop for WriteNotification<'_> {
     fn drop(&mut self) {
-        if let Some(guard) = self.guard.take() {
-            let version_after = guard.version();
+        if let Some(mut guard) = self.guard.take() {
+            let reset = guard.incarnation() != self.before.incarnation;
+            if reset {
+                // A detached graph can be reinserted later. Never revive its
+                // previous incarnation when it becomes authoritative again.
+                guard.renew_incarnation();
+            }
+            let after = guard.state();
             drop(guard);
-            if version_after != self.version_before {
-                let _ = self.tx.send(version_after);
+            if reset || after.revision != self.before.revision {
+                let _ = self.tx.send(after.revision);
+                let _ = self.wakes.send(if reset {
+                    GraphWake::Reset(after)
+                } else {
+                    GraphWake::Entities(after)
+                });
+            }
+            if !reset && after.catalog_generation != self.before.catalog_generation {
+                let _ = self.wakes.send(GraphWake::Catalog(after));
             }
         }
     }
@@ -49,11 +66,14 @@ impl Drop for WriteNotification<'_> {
 
 impl SharedGraph {
     /// Wrap an `EntityGraph` in a thread-safe handle.
-    pub fn new(graph: EntityGraph) -> Self {
+    pub fn new(mut graph: EntityGraph) -> Self {
+        graph.renew_incarnation();
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (wakes, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             inner: Arc::new(RwLock::new(graph)),
             tx,
+            wakes,
         }
     }
 
@@ -83,7 +103,22 @@ impl SharedGraph {
         (rx, version)
     }
 
-    /// Number of active subscribers.
+    /// Subscribe to distinct entity, replacement and catalog wakeup hints.
+    /// Notifications may be dropped; retained feed traversal supplies truth.
+    pub fn subscribe_wakes(&self) -> broadcast::Receiver<GraphWake> {
+        self.wakes.subscribe()
+    }
+
+    pub fn subscribe_wakes_with_state(&self) -> (broadcast::Receiver<GraphWake>, GraphState) {
+        let graph = self.inner.read();
+        (self.wakes.subscribe(), graph.state())
+    }
+
+    pub fn state(&self) -> GraphState {
+        self.read(EntityGraph::state)
+    }
+
+    /// Number of active legacy revision subscribers.
     pub fn subscriber_count(&self) -> usize {
         self.tx.receiver_count()
     }
@@ -121,9 +156,10 @@ impl SharedGraph {
     {
         let guard = self.inner.write();
         let mut write = WriteNotification {
-            version_before: guard.version(),
+            before: guard.state(),
             guard: Some(guard),
             tx: &self.tx,
+            wakes: &self.wakes,
         };
         f(write
             .guard
@@ -131,13 +167,31 @@ impl SharedGraph {
             .expect("write guard exists until drop"))
     }
 
+    /// Bounded write-lock acquisition with the same accepted-prefix and
+    /// notification semantics as `write`. No callback executes while waiting.
+    pub fn write_for<F, R>(&self, wait: std::time::Duration, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut EntityGraph) -> R,
+    {
+        let guard = self.inner.try_write_for(wait)?;
+        let mut write = WriteNotification {
+            before: guard.state(),
+            guard: Some(guard),
+            tx: &self.tx,
+            wakes: &self.wakes,
+        };
+        Some(f(write
+            .guard
+            .as_deref_mut()
+            .expect("write guard exists until drop")))
+    }
+
     // ── Convenience methods ──
 
     /// Swap in a newer ontology. See [`EntityGraph::set_namespace`].
     ///
-    /// Deliberately does not bump the version or notify watchers: no entity
-    /// changed. A watcher that woke on this would see an identical entity set and
-    /// have nothing to do.
+    /// Does not bump entity revision or emit a legacy entity notification.
+    /// Typed wake subscribers receive a distinct catalog wakeup.
     pub fn set_namespace(&self, ns: impl Into<Arc<DefNamespace>>) {
         self.write(|g| g.set_namespace(ns));
     }
@@ -287,6 +341,7 @@ impl Clone for SharedGraph {
         Self {
             inner: Arc::clone(&self.inner),
             tx: self.tx.clone(),
+            wakes: self.wakes.clone(),
         }
     }
 }

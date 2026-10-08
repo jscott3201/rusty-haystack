@@ -73,7 +73,9 @@ impl HaystackClient<HttpTransport> {
                 HttpTransport::with_basic(url, username, password, client, &config.wire_format)
             }
         };
-        Ok(Self { transport })
+        Ok(Self {
+            transport: transport.with_entity_submission_policy(),
+        })
     }
 
     /// Connect with additional server trust and optional mutual TLS identity,
@@ -468,6 +470,12 @@ impl<T: Transport> HaystackClient<T> {
     /// explicitly end the server-side session before disconnecting.
     pub async fn close(&self) -> Result<(), ClientError> {
         self.transport.close().await
+    }
+}
+
+impl<T: crate::entity::EntityTransport> HaystackClient<T> {
+    pub(crate) fn transport_entity_check(&self) -> Result<(), ClientError> {
+        self.transport.check_entity_submission()
     }
 }
 

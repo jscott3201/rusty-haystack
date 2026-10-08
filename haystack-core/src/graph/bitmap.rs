@@ -90,6 +90,72 @@ impl Default for TagBitmapIndex {
     }
 }
 
+pub(crate) struct PreparedTags {
+    entries: HashMap<String, RoaringBitmap>,
+}
+impl TagBitmapIndex {
+    pub(crate) fn prepare_changes(
+        &self,
+        changes: &[super::entity_graph::IndexChange<'_>],
+        budget: &mut super::size::ValueBudget,
+    ) -> Result<PreparedTags, ()> {
+        let mut entries = HashMap::new();
+        for change in changes {
+            let eid = u32::try_from(change.id).map_err(|_| ())?;
+            for (row, add) in [(change.before, false), (change.after, true)] {
+                if let Some(row) = row {
+                    for tag in row.tag_names() {
+                        budget.charge(tag.len().saturating_add(1), tag.len().saturating_add(64))?;
+                        if !entries.contains_key(tag) {
+                            let current = self.bitmaps.get(tag);
+                            if let Some(current) = current {
+                                budget.charge(
+                                    usize::try_from(current.len()).map_err(|_| ())?,
+                                    current
+                                        .serialized_size()
+                                        .saturating_mul(4)
+                                        .saturating_add(256),
+                                )?;
+                            }
+                            entries.insert(tag.to_string(), current.cloned().unwrap_or_default());
+                        }
+                        let bitmap = entries.get_mut(tag).expect("prepared bitmap");
+                        if add {
+                            bitmap.insert(eid);
+                        } else {
+                            bitmap.remove(eid);
+                        }
+                    }
+                }
+            }
+        }
+        if entries.len() > self.bitmaps.capacity().saturating_sub(self.bitmaps.len()) {
+            budget.charge(
+                self.bitmaps.len(),
+                self.bitmaps
+                    .len()
+                    .saturating_add(entries.len())
+                    .saturating_mul(256),
+            )?;
+        }
+        Ok(PreparedTags { entries })
+    }
+    pub(crate) fn reserve_prepared(&mut self, prepared: &PreparedTags) -> Result<(), ()> {
+        self.bitmaps
+            .try_reserve(prepared.entries.len())
+            .map_err(|_| ())
+    }
+    pub(crate) fn apply_prepared(&mut self, prepared: PreparedTags) {
+        for (tag, bitmap) in prepared.entries {
+            if bitmap.is_empty() {
+                self.bitmaps.remove(&tag);
+            } else {
+                self.bitmaps.insert(tag, bitmap);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

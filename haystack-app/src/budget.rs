@@ -10,6 +10,8 @@ pub(crate) struct Budget {
     pub deadline: Instant,
     pub cancel: CancellationToken,
     pub owner_cancel: Option<CancellationToken>,
+    pub owner_sealed: Option<CancellationToken>,
+    pub lease: Option<Arc<crate::service::WorkLease>>,
     work: usize,
     retained: usize,
     values: usize,
@@ -24,6 +26,8 @@ impl Budget {
             deadline,
             cancel,
             owner_cancel: None,
+            owner_sealed: None,
+            lease: None,
             work: 0,
             retained: 0,
             values: 0,
@@ -31,6 +35,9 @@ impl Budget {
             forward: 0,
             inverse: 0,
         }
+    }
+    pub fn retained_remaining(&self) -> usize {
+        self.limits.max_retained_bytes.saturating_sub(self.retained)
     }
     pub fn check(&self) -> Result<(), ReadError> {
         if Instant::now() >= self.deadline {

@@ -132,3 +132,15 @@ The CLI container copies `haystack-app` as a workspace member. Crates.io publica
 orders core, client, app, server, then CLI, with the existing index wait between
 packages. The CLI/wheel/sdist artifact matrix and receipt identity remain separate
 from this source-package ordering.
+
+## Entity mutation and feed qualification
+
+Local workspace tests cover prepared core batches and indexes, native singleton
+changes, complete-span count/byte retention, current policy disclosure, stable
+receipt binding, provider-protocol failure fixtures, managed worker ownership,
+and actual HTTP/client requests including a lost committed response reconciled
+without resubmission. The selected provider is ephemeral process memory. Retained
+fixture state across service recreation is not crash recovery or disk/database
+durability evidence. Multi-process commit ordering, history mutation, equipment
+commands and WebSocket mutations remain unqualified and out of this slice. See
+[entity mutation and feed contracts](entity-mutations.md).

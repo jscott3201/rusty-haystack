@@ -314,7 +314,9 @@ impl HaystackServer {
             .map(|binding| binding.provider)
             .unwrap_or_else(|| Arc::new(HisStore::new()));
 
+        let mutation_service = self.application.as_ref().and_then(|a| a.mutation_service());
         let state: SharedState = Arc::new(AppState {
+            mutation_service,
             application: self.application,
             graph: self.graph,
             read_service: self.read_service,
@@ -330,7 +332,7 @@ impl HaystackServer {
         let mut core_router = Router::new();
         for capability in CAPABILITIES
             .iter()
-            .filter(|capability| capability.enabled(profile))
+            .filter(|capability| capability.enabled(profile, state.mutation_service.is_some()))
         {
             core_router = core_router.route(capability.path, capability.router(profile));
         }
@@ -545,7 +547,7 @@ fn required_permission(path: &str) -> Option<&'static str> {
     // Write operations
     match path {
         "/api/pointWrite" | "/api/hisWrite" | "/api/invokeAction" | "/api/loadLib"
-        | "/api/unloadLib" | "/api/import" => return Some("write"),
+        | "/api/unloadLib" | "/api/import" | "/api/entityBatch" => return Some("write"),
         _ => {}
     }
 
