@@ -345,13 +345,18 @@ fn from_wire(value: WireValue) -> Result<Kind, TypedPayloadError> {
         } => {
             let offset =
                 FixedOffset::east_opt(offset).ok_or_else(|| invalid("invalid datetime offset"))?;
-            // Apply nanos in UTC before restoring the exact stored offset.
-            // The combined constructor restricts leap nanos to minute ends,
-            // while the setter accepts the full existing DateTime domain.
-            let dt = DateTime::from_timestamp(parse_int(&seconds)?, 0)
-                .and_then(|dt| dt.with_nanosecond(nanos))
+            // Check the UTC calendar second and nanosecond field separately.
+            // The combined constructor excludes non-minute leap nanos, while
+            // DateTime's setter clips constructor-admitted leaps on the last
+            // representable date. NaiveDateTime preserves both forms without
+            // normalizing them or applying the stored offset to the UTC fields.
+            let utc = DateTime::from_timestamp(parse_int(&seconds)?, 0)
+                .and_then(|dt| dt.naive_utc().with_nanosecond(nanos))
                 .ok_or_else(|| invalid("invalid datetime timestamp or nanoseconds"))?;
-            Kind::DateTime(HDateTime::new(dt.with_timezone(&offset), timezone))
+            Kind::DateTime(HDateTime::new(
+                DateTime::from_naive_utc_and_offset(utc, offset),
+                timezone,
+            ))
         }
         WireValue::Coord { lat, lng } => {
             Kind::Coord(Coord::new(parse_bits(&lat)?, parse_bits(&lng)?))

@@ -123,8 +123,10 @@ validation uses Chrono's representable ranges. Time stores the whole second and
 nanosecond fields independently, including leap nanoseconds after a non-minute
 second; display text can make these values indistinguishable from an ordinary
 following second. Decoding constructs the checked whole second, then applies the
-checked nanosecond field. DateTime does this in UTC before restoring its exact
-fixed offset and timezone name, including historical offsets containing seconds.
+checked nanosecond field. DateTime applies this to the underlying UTC calendar
+and time before restoring its exact fixed offset and timezone name. This retains
+constructor-admitted leaps on the last representable date as well as historical
+offsets containing seconds, without clipping or normalizing either field.
 The Time payload does not accept a text `value` alias. Grid rows retain all
 supplied tags, including tags outside the column list. Duplicate column names
 are rejected by both encoder and decoder.

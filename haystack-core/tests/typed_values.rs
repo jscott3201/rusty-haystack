@@ -871,3 +871,90 @@ fn typed_temporal_fields_reject_out_of_range_values_and_old_time_text() {
         assert!(scalar(wire).is_err(), "{wire}");
     }
 }
+
+#[test]
+fn typed_datetime_preserves_maximum_date_constructor_admitted_leap() {
+    use chrono::{DateTime, FixedOffset, Timelike, Utc};
+    use haystack_core::kinds::HDateTime;
+    const MAX_SECONDS: i64 = 8_210_266_876_799;
+    assert_eq!(DateTime::<Utc>::MAX_UTC.timestamp(), MAX_SECONDS);
+    let utc = DateTime::from_timestamp(MAX_SECONDS, 1_500_000_000).unwrap();
+    let dt = utc.with_timezone(&FixedOffset::east_opt(1234).unwrap());
+    let value = Kind::DateTime(HDateTime::new(dt, "maximum-date-source"));
+    let fixture = br#"{"version":1,"value":{"kind":"dateTime","seconds":"8210266876799","nanos":1500000000,"offset":1234,"timezone":"maximum-date-source"}}"#;
+    assert_eq!(typed::encode(&value).unwrap(), fixture);
+    let decoded = typed::decode(fixture).unwrap();
+    assert_eq!(decoded, value);
+    let Kind::DateTime(decoded) = decoded else {
+        panic!("datetime fixture");
+    };
+    assert_eq!(decoded.dt.timestamp(), MAX_SECONDS);
+    assert_eq!(decoded.dt.nanosecond(), 1_500_000_000);
+    assert_eq!(decoded.dt.offset().local_minus_utc(), 1234);
+    assert_eq!(decoded.tz_name, "maximum-date-source");
+}
+
+#[test]
+fn typed_datetime_preserves_minimum_and_maximum_date_fields() {
+    use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, Timelike, Utc};
+    use haystack_core::kinds::HDateTime;
+    const MIN_SECONDS: i64 = -8_334_601_228_800;
+    const MAX_SECONDS: i64 = 8_210_266_876_799;
+    assert_eq!(DateTime::<Utc>::MIN_UTC.timestamp(), MIN_SECONDS);
+    assert_eq!(DateTime::<Utc>::MAX_UTC.timestamp(), MAX_SECONDS);
+    // Independent calendar construction covers both ends of the date range.
+    // Include ordinary and non-minute leap representations, and fixed offsets
+    // whose local date would cross a boundary without changing the UTC fields.
+    for (date, hour, minute, second, seconds) in [
+        (NaiveDate::MIN, 0, 0, 0, MIN_SECONDS),
+        (NaiveDate::MIN, 0, 0, 30, MIN_SECONDS + 30),
+        (NaiveDate::MIN, 0, 0, 59, MIN_SECONDS + 59),
+        (NaiveDate::MAX, 23, 59, 0, MAX_SECONDS - 59),
+        (NaiveDate::MAX, 23, 59, 30, MAX_SECONDS - 29),
+        (NaiveDate::MAX, 23, 59, 59, MAX_SECONDS),
+    ] {
+        for nanos in [
+            0,
+            1,
+            999_999_999,
+            1_000_000_000,
+            1_500_000_000,
+            1_999_999_999,
+        ] {
+            let time = NaiveTime::from_hms_opt(hour, minute, second)
+                .unwrap()
+                .with_nanosecond(nanos)
+                .unwrap();
+            let utc = date.and_time(time).and_utc();
+            assert_eq!(utc.timestamp(), seconds);
+            for offset in [-86_399, -1234, 0, 1234, 86_399] {
+                let dt = utc.with_timezone(&FixedOffset::east_opt(offset).unwrap());
+                let value = Kind::DateTime(HDateTime::new(dt, "date-boundary-source"));
+                let fixture = format!(
+                    r#"{{"version":1,"value":{{"kind":"dateTime","seconds":"{seconds}","nanos":{nanos},"offset":{offset},"timezone":"date-boundary-source"}}}}"#
+                );
+                assert_eq!(typed::encode(&value).unwrap(), fixture.as_bytes());
+                let decoded = typed::decode(fixture.as_bytes()).unwrap();
+                assert_eq!(decoded, value);
+                let Kind::DateTime(decoded) = decoded else {
+                    panic!("datetime fixture");
+                };
+                assert_eq!(decoded.dt.timestamp(), seconds);
+                assert_eq!(decoded.dt.nanosecond(), nanos);
+                assert_eq!(decoded.dt.offset().local_minus_utc(), offset);
+                assert_eq!(decoded.tz_name, "date-boundary-source");
+            }
+        }
+    }
+    for (seconds, nanos) in [
+        (MIN_SECONDS - 1, 0),
+        (MAX_SECONDS + 1, 0),
+        (MIN_SECONDS, 2_000_000_000),
+        (MAX_SECONDS, 2_000_000_000),
+    ] {
+        let fixture = format!(
+            r#"{{"kind":"dateTime","seconds":"{seconds}","nanos":{nanos},"offset":0,"timezone":"UTC"}}"#
+        );
+        assert!(scalar(&fixture).is_err(), "{fixture}");
+    }
+}
