@@ -70,6 +70,9 @@ impl ReadPolicy for Rules {
     }
 }
 impl PolicySnapshot for Rules {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         "typed-fixture"
     }
@@ -116,6 +119,13 @@ struct Fixture {
 }
 impl Fixture {
     async fn start(authenticated: bool, limits: ReadLimits) -> Self {
+        Self::with_policy(authenticated, limits, Arc::new(Rules)).await
+    }
+    async fn with_policy(
+        authenticated: bool,
+        limits: ReadLimits,
+        policy: Arc<dyn ReadPolicy>,
+    ) -> Self {
         let graph = SharedGraph::new(EntityGraph::new());
         for id in ["a", "denied", "x"] {
             let mut record = HDict::new();
@@ -132,13 +142,21 @@ impl Fixture {
             );
             graph.add(record).unwrap();
         }
-        let app = ApplicationBuilder::new(graph.clone(), Arc::new(Rules), limits).unwrap();
+        let app = ApplicationBuilder::new(graph.clone(), policy, limits).unwrap();
         let service = app.handle().read_service();
         let mut server = HaystackServer::new(graph.clone())
             .with_scoped_reads(app.handle())
             .port(0);
         if authenticated {
-            server = server.with_auth(auth());
+            let auth = auth();
+            auth.inject_token(
+                "ops-fixture-token".into(),
+                AuthUser {
+                    username: "ops-only".into(),
+                    permissions: vec!["read".into()],
+                },
+            );
+            server = server.with_auth(auth);
         }
         let owner = app
             .owned_resource(server.into_listener())
@@ -1095,4 +1113,411 @@ async fn contextual_jeto_request_validates_every_member_before_binding_declared_
         );
     }
     f.close().await;
+}
+
+#[tokio::test]
+async fn v5_ops_discovers_the_executable_profile_and_rejects_arguments() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for path in ["/ops", "/sys.api::ops"] {
+        let value = json_response(
+            f.get(path)
+                .header("Xeto-Version", "5")
+                .send()
+                .await
+                .unwrap(),
+            200,
+        )
+        .await;
+        let rows = value["rows"].as_array().expect("ops returns a Grid");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["qname"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["sys.api::ops", "sys.api::readById"]
+        );
+        for row in rows {
+            assert!(row["signature"].as_str().is_some());
+            assert!(row.get("noSideEffects").is_some());
+        }
+    }
+    for body in [
+        r#"{"returns":null}"#,
+        r#"{"unexpected":null}"#,
+        r#"{"unexpected":true}"#,
+    ] {
+        api_error(
+            f.post("/ops")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(body),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    api_error(
+        f.get("/ops?returns=null").header("Xeto-Version", "5"),
+        400,
+        "InvalidArgsErr",
+    )
+    .await;
+    f.close().await;
+}
+
+#[tokio::test]
+async fn v5_ops_authentication_precedes_protocol_validation_and_h4_stays_public() {
+    let f = Fixture::start(true, ReadLimits::default()).await;
+    for path in ["/ops", "/ops?xeto-version=4"] {
+        assert_eq!(f.get(path).send().await.unwrap().status(), 200);
+    }
+    api_error(f.get("/ops").header("Xeto-Version", "5"), 403, "AuthErr").await;
+    api_error(f.get("/ops?xeto-version=bad"), 401, "AuthErr").await;
+    api_error(f.get("/ops?xeto-version=4&xeto-version=4"), 401, "AuthErr").await;
+    api_error(
+        f.get("/ops?xeto-version=bad")
+            .header("Authorization", "BEARER authToken=fixture-token"),
+        400,
+        "UnsupportedVersionErr",
+    )
+    .await;
+    let value = json_response(
+        f.get("/ops?xeto%2Dversion=5")
+            .header("Xeto-Version", "4")
+            .header("Authorization", "BEARER authToken=fixture-token")
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(value["rows"].as_array().unwrap().len(), 2);
+    f.close().await;
+}
+
+struct FunctionPolicy {
+    denied: Arc<std::sync::atomic::AtomicBool>,
+    snapshots: Arc<std::sync::atomic::AtomicUsize>,
+}
+struct FunctionRules {
+    read_by_id: bool,
+    ops: bool,
+}
+impl ReadPolicy for FunctionPolicy {
+    fn snapshot(&self, principal: &Principal) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
+        self.snapshots
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let read_by_id = matches!(principal, Principal::Authenticated { subject, .. } if subject == "user")
+            && !self.denied.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(Arc::new(FunctionRules {
+            read_by_id,
+            ops: true,
+        }))
+    }
+}
+impl PolicySnapshot for FunctionRules {
+    fn scope_key(&self) -> &str {
+        if self.read_by_id {
+            "read-allowed"
+        } else {
+            "ops-only"
+        }
+    }
+    fn function(&self, function: &haystack_app::FunctionIdentity) -> bool {
+        assert_eq!(function.library_version, "5.0.0");
+        assert_eq!(
+            function.revision,
+            "873b922451d3ef4c0c9c08ef3daa542f352d69f3"
+        );
+        assert_eq!(function.source_path, "src/xeto/sys.api/funcs.xeto");
+        (self.ops && function.qname == "sys.api::ops")
+            || (self.read_by_id && function.qname == "sys.api::readById")
+    }
+    fn operation(&self, _: ReadOperation) -> bool {
+        true
+    }
+    fn entity(&self, _: &str) -> bool {
+        true
+    }
+    fn tag(&self, _: &str, _: &str) -> bool {
+        true
+    }
+    fn reference(&self, _: &str) -> bool {
+        true
+    }
+    fn reference_display(&self, _: &str) -> bool {
+        true
+    }
+    fn catalog(&self, _: haystack_app::CatalogKind, _: &str) -> bool {
+        true
+    }
+    fn nominal_provenance(&self, _: &NominalScalar) -> bool {
+        true
+    }
+}
+#[tokio::test]
+async fn ops_and_invocation_share_explicit_function_policy_with_one_fresh_snapshot() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let denied = Arc::new(AtomicBool::new(false));
+    let snapshots = Arc::new(AtomicUsize::new(0));
+    let f = Fixture::with_policy(
+        true,
+        ReadLimits {
+            max_concurrent: 1,
+            max_queued: 0,
+            ..ReadLimits::default()
+        },
+        Arc::new(FunctionPolicy {
+            denied: denied.clone(),
+            snapshots: snapshots.clone(),
+        }),
+    )
+    .await;
+    for (token, expected) in [
+        ("fixture-token", vec!["sys.api::ops", "sys.api::readById"]),
+        ("ops-fixture-token", vec!["sys.api::ops"]),
+    ] {
+        let value = json_response(
+            f.get("/ops")
+                .header("Xeto-Version", "5")
+                .header("Authorization", format!("BEARER authToken={token}"))
+                .send()
+                .await
+                .unwrap(),
+            200,
+        )
+        .await;
+        assert_eq!(
+            value["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["qname"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    assert_eq!(snapshots.load(Ordering::SeqCst), 2);
+    api_error(
+        f.get("/readById?id=a")
+            .header("Xeto-Version", "5")
+            .header("Authorization", "BEARER authToken=ops-fixture-token"),
+        404,
+        "UnknownFuncErr",
+    )
+    .await;
+    let entity = json_response(
+        f.get("/sys.api::readById?id=a")
+            .header("Xeto-Version", "5")
+            .header("Authorization", "BEARER authToken=fixture-token")
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(entity["dis"], "Alpha");
+    denied.store(true, Ordering::SeqCst);
+    api_error(
+        f.get("/sys.api::readById?id=a")
+            .header("Xeto-Version", "5")
+            .header("Authorization", "BEARER authToken=fixture-token"),
+        404,
+        "UnknownFuncErr",
+    )
+    .await;
+    assert_eq!(snapshots.load(Ordering::SeqCst), 5);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn ops_zero_arguments_accept_supported_containers_and_preserve_null_key_rejection() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for (media, body) in [
+        ("application/json", "{}"),
+        ("application/json", r#"{"spec":"sys::Dict"}"#),
+        (
+            "application/vnd.haystack+json",
+            r#"{"_kind":"grid","meta":{"ver":"3.0"},"cols":[],"rows":[{}]}"#,
+        ),
+        ("text/zinc", "ver:\"3.0\"\nempty\n"),
+    ] {
+        let value = json_response(
+            f.post("/ops?xeto-ignored=ignored")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", media)
+                .body(body)
+                .send()
+                .await
+                .unwrap(),
+            200,
+        )
+        .await;
+        assert_eq!(value["rows"].as_array().unwrap().len(), 2);
+    }
+    for (media, body) in [
+        (
+            "application/vnd.haystack+json",
+            r#"{"_kind":"grid","meta":{"ver":"3.0"},"cols":[{"name":"returns"}],"rows":[{"returns":null}]}"#,
+        ),
+        (
+            "application/vnd.haystack+json",
+            r#"{"_kind":"grid","meta":{"ver":"3.0"},"cols":[{"name":"unexpected"}],"rows":[{"unexpected":null}]}"#,
+        ),
+        ("text/zinc", "ver:\"3.0\"\nreturns\nN\n"),
+    ] {
+        api_error(
+            f.post("/ops")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", media)
+                .body(body),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn ops_duplicate_version_headers_and_query_precedence_cannot_bypass_authentication() {
+    let f = Fixture::start(true, ReadLimits::default()).await;
+    api_error(
+        f.get("/ops").header("Xeto-Version", "unsupported"),
+        401,
+        "AuthErr",
+    )
+    .await;
+    api_error(
+        f.get("/ops")
+            .header("Xeto-Version", "4")
+            .header("Xeto-Version", "4"),
+        401,
+        "AuthErr",
+    )
+    .await;
+    api_error(
+        f.get("/ops?xeto-version=4")
+            .header("Xeto-Version", "4")
+            .header("Xeto-Version", "4")
+            .header("Authorization", "BEARER authToken=fixture-token"),
+        400,
+        "UnsupportedVersionErr",
+    )
+    .await;
+    api_error(
+        f.get("/ops?xeto-version=4&xeto-version=4")
+            .header("Authorization", "BEARER authToken=fixture-token"),
+        400,
+        "UnsupportedVersionErr",
+    )
+    .await;
+    api_error(
+        f.get("/ops?xeto%2Dversion=5").header("Xeto-Version", "4"),
+        403,
+        "AuthErr",
+    )
+    .await;
+    let legacy = f
+        .get("/ops?xeto%2Dversion=4")
+        .header("Xeto-Version", "5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), 200);
+    assert_eq!(legacy.headers()["xeto-version"], "4");
+    let grid = codec_for("text/zinc")
+        .unwrap()
+        .decode_grid(&legacy.text().await.unwrap())
+        .unwrap();
+    assert!(grid.col("name").is_some() && grid.col("summary").is_some());
+    f.close().await;
+}
+
+#[tokio::test]
+async fn ops_generated_grid_limits_return_one_error_without_partial_rows() {
+    for limits in [
+        ReadLimits {
+            max_rows: 1,
+            ..ReadLimits::default()
+        },
+        ReadLimits {
+            max_candidates: 1,
+            ..ReadLimits::default()
+        },
+        ReadLimits {
+            max_output_bytes: 128,
+            ..ReadLimits::default()
+        },
+    ] {
+        let f = Fixture::start(false, limits).await;
+        let response = json_response(
+            f.get("/ops")
+                .header("Xeto-Version", "5")
+                .send()
+                .await
+                .unwrap(),
+            400,
+        )
+        .await;
+        assert_eq!(response["spec"], "sys.api::InvalidArgsErr");
+        assert!(response.get("rows").is_none());
+        f.close().await;
+    }
+}
+
+struct ReadByIdOnly;
+impl ReadPolicy for ReadByIdOnly {
+    fn snapshot(&self, _: &Principal) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
+        Ok(Arc::new(FunctionRules {
+            read_by_id: true,
+            ops: false,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn resolver_candidate_limit_counts_hidden_entries_before_a_null_read() {
+    for max_candidates in [1, 2] {
+        let f = Fixture::with_policy(
+            true,
+            ReadLimits {
+                max_candidates,
+                ..ReadLimits::default()
+            },
+            Arc::new(ReadByIdOnly),
+        )
+        .await;
+        // An absent nullable id with checked=false does no graph lookup. Only
+        // the two registry entries, including policy-hidden ops, spend candidates.
+        let response = f
+            .get("/readById?checked=false")
+            .header("Xeto-Version", "5")
+            .header("Authorization", "BEARER authToken=fixture-token")
+            .send()
+            .await
+            .unwrap();
+        let value = json_response(response, if max_candidates == 1 { 400 } else { 200 }).await;
+        if max_candidates == 1 {
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "spec": "sys.api::InvalidArgsErr",
+                    "status": 400,
+                    "dis": "Invalid request arguments"
+                })
+            );
+        } else {
+            assert_eq!(value, serde_json::Value::Null);
+            // With enough scan budget, direct invocation confirms ops is hidden.
+            api_error(
+                f.get("/ops")
+                    .header("Xeto-Version", "5")
+                    .header("Authorization", "BEARER authToken=fixture-token"),
+                404,
+                "UnknownFuncErr",
+            )
+            .await;
+        }
+        f.close().await;
+    }
 }

@@ -30,6 +30,9 @@ impl ReadPolicy for Rules {
     }
 }
 impl PolicySnapshot for Snapshot {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         &self.scope
     }
@@ -823,6 +826,9 @@ impl ReadPolicy for EntityPolicy {
     }
 }
 impl PolicySnapshot for PauseEntity {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         "snapshot-fixture"
     }

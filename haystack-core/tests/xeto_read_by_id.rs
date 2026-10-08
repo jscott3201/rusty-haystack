@@ -341,14 +341,14 @@ fn pinned_http_closure_is_reachable_and_error_fields_fit_their_declared_types() 
         "sys.api::ApiErr",
         "sys.api::UnknownFuncErr",
         "sys.api::UnsupportedVersionErr",
+        "sys.api::AmbiguousFuncErr",
+        "sys.api::MethodNotAllowedErr",
     ] {
         assert!(profile.declaration(name).is_some(), "{name}");
     }
     for name in [
         "sys.api::RateLimitErr",
         "sys.api::UnknownProjErr",
-        "sys.api::AmbiguousFuncErr",
-        "sys.api::MethodNotAllowedErr",
         "sys::Spec",
     ] {
         assert!(profile.declaration(name).is_none(), "{name}");

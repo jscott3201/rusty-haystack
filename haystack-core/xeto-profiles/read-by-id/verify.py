@@ -19,9 +19,10 @@ PIN = "873b922451d3ef4c0c9c08ef3daa542f352d69f3"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--http", action="store_true", help="verify the expanded executable HTTP closure")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent
-    manifest = json.loads((root / "manifest.json").read_text())
+    manifest = json.loads((root / ("http-manifest.json" if args.http else "manifest.json")).read_text())
     assert manifest["commit"] == PIN
     assert manifest["complete_libraries"] is False
     raw = {}

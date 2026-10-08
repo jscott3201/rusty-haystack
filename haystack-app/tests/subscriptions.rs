@@ -537,6 +537,9 @@ impl ReadPolicy for ScopePolicy {
     }
 }
 impl PolicySnapshot for ScopeSnapshot {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     // Deliberately stable key exercises defensive retained-value reauthorization,
     // including a policy implementation that failed its versioning obligation.
     fn scope_key(&self) -> &str {
@@ -658,6 +661,9 @@ impl ReadPolicy for GatedPolicy {
     }
 }
 impl PolicySnapshot for GatedPolicy {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         "gated"
     }

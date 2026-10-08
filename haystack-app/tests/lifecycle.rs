@@ -656,3 +656,89 @@ fn second_review_drain_tracks_completed_worker_until_caller_observes_result() {
         assert_eq!(handle.outstanding_tasks(), 0);
     });
 }
+
+#[test]
+fn queued_typed_ops_close_keeps_the_worker_lease_until_actual_queue_release() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = runtime.spawn_blocking(move || {
+        entered_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    runtime.block_on(async {
+        let probe = ProbeState::new();
+        let app = builder()
+            .shutdown_policy(short_close())
+            .owned_resource(Probe::new("provider", &probe, Init::Ready));
+        let handle = app.handle();
+        let owner = app.start(runtime.handle()).unwrap();
+        owner.ready().await.unwrap();
+        let reads = handle.read_service();
+        let read = {
+            let reads = reads.clone();
+            tokio::spawn(async move {
+                reads
+                    .begin(context())
+                    .await
+                    .unwrap()
+                    .invoke_wire(haystack_app::TypedInvocationInput {
+                        operation: "ops".into(),
+                        versions: vec!["5".into()],
+                        ..Default::default()
+                    })
+                    .await
+            })
+        };
+        load(
+            &reads,
+            ReadLoad {
+                admitted: 1,
+                waiting: 0,
+            },
+        )
+        .await;
+        let close = tokio::time::timeout(Duration::from_secs(1), owner.close()).await;
+        let before = (
+            handle.outstanding_tasks(),
+            probe.closed.load(Ordering::SeqCst),
+            reads.load().admitted,
+        );
+        // Release even if an assertion would fail, so the test runtime cannot hang.
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        let termination = tokio::time::timeout(Duration::from_secs(1), owner.terminated())
+            .await
+            .unwrap();
+        let close = close
+            .expect("close deadline is independent of the unrelated blocker")
+            .unwrap_err();
+        assert!(matches!(
+            close,
+            ApplicationError::ShutdownTimeout {
+                phase: ShutdownPhase::Tasks,
+                ..
+            }
+        ));
+        assert_eq!(before, (1, 0, 1));
+        assert!(matches!(
+            read.await.unwrap(),
+            Err(haystack_app::ApiError::Unavailable)
+        ));
+        assert_eq!(termination.close.unwrap_err(), close);
+        assert_eq!(probe.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.outstanding_tasks(), 0);
+        assert_eq!(
+            reads.read(context(), request()).await.unwrap_err(),
+            ReadError::Closed
+        );
+        assert_eq!(tokio::spawn(async { 7 }).await.unwrap(), 7);
+    });
+    // The standalone runtime owner is destroyed outside async execution.
+    drop(runtime);
+}

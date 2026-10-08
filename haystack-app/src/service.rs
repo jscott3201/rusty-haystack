@@ -38,8 +38,7 @@ pub struct ReadService {
     inner: Arc<Inner>,
 }
 struct Inner {
-    typed_profile: haystack_core::xeto::read_by_id::ReadByIdProfile,
-    typed_wire: crate::typed_read::WireProfile,
+    registry: crate::registry::Registry,
     lifecycle: Option<Arc<Lifecycle>>,
     graph: SharedGraph,
     dataset: [u8; 16],
@@ -105,13 +104,10 @@ impl ReadService {
         limits: ReadLimits,
     ) -> Result<Self, ReadError> {
         limits.validate()?;
-        let typed_profile = haystack_core::xeto::read_by_id::ReadByIdProfile::load_http_pinned()
-            .map_err(|_| ReadError::InvalidLimits)?;
-        let typed_wire = crate::typed_read::WireProfile::new(&typed_profile)?;
+        let registry = crate::registry::Registry::pinned()?;
         Ok(Self {
             inner: Arc::new(Inner {
-                typed_profile,
-                typed_wire,
+                registry,
                 lifecycle: None,
                 graph,
                 dataset: rand::random(),
@@ -152,6 +148,11 @@ impl ReadService {
         principal: &Principal,
     ) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
         self.inner.policy.snapshot(principal)
+    }
+    /// Installed typed HTTP bindings for trusted transport configuration. Caller
+    /// discovery uses the same entries after the request's policy snapshot.
+    pub fn typed_functions(&self) -> impl Iterator<Item = crate::FunctionDescriptor<'_>> {
+        self.inner.registry.descriptors()
     }
     pub fn limits(&self) -> &ReadLimits {
         &self.inner.limits
@@ -235,6 +236,7 @@ impl ReadService {
         Ok(ReadAdmission {
             inner: self.inner.clone(),
             principal: Some(context.principal),
+            session: None,
             budget: Some(budget),
             permit: Some(permit),
             guard,
@@ -269,6 +271,7 @@ impl ReadService {
 pub struct ReadAdmission {
     inner: Arc<Inner>,
     principal: Option<Principal>,
+    session: Option<crate::SubscriptionSession>,
     budget: Option<Budget>,
     permit: Option<OwnedSemaphorePermit>,
     guard: Option<WorkGuard>,
@@ -303,16 +306,34 @@ impl ReadAdmission {
     pub fn bind_wire_principal(&mut self, principal: Principal) -> Result<(), ReadError> {
         self.reserve_wire_input(principal.bytes())?;
         self.principal = Some(principal);
+        self.session = None;
         Ok(())
     }
-    pub async fn read_by_id_wire(
-        self,
-        input: crate::TypedReadInput,
-    ) -> Result<crate::TypedReadResponse, crate::ApiError> {
+    /// Bind the exact noncredential handle returned by trusted authentication.
+    /// Request parameters cannot construct or select a session authority.
+    pub fn bind_wire_session(
+        &mut self,
+        principal: Principal,
+        session: crate::SubscriptionSession,
+    ) -> Result<(), ReadError> {
+        if !session.matches(&principal) || !session.is_active() {
+            return Err(ReadError::Forbidden);
+        }
+        self.bind_wire_principal(principal)?;
+        self.session = Some(session);
+        Ok(())
+    }
+    pub async fn invoke_wire(
+        mut self,
+        input: crate::TypedInvocationInput,
+    ) -> Result<crate::TypedInvocationResponse, crate::ApiError> {
         let inner = self.inner.clone();
-        self.run_task(move |principal, budget| Ok(inner.execute_typed(principal, input, budget)))
-            .await
-            .map_err(crate::ApiError::from)?
+        let session = self.session.take();
+        self.run_task(move |principal, budget| {
+            Ok(inner.execute_typed(principal, session, input, budget))
+        })
+        .await
+        .map_err(crate::ApiError::from)?
     }
     pub fn deadline(&self) -> Instant {
         self.budget.as_ref().expect("live admission").deadline
@@ -470,21 +491,36 @@ impl Inner {
     fn execute_typed(
         &self,
         principal: Principal,
-        input: crate::TypedReadInput,
+        session: Option<crate::SubscriptionSession>,
+        input: crate::TypedInvocationInput,
         budget: &mut Budget,
-    ) -> Result<crate::TypedReadResponse, crate::ApiError> {
-        use crate::{ApiError, typed_read};
+    ) -> Result<crate::TypedInvocationResponse, crate::ApiError> {
+        use crate::{ApiError, typed_http};
         if principal.bytes() > budget.limits.max_input_bytes {
             return Err(ApiError::InvalidArgs);
         }
         budget.check()?;
-        let request = typed_read::decode(&input, &self.typed_wire, budget)?;
+        if session
+            .as_ref()
+            .is_some_and(|session| !session.matches(&principal) || !session.is_active())
+        {
+            return Err(ApiError::Permission);
+        }
+        // The handle is retained through invocation; no token lookup can rebind
+        // a request to a replacement login. Closing sessions is a later binding.
+        let _session = session;
+        let envelope = typed_http::envelope(&input, budget)?;
         let policy = self.policy.snapshot(&principal)?;
         budget.check()?;
         if !policy.operation(ReadOperation::Read) {
             return Err(ApiError::Permission);
         }
-        // Fitting clones only the declared two small arguments. Reserve before
+        let entry = self
+            .registry
+            .resolve(&envelope.operation, policy.as_ref(), budget)?;
+        entry.permits_method(input.post)?;
+        let request = typed_http::decode(&input, &entry.wire, envelope, budget)?;
+        // This closed profile binds at most two scalar arguments. Reserve before
         // the native binder constructs its immutable values and origin table.
         budget.charge(
             BudgetKind::Retained,
@@ -496,41 +532,48 @@ impl Inner {
                 .saturating_add(4096),
         )?;
         let args = self
-            .typed_profile
-            .fit_arguments("sys.api::readById", &request.args)
+            .registry
+            .profile
+            .fit_arguments(&entry.identity.qname, &request.args)
             .map_err(|_| ApiError::InvalidArgs)?;
-        let checked = matches!(args.values().get("checked"), Some(Kind::Bool(true)));
-        let value = match args.values().get("id") {
-            Some(Kind::Null) if checked => return typed_read::missing(&request, budget),
-            Some(Kind::Null) => Kind::Null,
-            Some(Kind::Ref(id)) => loop {
-                let wait = budget.wait_quantum()?;
-                if let Some(result) = self.graph.read_for(wait, |graph| {
-                    budget.charge(BudgetKind::Candidates, 1)?;
-                    let mut view = View {
-                        graph,
-                        policy: policy.as_ref(),
-                        budget,
-                    };
-                    view.entity(&id.val)
-                }) {
-                    match result? {
-                        Some(row) => {
-                            break Kind::Dict(Box::new(
-                                Arc::try_unwrap(row).map_err(|_| ApiError::Internal)?,
-                            ));
+        let value = match entry.handler {
+            crate::registry::Handler::Ops => self.registry.ops(policy.as_ref(), budget)?,
+            crate::registry::Handler::ReadById => {
+                let checked = matches!(args.values().get("checked"), Some(Kind::Bool(true)));
+                match args.values().get("id") {
+                    Some(Kind::Null) if checked => return typed_http::missing(&request, budget),
+                    Some(Kind::Null) => Kind::Null,
+                    Some(Kind::Ref(id)) => loop {
+                        let wait = budget.wait_quantum()?;
+                        if let Some(result) = self.graph.read_for(wait, |graph| {
+                            budget.charge(BudgetKind::Candidates, 1)?;
+                            let mut view = View {
+                                graph,
+                                policy: policy.as_ref(),
+                                budget,
+                            };
+                            view.entity(&id.val)
+                        }) {
+                            match result? {
+                                Some(row) => {
+                                    break Kind::Dict(Box::new(
+                                        Arc::try_unwrap(row).map_err(|_| ApiError::Internal)?,
+                                    ));
+                                }
+                                None if checked => return typed_http::missing(&request, budget),
+                                None => break Kind::Null,
+                            }
                         }
-                        None if checked => return typed_read::missing(&request, budget),
-                        None => break Kind::Null,
-                    }
+                    },
+                    _ => return Err(ApiError::Internal),
                 }
-            },
-            _ => return Err(ApiError::Internal),
+            }
         };
-        self.typed_profile
-            .fit_result("sys.api::readById", &value)
+        self.registry
+            .profile
+            .fit_result(&entry.identity.qname, &value)
             .map_err(|_| ApiError::Internal)?;
-        typed_read::encode(value, &request, &self.typed_wire, budget)
+        typed_http::encode(value, &request, &entry.wire, budget)
     }
     fn execute(
         &self,
@@ -1285,5 +1328,104 @@ mod completion_tests {
             assert_eq!(held, 1);
             assert_eq!(reads.load().admitted, 0);
         });
+    }
+}
+
+#[cfg(test)]
+mod registry_dispatch_tests {
+    use super::*;
+    use crate::{AllowAll, FunctionIdentity, TypedInvocationInput};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Policy(Arc<AtomicUsize>);
+    impl ReadPolicy for Policy {
+        fn snapshot(&self, _: &Principal) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
+            Ok(Arc::new(Self(self.0.clone())))
+        }
+    }
+    impl PolicySnapshot for Policy {
+        fn scope_key(&self) -> &str {
+            "method-side-effect-fixture"
+        }
+        fn function(&self, _: &FunctionIdentity) -> bool {
+            true
+        }
+        fn operation(&self, _: ReadOperation) -> bool {
+            true
+        }
+        fn entity(&self, _: &str) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+        fn tag(&self, _: &str, _: &str) -> bool {
+            true
+        }
+        fn reference(&self, _: &str) -> bool {
+            true
+        }
+        fn reference_display(&self, _: &str) -> bool {
+            true
+        }
+        fn catalog(&self, kind: CatalogKind, name: &str) -> bool {
+            AllowAll.catalog(kind, name)
+        }
+        fn nominal_provenance(&self, _: &haystack_core::kinds::NominalScalar) -> bool {
+            true
+        }
+    }
+    #[tokio::test]
+    async fn get_without_marker_stops_before_handler_while_post_executes() {
+        let graph = SharedGraph::new(haystack_core::graph::EntityGraph::new());
+        let mut record = HDict::new();
+        record.set("id", Kind::Ref(haystack_core::kinds::HRef::from_val("a")));
+        graph.add(record).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut service = ReadService::new(
+            graph,
+            Arc::new(Policy(calls.clone())),
+            ReadLimits::default(),
+        )
+        .unwrap();
+        Arc::get_mut(&mut service.inner)
+            .unwrap()
+            .registry
+            .disable_read_get_for_test();
+        let context =
+            || ReadContext::with_timeout(Principal::Anonymous, std::time::Duration::from_secs(1));
+        let input = TypedInvocationInput {
+            operation: "readById".into(),
+            versions: vec!["5".into()],
+            query: "id=a".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            service
+                .begin(context())
+                .await
+                .unwrap()
+                .invoke_wire(input)
+                .await,
+            Err(crate::ApiError::MethodNotAllowed)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let input = TypedInvocationInput {
+            operation: "readById".into(),
+            versions: vec!["5".into()],
+            post: true,
+            content_types: vec!["application/json".into()],
+            body: br#"{"id":"a"}"#.to_vec(),
+            ..Default::default()
+        };
+        assert!(
+            service
+                .begin(context())
+                .await
+                .unwrap()
+                .invoke_wire(input)
+                .await
+                .is_ok()
+        );
+        // View may consult entity policy again while sanitizing the id Ref.
+        // The positive control proves execution, without prescribing callbacks.
+        assert!(calls.load(Ordering::SeqCst) > 0);
     }
 }

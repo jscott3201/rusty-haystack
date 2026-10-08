@@ -11,6 +11,8 @@ pub trait ReadPolicy: Send + Sync + 'static {
 }
 pub trait PolicySnapshot: Send + Sync + 'static {
     fn scope_key(&self) -> &str;
+    /// Explicit executable-function permission, independent of catalog visibility.
+    fn function(&self, function: &crate::FunctionIdentity) -> bool;
     fn operation(&self, operation: ReadOperation) -> bool;
     fn entity(&self, id: &str) -> bool;
     fn tag(&self, entity: &str, tag: &str) -> bool;
@@ -29,6 +31,9 @@ impl ReadPolicy for AllowAll {
     }
 }
 impl PolicySnapshot for AllowAll {
+    fn function(&self, _: &crate::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         "explicit-allow-all-v1"
     }

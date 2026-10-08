@@ -87,6 +87,9 @@ impl ReadPolicy for Rules {
     }
 }
 impl PolicySnapshot for Snapshot {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         if self.authenticated {
             "user-v1"
