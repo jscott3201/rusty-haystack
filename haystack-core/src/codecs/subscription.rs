@@ -3,7 +3,7 @@
 //! values; this is an application extension, not a Haystack 5 wire format.
 use super::{
     entity::{self, EntityWire},
-    typed::TypedPayloadError,
+    typed::{self, TypedPayloadError},
 };
 use crate::{data::HDict, kinds::Kind};
 use std::{collections::BTreeSet, sync::Arc};
@@ -895,14 +895,77 @@ pub fn decode_grid<T: EntityWire>(
     codec: &dyn super::Codec,
 ) -> Result<T, TypedPayloadError> {
     allowed(codec)?;
-    // Reuse the bounded outer scanner. Zinc additionally requires complete rows
-    // and scalars, rather than the permissive legacy grid decoder.
-    let value = entity::decode_grid(bytes, codec)?;
-    if codec.mime_type() == "text/zinc" {
-        let source = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-        from_grid::<T>(&super::zinc::decode_grid_complete_rows(source).map_err(|_| invalid())?)?;
+    if codec.mime_type() != "text/zinc" {
+        // Validate raw JSON before a permissive H4 decoder can collapse duplicate
+        // fields or turn malformed metadata into an empty dictionary.
+        let value = typed::bounded_json(
+            bytes,
+            typed::PayloadLimits {
+                max_bytes: MAX_WIRE_BYTES,
+                max_depth: 8,
+                max_nodes: 64,
+            },
+        )
+        .map_err(|_| invalid())?;
+        let outer = value.as_object().ok_or_else(invalid)?;
+        let v3 = codec.mime_type() == "application/json;v=3";
+        if outer
+            .keys()
+            .any(|key| !matches!(key.as_str(), "meta" | "cols" | "rows") && (v3 || key != "_kind"))
+        {
+            return Err(invalid());
+        }
+        if !v3
+            && outer
+                .get("_kind")
+                .is_some_and(|kind| kind.as_str() != Some("grid"))
+        {
+            return Err(invalid());
+        }
+        if let Some(meta) = outer.get("meta") {
+            let meta = meta.as_object().ok_or_else(invalid)?;
+            if v3
+                && meta
+                    .get("ver")
+                    .is_some_and(|ver| ver.as_str() != Some("3.0"))
+            {
+                return Err(invalid());
+            }
+            if !v3
+                && meta
+                    .get("_kind")
+                    .is_some_and(|kind| kind.as_str() != Some("dict"))
+            {
+                return Err(invalid());
+            }
+        }
+        let cols = outer
+            .get("cols")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(invalid)?;
+        if cols.len() != 1 {
+            return Err(invalid());
+        }
+        let col = cols[0].as_object().ok_or_else(invalid)?;
+        if !v3 && col.get("meta").is_some_and(|meta| !meta.is_object()) {
+            return Err(invalid());
+        }
+        if col.keys().any(|key| key != "name" && (v3 || key != "meta")) {
+            return Err(invalid());
+        }
+        let grid = if v3 {
+            super::json::v3::decode_grid_value(&value)
+        } else {
+            super::json::v4::decode_grid_value(&value)
+        }
+        .map_err(|_| invalid())?;
+        return from_grid(&grid);
     }
-    Ok(value)
+    // Zinc keeps the bounded outer scanner and additionally requires complete
+    // rows and scalars instead of the permissive legacy grid decoder.
+    let _: T = entity::decode_grid(bytes, codec)?;
+    let source = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    from_grid::<T>(&super::zinc::decode_grid_complete_rows(source).map_err(|_| invalid())?)
 }
 
 #[cfg(test)]
@@ -1072,5 +1135,70 @@ mod tests {
             )])]),
         );
         assert!(to_grid(&SubscriptionOutcome::Delivery(value)).is_err());
+    }
+    #[test]
+    fn review_raw_json_outer_rejects_duplicate_fields_and_wrong_metadata_types() {
+        let request = SubscriptionRequest::Acknowledge {
+            watch: watch(),
+            scope_generation: 2,
+            token: [5; 16],
+            through: 12,
+        };
+        let payload = String::from_utf8(encode(&request).unwrap()).unwrap();
+        for v3 in [false, true] {
+            let codec = codec_for(if v3 {
+                "application/json;v=3"
+            } else {
+                "application/json"
+            })
+            .unwrap();
+            let payload =
+                serde_json::to_string(&format!("{}{}", if v3 { "s:" } else { "" }, payload))
+                    .unwrap();
+            let meta = if v3 {
+                r#""meta":{"ver":"3.0"},"#
+            } else {
+                r#""_kind":"grid","meta":{},"#
+            };
+            let valid = format!(
+                r#"{{{meta}"cols":[{{"name":"payload"}}],"rows":[{{"payload":{payload}}}]}}"#
+            );
+            assert!(decode_grid::<SubscriptionRequest>(valid.as_bytes(), codec).is_ok());
+            let cases = [
+                valid.replace(r#""payload":"#, r#""payload":null,"payload":"#),
+                valid.replace(r#""meta":{"#, r#""meta":null,"meta":{"#),
+                valid.replace(
+                    if v3 {
+                        r#""meta":{"ver":"3.0"}"#
+                    } else {
+                        r#""meta":{}"#
+                    },
+                    r#""meta":null"#,
+                ),
+                valid.replace(
+                    if v3 {
+                        r#""meta":{"ver":"3.0"}"#
+                    } else {
+                        r#""meta":{}"#
+                    },
+                    r#""meta":[]"#,
+                ),
+            ];
+            for (index, bytes) in cases.iter().enumerate() {
+                assert!(
+                    decode_grid::<SubscriptionRequest>(bytes.as_bytes(), codec).is_err(),
+                    "v3={v3} malformed case={index}"
+                );
+            }
+            if !v3 {
+                for bad in ["null", "[]", "false", "3", r#""bad""#] {
+                    let bytes = valid.replace(
+                        r#""name":"payload""#,
+                        &format!(r#""name":"payload","meta":{bad}"#),
+                    );
+                    assert!(decode_grid::<SubscriptionRequest>(bytes.as_bytes(), codec).is_err());
+                }
+            }
+        }
     }
 }

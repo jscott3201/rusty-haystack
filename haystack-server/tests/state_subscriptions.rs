@@ -691,3 +691,87 @@ async fn lost_http_creation_and_acknowledgement_recover_only_by_explicit_same_ke
     stop.send(()).unwrap();
     task.await.unwrap();
 }
+
+fn review_raw_json_request(request: &SubscriptionRequest, v3: bool, bad: usize) -> String {
+    let payload = String::from_utf8(wire::encode(request).unwrap()).unwrap();
+    let payload =
+        serde_json::to_string(&format!("{}{}", if v3 { "s:" } else { "" }, payload)).unwrap();
+    let meta = if v3 {
+        r#""meta":{"ver":"3.0"},"#
+    } else {
+        r#""_kind":"grid","meta":{},"#
+    };
+    let valid =
+        format!(r#"{{{meta}"cols":[{{"name":"payload"}}],"rows":[{{"payload":{payload}}}]}}"#);
+    match bad {
+        0 => valid.replace(r#""payload":"#, r#""payload":null,"payload":"#),
+        1 => valid.replace(r#""meta":{"#, r#""meta":null,"meta":{"#),
+        2 => valid.replace(
+            if v3 {
+                r#""meta":{"ver":"3.0"}"#
+            } else {
+                r#""meta":{}"#
+            },
+            r#""meta":null"#,
+        ),
+        3 => valid.replace(r#""name":"payload""#, r#""name":"payload","meta":null"#),
+        _ => valid,
+    }
+}
+#[tokio::test]
+async fn review_malformed_raw_json_cannot_create_or_acknowledge_a_watch() {
+    for v3 in [false, true] {
+        let app = Running::start(Duration::from_secs(60), Arc::new(AllowAll)).await;
+        let mime = if v3 {
+            "application/json;v=3"
+        } else {
+            "application/json"
+        };
+        let raw = haystack_client::ClientConfig::default()
+            .build_reqwest_client()
+            .unwrap();
+        let request = create(app.service.authority(), "raw-json-input");
+        for bad in 0..if v3 { 3 } else { 4 } {
+            let response = raw
+                .post(format!("{}/watchSub", app.url))
+                .header("Authorization", "BEARER authToken=session-a")
+                .header("Content-Type", mime)
+                .header("Accept", mime)
+                .body(review_raw_json_request(&request, v3, bad))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_client_error(), "v3={v3} case={bad}");
+            assert_eq!(app.service.binding_count(), 0);
+        }
+        let client = app.http("session-a", mime);
+        let initial = delivery(client.state_subscription(&request).await.unwrap());
+        for bad in 0..if v3 { 3 } else { 4 } {
+            let response = raw
+                .post(format!("{}/watchAck", app.url))
+                .header("Authorization", "BEARER authToken=session-a")
+                .header("Content-Type", mime)
+                .header("Accept", mime)
+                .body(review_raw_json_request(&ack(&initial), v3, bad))
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_client_error(),
+                "v3={v3} ack case={bad}"
+            );
+            assert_eq!(
+                *delivery(
+                    client
+                        .state_subscription(&SubscriptionRequest::Poll {
+                            watch: initial.watch.clone()
+                        })
+                        .await
+                        .unwrap()
+                ),
+                *initial
+            );
+        }
+        app.stop().await;
+    }
+}

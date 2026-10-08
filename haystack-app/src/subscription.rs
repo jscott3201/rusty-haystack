@@ -19,7 +19,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -111,7 +111,8 @@ struct Entry {
     identity: SubscriptionId,
     session: SubscriptionSession,
     canonical: Arc<[u8]>,
-    reservation: usize,
+    base_reservation: usize,
+    reservation: AtomicUsize,
     legacy: bool,
     connection: Option<[u8; 16]>,
     active: AtomicBool,
@@ -187,6 +188,7 @@ impl Drop for Reservation {
 enum Publication {
     Done,
     Retry,
+    Capacity,
     Stopped(SubscriptionResync),
 }
 
@@ -375,7 +377,9 @@ impl SubscriptionInner {
             table
                 .bindings
                 .remove(&(entry.session.id(), entry.identity.key.clone()));
-            table.reserved_bytes = table.reserved_bytes.saturating_sub(entry.reservation);
+            table.reserved_bytes = table
+                .reserved_bytes
+                .saturating_sub(entry.reservation.load(Ordering::Relaxed));
         }
     }
     fn registry<'a>(
@@ -462,7 +466,7 @@ impl SubscriptionInner {
                             active + usize::from(entry.active.load(Ordering::Acquire)),
                         )
                     });
-                let reserve = self
+                let base_reservation = self
                     .limits
                     .max_view_bytes
                     .saturating_mul(12)
@@ -470,6 +474,7 @@ impl SubscriptionInner {
                     .saturating_add(canonical.len().saturating_mul(4))
                     .saturating_add(principal.bytes())
                     .saturating_add(4096);
+                let reserve = base_reservation.saturating_add(membership_bytes(&create.ids));
                 if active >= self.limits.max_watches
                     || own_active >= self.limits.max_watches_per_session
                     || table.entries.len() >= self.limits.max_bindings
@@ -492,7 +497,8 @@ impl SubscriptionInner {
                     },
                     session: session.clone(),
                     canonical: canonical.into(),
-                    reservation: reserve,
+                    base_reservation,
+                    reservation: AtomicUsize::new(reserve),
                     legacy,
                     connection,
                     active: AtomicBool::new(true),
@@ -538,7 +544,6 @@ impl SubscriptionInner {
             .as_ref()
             .map(|_| self.reads.graph().subscribe_wakes());
         loop {
-            budget.charge(BudgetKind::Work, 1)?;
             if self.stopped(budget) {
                 return Ok(SubscriptionOutcome::Resync(SubscriptionResync::Shutdown));
             }
@@ -561,6 +566,20 @@ impl SubscriptionInner {
                 Status::Preparing => None,
                 Status::Live(live) => Some(live),
             };
+            if let Err(error) = budget.charge(BudgetKind::Work, 1) {
+                if live.is_some() && execution_overflow(&error) {
+                    if self.terminal(
+                        &entry,
+                        record.revision,
+                        SubscriptionResync::Overflow,
+                        budget,
+                    )? {
+                        return Ok(SubscriptionOutcome::Resync(SubscriptionResync::Overflow));
+                    }
+                    continue;
+                }
+                return Err(error);
+            }
             if let Some(live) = live
                 && Instant::now() >= live.lease_until
             {
@@ -600,6 +619,17 @@ impl SubscriptionInner {
             };
             let captured = match self.capture(principal, &ids, live, budget) {
                 Ok(captured) => captured,
+                Err(CaptureError::Read(error)) if live.is_some() && execution_overflow(&error) => {
+                    if self.terminal(
+                        &entry,
+                        record.revision,
+                        SubscriptionResync::Overflow,
+                        budget,
+                    )? {
+                        return Ok(SubscriptionOutcome::Resync(SubscriptionResync::Overflow));
+                    }
+                    continue;
+                }
                 Err(CaptureError::Read(error)) => return Err(error),
                 Err(CaptureError::Resync(reason)) if live.is_none() => {
                     return Ok(SubscriptionOutcome::Rejected(
@@ -625,7 +655,7 @@ impl SubscriptionInner {
                     Err(ReadError::Budget(BudgetKind::Output)) if live.is_none() => {
                         return Ok(SubscriptionOutcome::Rejected(SubscriptionRejection::Limit));
                     }
-                    Err(ReadError::Budget(BudgetKind::Output)) => {
+                    Err(error) if live.is_some() && execution_overflow(&error) => {
                         if self.terminal(
                             &entry,
                             record.revision,
@@ -651,6 +681,11 @@ impl SubscriptionInner {
             match self.publish(&entry, record.revision, observed, next, session, budget)? {
                 Publication::Stopped(reason) => return Ok(SubscriptionOutcome::Resync(reason)),
                 Publication::Retry => continue,
+                Publication::Capacity => {
+                    return Ok(SubscriptionOutcome::Rejected(
+                        SubscriptionRejection::Capacity,
+                    ));
+                }
                 Publication::Done => {
                     if let Some(reserved) = &mut reservation {
                         reserved.published = true;
@@ -1051,6 +1086,19 @@ impl SubscriptionInner {
                 if graph.state() != observed {
                     return Ok(Publication::Retry);
                 }
+                // Registry reservation and record publication share one short
+                // critical section. No replacement can install IDs before its
+                // additional permanent storage is admitted.
+                let Some(mut table) = self.records.try_lock() else {
+                    return Ok(Publication::Retry);
+                };
+                if !table
+                    .entries
+                    .get(&entry.identity.watch)
+                    .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), entry))
+                {
+                    return Ok(Publication::Stopped(SubscriptionResync::Unknown));
+                }
                 let Some(mut record) = entry.state.try_lock() else {
                     return Ok(Publication::Retry);
                 };
@@ -1069,6 +1117,26 @@ impl SubscriptionInner {
                 {
                     return Ok(Publication::Retry);
                 }
+                let reserved = entry.reservation.load(Ordering::Relaxed);
+                let required = match &next.status {
+                    Status::Live(live) => entry
+                        .base_reservation
+                        .saturating_add(membership_bytes(&live.ids)),
+                    _ => reserved,
+                };
+                let growth = required.saturating_sub(reserved);
+                if growth
+                    > self
+                        .limits
+                        .max_retained_bytes
+                        .saturating_sub(table.reserved_bytes)
+                {
+                    return Ok(Publication::Capacity);
+                }
+                table.reserved_bytes += growth;
+                entry
+                    .reservation
+                    .store(reserved + growth, Ordering::Relaxed);
                 entry
                     .active
                     .store(matches!(next.status, Status::Live(_)), Ordering::Release);
@@ -1108,10 +1176,37 @@ impl SubscriptionInner {
                 table
                     .bindings
                     .remove(&(entry.session.id(), entry.identity.key.clone()));
-                table.reserved_bytes = table.reserved_bytes.saturating_sub(entry.reservation);
+                table.reserved_bytes = table
+                    .reserved_bytes
+                    .saturating_sub(entry.reservation.load(Ordering::Relaxed));
             }
         }
     }
+}
+// The original canonical creation remains reserved for the session lifetime;
+// current membership additionally owns one string allocation per retained ID.
+fn membership_bytes(ids: &[String]) -> usize {
+    ids.iter().fold(64usize, |total, id| {
+        total
+            .saturating_add(std::mem::size_of::<String>())
+            .saturating_add(id.len())
+    })
+}
+fn execution_overflow(error: &ReadError) -> bool {
+    matches!(
+        error,
+        ReadError::Budget(
+            BudgetKind::Work
+                | BudgetKind::Retained
+                | BudgetKind::Values
+                | BudgetKind::Depth
+                | BudgetKind::Rows
+                | BudgetKind::Output
+                | BudgetKind::Candidates
+                | BudgetKind::Forward
+                | BudgetKind::Inverse
+        )
+    )
 }
 fn normalize(ids: &[String]) -> Vec<String> {
     let mut ids = ids.to_vec();

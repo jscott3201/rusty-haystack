@@ -165,7 +165,7 @@ Subscribe to entity changes.
 
 **Response**: grid with current state of watched entities. Grid meta contains `watchId` (Str).
 
-WebSocket disconnect cleanup currently removes all watches owned by that username, including watches created through another connection or HTTP.
+A legacy WebSocket disconnect removes only watches created by that connection. Watches created through HTTP or another connection retain their own lifetimes.
 
 #### POST `/api/watchPoll`
 

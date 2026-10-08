@@ -145,7 +145,8 @@ key or watch identity and decide explicitly how to reconcile it.
 The scoped HTTP operations are `watchInfo`, `watchSub`, `watchPoll`, `watchAck`,
 `watchRenew` and `watchUnsub`. Each request/response is one H4 grid with exactly
 one `payload` STR cell holding the bounded `state-subscription-v1` typed envelope.
-Supported outer codecs are Zinc, JSON v3 and JSON v4. Strict field sets,
+Supported outer codecs are Zinc, JSON v3 and JSON v4. Raw JSON rejects duplicate
+fields and wrongly typed metadata before H4 decoding. Strict field sets,
 canonical decimal control strings, exact identities and response correlation
 are checked before a client accepts an outcome. This is an H4 extension; it does
 not add a Haystack 5 wire protocol.
@@ -204,7 +205,13 @@ charged against a 128 MiB aggregate retained-state budget before creation.
 These independent limits may admit fewer watches than the count ceiling.
 The default maximum lease is five minutes; the wire ceiling is one hour.
 Maintenance runs every 100 ms. Read-service input, work, value, output and
-concurrency limits apply to active operations as well.
+concurrency limits apply to active operations as well. Membership replacement
+reserves any growth in retained IDs atomically with publication; capacity
+rejection preserves the previous scope and prepared delivery. Reservations keep
+their high-water value through the terminal binding lifetime. Existing-watch
+execution exhaustion produces terminal overflow resynchronization. Malformed
+requests, admission failures, deadlines and caller cancellation retain their
+distinct error or uncertain-outcome semantics.
 
 Legacy HTTP/watch and JSON v3 WebSocket calls use this same application owner.
 `HaystackServer::start` selects that owner for the compatibility application.
@@ -217,7 +224,8 @@ only watches created by that connection. Other connections' and HTTP-created
 watches are preserved, including for the same username.
 
 Legacy pushes are fresh authorized current-state views and do not consume the
-polling fence. The legacy request/response frame contract and selective-ID
+polling fence. Each watch is captured and encoded under fresh admission after
+its own outbound sink-capacity wait; queued handles contain no entity payload. The legacy request/response frame contract and selective-ID
 removal remain documented in [the server API](server-api.md). The application
 owner's limits apply in addition to that frame grammar. Python watch bindings,
 portable durable storage and distributed subscription ownership are outside

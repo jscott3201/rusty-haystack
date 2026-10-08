@@ -140,6 +140,7 @@ enum Command {
     Scoped(ScopedFrame),
     Legacy(WsRequest),
     Push,
+    PushWatch(String),
     Control(Message),
 }
 struct Attachment {
@@ -273,16 +274,16 @@ async fn process(
     session: &SubscriptionSession,
     connection: [u8; 16],
     guard: &WorkGuard,
-) -> Result<Vec<Message>, ReadError> {
+) -> Result<Option<Message>, ReadError> {
     match command {
-        Command::Control(message) => Ok(vec![message]),
+        Command::Control(message) => Ok(Some(message)),
         Command::Legacy(request) => {
             let response = legacy_response(request, service, session, connection, guard).await?;
-            Ok(vec![Message::Text(
+            Ok(Some(Message::Text(
                 serde_json::to_string(&response)
                     .expect("JSON response")
                     .into(),
-            )])
+            )))
         }
         Command::Scoped(frame) => {
             let admission = begin(service, session, guard).await?;
@@ -295,18 +296,19 @@ async fn process(
                 req_id: frame.req_id,
                 payload,
             };
-            Ok(vec![Message::Text(
+            Ok(Some(Message::Text(
                 serde_json::to_string(&response)
                     .expect("JSON response")
                     .into(),
-            )])
+            )))
         }
-        Command::Push => {
+        Command::Push => Err(ReadError::InvalidQuery("unexpanded legacy push")),
+        Command::PushWatch(watch) => {
             let admission = begin(service, session, guard).await?;
-            let pushes = service
-                .legacy_push_admitted(admission, session.clone(), connection)
+            let message = service
+                .legacy_push_admitted(admission, session.clone(), connection, watch)
                 .await?;
-            Ok(pushes.into_iter().filter(|(_,grid)|!grid.rows.is_empty()).map(|(watch,grid)|Message::Text(serde_json::json!({"type":"push","watchId":watch,"rows":grid.rows.iter().map(encode_entity).collect::<Vec<_>>()} ).to_string().into())).collect())
+            Ok(message.map(|text| Message::Text(text.into())))
         }
     }
 }
@@ -350,16 +352,29 @@ async fn write_commands<S>(
         if !matches!(ready, Ok(Ok(()))) {
             break;
         }
-        let result = tokio::select! {biased;_=session.closed()=>break,_=closing.cancelled()=>break,_=stopped.changed()=>break,result=process(command,&service,&session,connection,&guard)=>result};
-        let Ok(messages) = result else { break };
-        for (index, message) in messages.into_iter().enumerate() {
+        let commands = if matches!(command, Command::Push) {
+            let result = tokio::select! {biased;_=session.closed()=>break,_=closing.cancelled()=>break,_=stopped.changed()=>break,result=async {
+                let admission = begin(&service, &session, &guard).await?;
+                service.legacy_push_watches_admitted(admission, session.clone(), connection).await
+            }=>result};
+            let Ok(watches) = result else { break };
+            watches
+                .into_iter()
+                .map(Command::PushWatch)
+                .collect::<Vec<_>>()
+        } else {
+            vec![command]
+        };
+        for (index, command) in commands.into_iter().enumerate() {
             if index > 0 {
                 let ready = tokio::select! {biased;_=session.closed()=>break 'commands,_=closing.cancelled()=>break 'commands,_=stopped.changed()=>break 'commands,result=tokio::time::timeout(WRITE_TIMEOUT,futures_util::future::poll_fn(|cx|std::pin::Pin::new(&mut sender).poll_ready(cx)))=>result};
                 if !matches!(ready, Ok(Ok(()))) {
                     return;
                 }
             }
-
+            let result = tokio::select! {biased;_=session.closed()=>break 'commands,_=closing.cancelled()=>break 'commands,_=stopped.changed()=>break 'commands,result=process(command,&service,&session,connection,&guard)=>result};
+            let Ok(message) = result else { break 'commands };
+            let Some(message) = message else { continue };
             if matches!(&message,Message::Text(text) if text.len()>limit) {
                 let _ = tokio::time::timeout(
                     WRITE_TIMEOUT,
@@ -372,7 +387,7 @@ async fn write_commands<S>(
                 return;
             }
             if !session.is_active() || closing.is_cancelled() || stopped.borrow().is_some() {
-                break;
+                break 'commands;
             }
             if std::pin::Pin::new(&mut sender).start_send(message).is_err() {
                 return;
@@ -383,6 +398,7 @@ async fn write_commands<S>(
             }
         }
     }
+
     // Closing the application can also drop the authentication manager and
     // revoke its sessions. Preserve the application shutdown close code even
     // when that revocation wins a race with the reader's terminal notification.
@@ -581,10 +597,11 @@ mod tests {
     };
     use std::sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     struct SinkState {
         ready: AtomicBool,
+        block_after: AtomicUsize,
         entered: tokio::sync::Notify,
         waker: futures_util::task::AtomicWaker,
         sent: Mutex<Vec<Message>>,
@@ -594,6 +611,7 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 ready: AtomicBool::new(false),
+                block_after: AtomicUsize::new(usize::MAX),
                 entered: tokio::sync::Notify::new(),
                 waker: futures_util::task::AtomicWaker::new(),
                 sent: Mutex::new(Vec::new()),
@@ -621,7 +639,14 @@ mod tests {
             }
         }
         fn start_send(self: std::pin::Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
-            self.0.sent.lock().unwrap().push(message);
+            let count = {
+                let mut sent = self.0.sent.lock().unwrap();
+                sent.push(message);
+                sent.len()
+            };
+            if count == self.0.block_after.load(Ordering::SeqCst) {
+                self.0.ready.store(false, Ordering::SeqCst);
+            }
             self.0.emitted.notify_one();
             Ok(())
         }
@@ -900,6 +925,72 @@ mod tests {
         assert!(
             matches!(replay,SubscriptionOutcome::Delivery(current) if current.token==delivery.token)
         );
+        owner.close().await.unwrap();
+        owner.terminated().await;
+    }
+    #[tokio::test]
+    async fn review_second_legacy_push_reauthorizes_after_its_own_sink_wait() {
+        let visible = Arc::new(AtomicBool::new(true));
+        let (owner, service) = owner(Arc::new(TogglePolicy(visible.clone()))).await;
+        let mut second = HDict::new();
+        second.set(
+            "id",
+            Kind::Ref(haystack_core::kinds::HRef::from_val("second-private-point")),
+        );
+        second.set("secret", Kind::Str("second-retained-value".into()));
+        service.read_service().graph().add(second).unwrap();
+        let session = SubscriptionSession::trusted("owner", Duration::from_secs(5)).unwrap();
+        let connection = [12; 16];
+        let guard = owner.handle().admit().unwrap();
+        for id in ["private-point", "second-private-point"] {
+            let admission = begin(&service, &session, &guard).await.unwrap();
+            service
+                .legacy_admitted(
+                    admission,
+                    session.clone(),
+                    LegacySubscriptionRequest::Subscribe {
+                        watch: None,
+                        ids: vec![id.into()],
+                    },
+                    Some(connection),
+                )
+                .await
+                .unwrap();
+        }
+        drop(guard);
+        let sink = SinkState::new();
+        sink.block_after.store(1, Ordering::SeqCst);
+        sink.ready();
+        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+        let (_stop, stopped) = tokio::sync::watch::channel(None);
+        let writer = tokio::spawn(write_commands(
+            ControlledSink(sink.clone()),
+            rx,
+            stopped,
+            WriterContext {
+                service: service.clone(),
+                session: session.clone(),
+                connection,
+                guard: owner.handle().admit().unwrap(),
+                closing: owner.handle().closing(),
+                scoped: false,
+            },
+        ));
+        tx.send(Command::Push).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), sink.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(sink.sent.lock().unwrap().len(), 1);
+        visible.store(false, Ordering::SeqCst);
+        assert!(session.is_active());
+        sink.ready();
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        let sent = sink.sent.lock().unwrap().clone();
+        assert!(sent.iter().skip(1).all(|message| !matches!(message, Message::Text(text) if text.contains("private-point") || text.contains("retained-value"))), "a queued legacy push disclosed revoked content: {sent:?}");
         owner.close().await.unwrap();
         owner.terminated().await;
     }

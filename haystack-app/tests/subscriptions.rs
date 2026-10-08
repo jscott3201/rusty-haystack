@@ -873,3 +873,252 @@ async fn complete_commit_units_are_never_split_when_a_poll_limit_is_too_small() 
         }
     }
 }
+
+#[tokio::test]
+async fn review_replacement_membership_growth_is_reserved_before_publication() {
+    let graph = SharedGraph::new(EntityGraph::new());
+    let limits = SubscriptionLimits {
+        max_view_bytes: 1,
+        max_delivery_bytes: 4096,
+        max_retained_bytes: 20 * 1024,
+        ..SubscriptionLimits::default()
+    };
+    let service = StateSubscriptionService::new(
+        ReadService::new(graph.clone(), Arc::new(AllowAll), ReadLimits::default()).unwrap(),
+        EphemeralMutationStore::new(graph),
+        limits.clone(),
+    )
+    .unwrap();
+    let session = session();
+    let original = create(&service, "membership-bound", &["missing"]);
+    let initial = delivery(execute(&service, &session, original.clone()).await);
+    let before = service.retained_reservations();
+    let ids: Vec<_> = (0..50)
+        .map(|n| format!("{n:04}{}", "x".repeat(996)))
+        .collect();
+    let request = SubscriptionRequest::Replace {
+        watch: initial.watch.clone(),
+        expected_scope_generation: 1,
+        ids: ids.clone(),
+    };
+    assert!(wire::encode(&request).unwrap().len() < 65_536);
+    assert_eq!(
+        execute(&service, &session, request).await,
+        SubscriptionOutcome::Rejected(SubscriptionRejection::Capacity)
+    );
+    assert_eq!(service.retained_reservations(), before);
+    assert_eq!(
+        *delivery(
+            execute(
+                &service,
+                &session,
+                SubscriptionRequest::Poll {
+                    watch: initial.watch.clone()
+                }
+            )
+            .await
+        ),
+        *initial
+    );
+    let grown = delivery(
+        execute(
+            &service,
+            &session,
+            SubscriptionRequest::Replace {
+                watch: initial.watch.clone(),
+                expected_scope_generation: 1,
+                ids: ids[..2].to_vec(),
+            },
+        )
+        .await,
+    );
+    assert_eq!(grown.scope_generation, 2);
+    let reserved = service.retained_reservations();
+    assert!(reserved > before && reserved <= limits.max_retained_bytes);
+    assert_eq!(
+        *delivery(execute(&service, &session, original).await),
+        *grown
+    );
+    assert!(matches!(
+        execute(
+            &service,
+            &session,
+            SubscriptionRequest::Unsubscribe {
+                watch: initial.watch.clone()
+            }
+        )
+        .await,
+        SubscriptionOutcome::Closed { .. }
+    ));
+    assert_eq!(service.binding_count(), 1);
+    assert_eq!(service.retained_reservations(), reserved);
+}
+
+#[tokio::test]
+async fn review_execution_resource_exhaustion_is_terminal_overflow_native_and_wire() {
+    for wire_request in [false, true] {
+        for kind in [BudgetKind::Retained, BudgetKind::Work, BudgetKind::Values] {
+            let graph = SharedGraph::new(EntityGraph::with_changelog_capacity(16_000));
+            let mut read_limits = ReadLimits::default();
+            match kind {
+                BudgetKind::Retained => read_limits.max_retained_bytes = 65_536,
+                BudgetKind::Work => read_limits.max_work = 20_000,
+                BudgetKind::Values => read_limits.max_value_nodes = 1,
+                _ => unreachable!(),
+            }
+            let reads = ReadService::new(graph.clone(), Arc::new(AllowAll), read_limits).unwrap();
+            let service = StateSubscriptionService::new(
+                reads.clone(),
+                EphemeralMutationStore::new(graph.clone()),
+                SubscriptionLimits {
+                    max_change_diffs: 16_000,
+                    ..SubscriptionLimits::default()
+                },
+            )
+            .unwrap();
+            let session = session();
+            let original = create(&service, "resource-bound", &["missing"]);
+            let initial = delivery(execute(&service, &session, original.clone()).await);
+            execute(&service, &session, ack(&initial)).await;
+            if kind == BudgetKind::Work {
+                graph.add(row("outside", 0.0)).unwrap();
+                for n in 0..12_000 {
+                    graph
+                        .update("outside", row("outside", f64::from(n)))
+                        .unwrap();
+                }
+            } else {
+                let mut entity = row("missing", 1.0);
+                if kind == BudgetKind::Retained {
+                    entity.set("blob", Kind::Str("x".repeat(40 * 1024)));
+                }
+                graph.add(entity).unwrap();
+            }
+            let poll = SubscriptionRequest::Poll {
+                watch: initial.watch.clone(),
+            };
+            let result = if wire_request {
+                let codec = haystack_core::codecs::codec_for("text/zinc").unwrap();
+                let admission = reads
+                    .begin(ReadContext::with_timeout(
+                        session.principal().clone(),
+                        Duration::from_secs(3),
+                    ))
+                    .await
+                    .unwrap();
+                let response = service
+                    .wire_admitted(
+                        admission,
+                        session.clone(),
+                        SubscriptionWireRequest {
+                            operation: "watchPoll",
+                            body: wire::encode_grid(&poll, codec).unwrap(),
+                            input: H4Codec::Zinc,
+                            output: H4Codec::Zinc,
+                            legacy_allowed: false,
+                        },
+                    )
+                    .await;
+                response
+                    .map(|bytes| wire::decode_grid::<SubscriptionOutcome>(&bytes, codec).unwrap())
+            } else {
+                service
+                    .execute(
+                        ReadContext::with_timeout(
+                            session.principal().clone(),
+                            Duration::from_secs(3),
+                        ),
+                        session.clone(),
+                        poll,
+                    )
+                    .await
+            };
+            assert_eq!(
+                result,
+                Ok(SubscriptionOutcome::Resync(SubscriptionResync::Overflow)),
+                "wire={wire_request} budget={kind:?}"
+            );
+            assert_eq!(service.active_watches(), 0);
+            assert_eq!(service.binding_count(), 1);
+            assert_eq!(
+                execute(&service, &session, original).await,
+                SubscriptionOutcome::Resync(SubscriptionResync::Overflow)
+            );
+            assert_eq!(
+                execute(&service, &session, ack(&initial)).await,
+                SubscriptionOutcome::Resync(SubscriptionResync::Overflow)
+            );
+            assert_eq!(
+                execute(
+                    &service,
+                    &session,
+                    SubscriptionRequest::Resume {
+                        watch: initial.watch.clone(),
+                        scope_generation: initial.scope_generation,
+                        acknowledged: initial.through
+                    }
+                )
+                .await,
+                SubscriptionOutcome::Resync(SubscriptionResync::Overflow)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn review_input_errors_deadlines_and_cancellation_do_not_invalidate_a_watch() {
+    let service = service(graph());
+    let session = session();
+    let initial =
+        delivery(execute(&service, &session, create(&service, "input-errors", &["a"])).await);
+    let invalid = SubscriptionRequest::Replace {
+        watch: initial.watch.clone(),
+        expected_scope_generation: 1,
+        ids: vec!["a".into(); wire::MAX_IDS + 1],
+    };
+    assert!(matches!(
+        service
+            .execute(
+                ReadContext::with_timeout(session.principal().clone(), Duration::from_secs(1)),
+                session.clone(),
+                invalid
+            )
+            .await,
+        Err(ReadError::InvalidQuery(_))
+    ));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let poll = SubscriptionRequest::Poll {
+        watch: initial.watch.clone(),
+    };
+    assert_eq!(
+        service
+            .execute(
+                ReadContext::new(
+                    session.principal().clone(),
+                    std::time::Instant::now() + Duration::from_secs(1),
+                    cancel
+                ),
+                session.clone(),
+                poll.clone()
+            )
+            .await,
+        Err(ReadError::Cancelled)
+    );
+    assert_eq!(
+        service
+            .execute(
+                ReadContext::new(
+                    session.principal().clone(),
+                    std::time::Instant::now() - Duration::from_secs(1),
+                    CancellationToken::new()
+                ),
+                session.clone(),
+                poll.clone()
+            )
+            .await,
+        Err(ReadError::Deadline)
+    );
+    assert_eq!(*delivery(execute(&service, &session, poll).await), *initial);
+    assert_eq!(service.active_watches(), 1);
+}

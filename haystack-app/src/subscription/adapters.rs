@@ -47,7 +47,9 @@ impl StateSubscriptionService {
                 table
                     .bindings
                     .remove(&(entry.session.id(), entry.identity.key.clone()));
-                table.reserved_bytes = table.reserved_bytes.saturating_sub(entry.reservation);
+                table.reserved_bytes = table
+                    .reserved_bytes
+                    .saturating_sub(entry.reservation.load(Ordering::Relaxed));
             }
         }
     }
@@ -100,6 +102,7 @@ impl StateSubscriptionService {
                 } else {
                     None
                 };
+                let mut overflow_control = false;
                 let encoded = if let Some(request) = legacy {
                     let grid = owner.legacy(&principal, &session, request, None, budget)?;
                     output
@@ -118,9 +121,17 @@ impl StateSubscriptionService {
                     worker.store(true, Ordering::Release);
                     let outcome =
                         owner.execute(&principal, &session, request, false, None, budget)?;
+                    overflow_control = matches!(
+                        outcome,
+                        SubscriptionOutcome::Resync(SubscriptionResync::Overflow)
+                    );
                     encode_outcome(&outcome, output, budget)?
                 };
-                check_output(budget, encoded.len())?;
+                if overflow_control {
+                    check_overflow_control(budget, encoded.len())?;
+                } else {
+                    check_output(budget, encoded.len())?;
+                }
                 budget.check()?;
                 if !session.is_active() {
                     return Err(ReadError::Forbidden);
@@ -165,14 +176,25 @@ impl StateSubscriptionService {
                     .map_err(|_| ReadError::InvalidQuery("invalid subscription payload"))?;
                 worker.store(true, Ordering::Release);
                 let outcome = owner.execute(&principal, &session, request, false, None, budget)?;
-                let bytes = outcome
-                    .source_bytes()
-                    .map_err(|_| ReadError::Budget(BudgetKind::Output))?;
-                budget.charge(BudgetKind::Work, bytes.saturating_mul(8))?;
-                budget.charge(BudgetKind::Retained, bytes.saturating_mul(16))?;
-                let encoded =
-                    wire::encode(&outcome).map_err(|_| ReadError::Budget(BudgetKind::Output))?;
-                check_output(budget, encoded.len())?;
+                let encoded = if matches!(
+                    outcome,
+                    SubscriptionOutcome::Resync(SubscriptionResync::Overflow)
+                ) {
+                    let encoded = wire::encode(&outcome)
+                        .map_err(|_| ReadError::Budget(BudgetKind::Output))?;
+                    check_overflow_control(budget, encoded.len())?;
+                    encoded
+                } else {
+                    let bytes = outcome
+                        .source_bytes()
+                        .map_err(|_| ReadError::Budget(BudgetKind::Output))?;
+                    budget.charge(BudgetKind::Work, bytes.saturating_mul(8))?;
+                    budget.charge(BudgetKind::Retained, bytes.saturating_mul(16))?;
+                    let encoded = wire::encode(&outcome)
+                        .map_err(|_| ReadError::Budget(BudgetKind::Output))?;
+                    check_output(budget, encoded.len())?;
+                    encoded
+                };
                 budget.check()?;
                 if !session.is_active() {
                     return Err(ReadError::Forbidden);
@@ -206,14 +228,14 @@ impl StateSubscriptionService {
             })
             .await
     }
-    /// Compatibility pushes are fresh, sanitized snapshots for this connection.
-    /// They never advance the explicit polling fence and retain no encode cache.
-    pub async fn legacy_push_admitted(
+    /// Snapshot only opaque connection-owned watch handles. Payloads are captured
+    /// separately after each outbound message has obtained sink capacity.
+    pub async fn legacy_push_watches_admitted(
         &self,
         admission: ReadAdmission,
         session: SubscriptionSession,
         connection: [u8; 16],
-    ) -> Result<Vec<(String, HGrid)>, ReadError> {
+    ) -> Result<Vec<String>, ReadError> {
         if !admission.belongs_to(&self.inner.reads) {
             return Err(ReadError::Forbidden);
         }
@@ -223,8 +245,13 @@ impl StateSubscriptionService {
                 if !session.is_active() || !session.matches(&principal) {
                     return Err(ReadError::Forbidden);
                 }
-                let entries: Vec<_> = owner
-                    .registry(budget)?
+                let table = owner.registry(budget)?;
+                budget.charge(BudgetKind::Work, table.entries.len())?;
+                budget.charge(
+                    BudgetKind::Retained,
+                    table.entries.len().saturating_mul(256),
+                )?;
+                Ok(table
                     .entries
                     .values()
                     .filter(|entry| {
@@ -233,41 +260,90 @@ impl StateSubscriptionService {
                             && entry.active.load(Ordering::Acquire)
                             && entry.session.matches(&principal)
                     })
-                    .cloned()
-                    .collect();
-                budget.charge(BudgetKind::Retained, entries.len().saturating_mul(256))?;
-                let mut pushes = Vec::new();
-                let mut output_bytes = 0usize;
-                for entry in entries {
-                    if !entry.session.is_active() {
-                        continue;
-                    }
-                    let record = SubscriptionInner::record(&entry, budget)?;
-                    let Status::Live(live) = record.status else {
-                        continue;
-                    };
-                    let capture = owner
-                        .capture(&principal, &live.ids, Some(&live), budget)
-                        .map_err(|_| ReadError::Forbidden)?;
-                    let rows = capture
-                        .projection
-                        .values()
-                        .map(|row| (*row.row).clone())
-                        .collect();
-                    let grid = grid(rows, Some(legacy_id(&entry.identity)));
-                    let encoded = codec_for("text/zinc")
-                        .expect("Zinc codec")
-                        .encode_grid(&grid)
-                        .map_err(|_| ReadError::Budget(BudgetKind::Output))?;
-                    output_bytes = output_bytes.saturating_add(encoded.len());
-                    check_output(budget, output_bytes)?;
-                    pushes.push((legacy_id(&entry.identity), grid));
-                }
-                budget.check()?;
-                Ok(pushes)
+                    .map(|entry| legacy_id(&entry.identity))
+                    .collect())
             })
             .await
     }
+    /// Capture, authorize and encode one compatibility push under one fresh
+    /// admission. No payload waits for a later watch's sink-capacity operation.
+    pub async fn legacy_push_admitted(
+        &self,
+        admission: ReadAdmission,
+        session: SubscriptionSession,
+        connection: [u8; 16],
+        watch: String,
+    ) -> Result<Option<String>, ReadError> {
+        if !admission.belongs_to(&self.inner.reads) {
+            return Err(ReadError::Forbidden);
+        }
+        let owner = self.inner.clone();
+        admission
+            .run_task(move |principal, budget| {
+                if !session.is_active() || !session.matches(&principal) {
+                    return Err(ReadError::Forbidden);
+                }
+                let entry = owner.legacy_entry(&watch, &principal, budget)?;
+                if entry.connection != Some(connection) || !entry.session.is_active() {
+                    return Err(ReadError::Forbidden);
+                }
+                let record = SubscriptionInner::record(&entry, budget)?;
+                let Status::Live(live) = record.status else {
+                    return Ok(None);
+                };
+                if Instant::now() >= live.lease_until {
+                    return Ok(None);
+                }
+                let capture = owner
+                    .capture(&principal, &live.ids, Some(&live), budget)
+                    .map_err(|error| match error {
+                        CaptureError::Read(error) => error,
+                        CaptureError::Resync(_) => ReadError::Forbidden,
+                    })?;
+                if capture.projection.is_empty() {
+                    return Ok(None);
+                }
+                let source = capture.projection.values().fold(0usize, |total, row| {
+                    total
+                        .saturating_add(row.canonical.len())
+                        .saturating_add(512)
+                });
+                budget.charge(BudgetKind::Work, source.saturating_mul(4))?;
+                budget.charge(BudgetKind::Retained, source.saturating_mul(12))?;
+                let rows = Kind::List(
+                    capture
+                        .projection
+                        .values()
+                        .map(|row| Kind::Dict(Box::new((*row.row).clone())))
+                        .collect(),
+                );
+                let rows = codec_for("application/json;v=3")
+                    .expect("JSON v3 codec")
+                    .encode_scalar(&rows)
+                    .map_err(|_| ReadError::Budget(BudgetKind::Output))?;
+                // A legacy watch handle is validated lowercase hex, so it requires
+                // no escaping. Entity values use the established JSON v3 codec.
+                let encoded =
+                    format!("{{\"type\":\"push\",\"watchId\":\"{watch}\",\"rows\":{rows}}}");
+                check_output(budget, encoded.len())?;
+                budget.check()?;
+                if !session.is_active() || !entry.session.is_active() {
+                    return Err(ReadError::Forbidden);
+                }
+                Ok(Some(encoded))
+            })
+            .await
+    }
+}
+// Both wire workers reserve 8192 bytes before decoding. The fixed,
+// non-identifying overflow control uses that reserve when execution exhausts
+// its ordinary counters; cancellation, deadlines and output limits still apply.
+fn check_overflow_control(budget: &Budget, bytes: usize) -> Result<(), ReadError> {
+    budget.check()?;
+    if bytes > 2048 || bytes > budget.limits.max_output_bytes {
+        return Err(ReadError::Budget(BudgetKind::Output));
+    }
+    Ok(())
 }
 fn check_output(budget: &mut Budget, bytes: usize) -> Result<(), ReadError> {
     if bytes > budget.limits.max_output_bytes {
@@ -280,6 +356,13 @@ fn encode_outcome(
     output: &dyn haystack_core::codecs::Codec,
     budget: &mut Budget,
 ) -> Result<Vec<u8>, ReadError> {
+    if matches!(
+        outcome,
+        SubscriptionOutcome::Resync(SubscriptionResync::Overflow)
+    ) {
+        return wire::encode_grid(outcome, output)
+            .map_err(|_| ReadError::Budget(BudgetKind::Output));
+    }
     let bytes = outcome
         .source_bytes()
         .map_err(|_| ReadError::Budget(BudgetKind::Output))?;
