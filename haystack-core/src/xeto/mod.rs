@@ -7,6 +7,7 @@ pub mod fitting;
 pub mod lexer;
 pub mod loader;
 pub mod parser;
+pub mod read_by_id;
 pub mod resolver;
 pub mod spec;
 
