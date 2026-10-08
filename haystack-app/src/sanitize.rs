@@ -100,6 +100,9 @@ impl QueryEnvironment for View<'_> {
             .charge(BudgetKind::Work, name.len().saturating_add(1))?;
         Ok(self.policy.catalog(kind, name))
     }
+    fn regex_source_limit(&self) -> usize {
+        self.budget.limits.max_regex_source_bytes
+    }
     fn regex_size_limit(&self) -> usize {
         self.budget.limits.max_regex_bytes
     }

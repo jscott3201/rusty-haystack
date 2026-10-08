@@ -29,6 +29,9 @@ pub trait QueryEnvironment {
     fn forward(&mut self, id: &HRef) -> Result<Option<Arc<HDict>>, Self::Error>;
     fn inverse(&mut self, target: &HRef, tag: &str) -> Result<Vec<Arc<HDict>>, Self::Error>;
     fn catalog_visible(&mut self, kind: CatalogKind, name: &str) -> Result<bool, Self::Error>;
+    /// Maximum source-pattern bytes, before parser/AST/HIR allocation.
+    fn regex_source_limit(&self) -> usize;
+    /// Compiled NFA and lazy-DFA cache bound (not a parser allocation limit).
     fn regex_size_limit(&self) -> usize;
     fn regex_limit_error(&self) -> Self::Error;
 }
@@ -241,13 +244,10 @@ fn fits_spec<E: QueryEnvironment>(
                 return Ok(false);
             }
         }
-        current = match &base.base {
-            Some(name) => match ns.get_spec(name) {
-                Some(next) => Some(next),
-                None => return Ok(false),
-            },
-            None => None,
-        };
+        // Match pure fitting: an absent base ends inheritance. An existing
+        // base still passes visible_spec on the next iteration, so hiding it
+        // cannot turn the child's inherited requirements into a successful fit.
+        current = base.base.as_deref().and_then(|name| ns.get_spec(name));
     }
     for slot in &spec.slots {
         env.work(1)?;
@@ -337,7 +337,9 @@ fn constraints<E: QueryEnvironment>(
                     .saturating_add(1)
                     .saturating_mul(text.len().saturating_add(1)),
             )?;
-            env.retain(env.regex_size_limit())?;
+            reserve_regex_parser(pattern, env)?;
+            // Reserve both the compiled representation and its search cache.
+            env.retain(env.regex_size_limit().saturating_mul(2))?;
             let regex = regex::RegexBuilder::new(pattern)
                 .size_limit(env.regex_size_limit())
                 .dfa_size_limit(env.regex_size_limit())
@@ -351,6 +353,33 @@ fn constraints<E: QueryEnvironment>(
     }
     Ok(true)
 }
+/// regex 1.13.1 enforces size_limit only after regex-syntax 0.8.11 has
+/// allocated its AST and HIR. Reserve those stages before even constructing
+/// RegexBuilder (which copies the source). Count potential class sites without
+/// interpreting regex syntax: escaped/bracketed literals deliberately overcount.
+///
+/// The locked parser uses boxed AST nodes, Vec stacks and boxed HIR properties;
+/// 1 KiB per source byte covers those and their growth/copies. Unicode is larger:
+/// the generated tables have fewer than 1,024 ranges per class and 4,096 total
+/// simple-fold targets. An 8-byte range vector grown geometrically is below
+/// 128 KiB at that combined bound. Reserve 512 KiB at each escape or '[' for
+/// translation, folding, set-operation scratch and copies. Revisit these
+/// conservative constants when the locked regex/Unicode tables change.
+fn reserve_regex_parser<E: QueryEnvironment>(pattern: &str, env: &mut E) -> Result<(), E::Error> {
+    if pattern.len() > env.regex_source_limit() {
+        return Err(env.regex_limit_error());
+    }
+    env.work(pattern.len().saturating_add(1))?;
+    let classes = pattern
+        .bytes()
+        .filter(|byte| matches!(byte, b'\\' | b'['))
+        .count();
+    let bytes = 16_384usize
+        .saturating_add(pattern.len().saturating_mul(1024))
+        .saturating_add(classes.saturating_mul(512 * 1024));
+    env.retain(bytes)
+}
+
 fn text_meta<'a>(slot: &'a Slot, key: &str) -> Option<&'a str> {
     match slot.meta.get(key) {
         Some(Kind::Str(s)) => Some(s),

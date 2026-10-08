@@ -214,6 +214,9 @@ pub struct ReadLimits {
     pub max_value_depth: usize,
     pub max_rows: usize,
     pub max_output_bytes: usize,
+    /// Source bytes checked before regex parser/AST/HIR allocation.
+    pub max_regex_source_bytes: usize,
+    /// Compiled NFA and lazy-DFA cache ceilings, separate from source parsing.
     pub max_regex_bytes: usize,
     pub max_concurrent: usize,
     pub max_queued: usize,
@@ -238,6 +241,7 @@ impl Default for ReadLimits {
             max_value_depth: 64,
             max_rows: 1000,
             max_output_bytes: 1024 * 1024,
+            max_regex_source_bytes: 65_536,
             max_regex_bytes: 256 * 1024,
             max_concurrent: 8,
             max_queued: 16,
@@ -269,6 +273,7 @@ impl ReadLimits {
             || self.max_retained_bytes > 256 * 1024 * 1024
             || self.max_cursor_bytes > 256 * 1024 * 1024
             || self.max_output_bytes > 16 * 1024 * 1024
+            || self.max_regex_source_bytes > 1024 * 1024
             || self.max_regex_bytes > 16 * 1024 * 1024
         {
             return Err(ReadError::InvalidLimits);

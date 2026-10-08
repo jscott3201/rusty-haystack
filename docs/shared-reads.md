@@ -85,6 +85,11 @@ captured immutable namespace outside the graph lock, then compares the captured
 catalog generation when publishing. A concurrent publication returns a conflict.
 Catalog changes do not masquerade as entity/watch changes.
 
+Controlled fitting preserves the pure graph's rule that an absent base stops an
+inheritance walk. A base that exists but is denied by catalog policy instead
+makes the fit fail. This distinction also applies to a query slot's `of` type;
+a hidden base cannot remove inherited requirements from a visible child.
+
 ## Pages and output profiles
 
 ID lists are deduplicated and ordered by stable Ref ID. Filter pages scan the
@@ -123,8 +128,8 @@ Resend the same query and metadata with the cursor; changing them invalidates it
 Defaults include 64 KiB input, 512 IDs, 256 AST nodes and depth 32, 10,000 raw
 candidates, 4,096 forward and 4,096 inverse edges, 100,000 value nodes, four million
 work units, 16 MiB conservative allocation accounting, value depth 64, 1,000 rows,
-1 MiB conservative output bound, and a 256 KiB regex compilation bound. The service
-admits eight requests and queues sixteen, with a five-second maximum absolute
+1 MiB conservative output bound, a 64 KiB regex source ceiling, and a 256 KiB
+compiled-regex/cache bound. The service admits eight requests and queues sixteen, with a five-second maximum absolute
 deadline. Cursor defaults are 128 records, 4 MiB, and a 60-second TTL.
 
 These are conservative ceilings, not promised usable capacities. Allocation
@@ -135,13 +140,31 @@ candidate/edge work is charged before authorization, including denied edges.
 Fallible evaluation propagates exhaustion/cancellation; it cannot become a false
 predicate or successful `not`/optional query result.
 
+Regex source length is checked independently of the NFA/cache limits. In the
+locked regex 1.13.1 and regex-syntax 0.8.11, AST parsing and HIR translation happen
+before the compiled-size limit is enforced. Before constructing the builder,
+the service reserves 16 KiB plus 1 KiB per source byte and 512 KiB per potential
+Unicode/class expansion site (every backslash or opening bracket, deliberately
+including escaped literals). These allowances cover boxed nodes, parser stacks,
+HIR properties and the locked Unicode tables' range/folding scratch. Compiled
+and cache bounds are also reserved. A retained-memory error can therefore occur
+below the source-byte ceiling. Raising only the source ceiling cannot bypass the
+allocation budget; the reservations require review when regex dependencies change.
+
 The HTTP adapter acquires one logical permit before collecting the body. The same
 permit moves into decoding/evaluation. The absolute deadline includes body
 collection, queueing, graph-lock waits, and execution. A caller that drops its
-future signals cancellation; a running blocking worker retains its permit until
-it exits. Cancellation is cooperative between bounded operations, not an unsafe
-thread interruption. The service borrows the caller's Tokio runtime; it owns no
-listener/runtime shutdown. Dropping a service clone does not stop other users.
+future signals cancellation. Explicit cancellation and deadline expiry return a
+prompt request error; that response is not a receipt that the worker has exited.
+A queued or running blocking worker retains its permit until the task actually
+releases its capture. Tokio may leave an aborted closure queued behind unrelated
+blocking work, so the caller does not await that closure on its stop path.
+Cancellation of running code is cooperative between bounded operations, not an
+unsafe thread interruption. Ordinary completion is joined. The service borrows
+the caller's Tokio runtime, which owns outstanding work after caller departure;
+application-wide admission sealing and completion tracking belong to the later
+lifecycle boundary. The service owns no listener/runtime shutdown, and dropping
+a service clone does not stop other users.
 
 Transport-independent errors include invalid query, unavailable/forbidden,
 stale cursor, capacity, cancellation/deadline, budget, and strict projection.

@@ -800,7 +800,15 @@ async fn lock_wait_is_in_deadline_and_does_not_hold_admission_after_exit() {
     release.wait();
     writer.join().unwrap();
     assert_eq!(result.unwrap().unwrap_err(), ReadError::Deadline);
-    assert_eq!(svc.load().admitted, 0);
+    // The response is prompt; worker release is a separate completion event.
+    wait_load(
+        &svc,
+        ReadLoad {
+            admitted: 0,
+            waiting: 0,
+        },
+    )
+    .await;
 }
 
 struct PauseEntity {
@@ -936,4 +944,429 @@ async fn cursor_tampering_capacity_and_expiry_are_explicit_and_recover() {
     );
     req.cursor = None;
     assert!(svc.read(context(), req).await.unwrap().cursor.is_some());
+}
+
+fn inherited_query_graph(base_present: bool) -> SharedGraph {
+    let mut namespace = DefNamespace::new();
+    if base_present {
+        let mut base = Spec::new("hidden::Base", "hidden", "Base");
+        base.slots.push(slot("base", true, false, &[]));
+        namespace.register_spec(base);
+    }
+    let mut child = Spec::new("demo::Child", "demo", "Child");
+    child.base = Some("hidden::Base".into());
+    child.slots.push(slot("child", true, false, &[]));
+    namespace.register_spec(child);
+    let mut parent = Spec::new("demo::Parent", "demo", "Parent");
+    parent.slots = vec![
+        slot("parent", true, false, &[]),
+        slot(
+            "children",
+            false,
+            true,
+            &[("via", "childRef"), ("of", "Child")],
+        ),
+    ];
+    namespace.register_spec(parent);
+    let graph = SharedGraph::new(EntityGraph::with_namespace(namespace));
+    let mut child = row("child");
+    child.set("child", Kind::Marker);
+    child.set("base", Kind::Marker);
+    graph.add(child).unwrap();
+    let mut parent = row("parent");
+    parent.set("parent", Kind::Marker);
+    parent.set("childRef", Kind::Ref(HRef::from_val("child")));
+    graph.add(parent).unwrap();
+    graph
+}
+
+#[tokio::test]
+async fn absent_base_stops_inheritance_in_pure_and_controlled_direct_and_of_fitting() {
+    let graph = inherited_query_graph(false);
+    let svc = ReadService::new(graph.clone(), Arc::new(AllowAll), ReadLimits::default()).unwrap();
+    let mut comparisons = Vec::new();
+    for (filter, expected) in [("demo::Child", "child"), ("demo::Parent", "parent")] {
+        let pure = graph.read(|graph| {
+            graph
+                .read_all(filter, 0)
+                .unwrap()
+                .iter()
+                .map(|row| row.id().unwrap().val.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(pure, [expected]);
+        let controlled = typed(
+            svc.read(context(), request(ReadQuery::Filter(filter.into())))
+                .await
+                .unwrap(),
+        );
+        comparisons.push((
+            filter,
+            pure,
+            ids(&controlled)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        ));
+    }
+    assert!(
+        comparisons
+            .iter()
+            .all(|(_, pure, controlled)| pure == controlled),
+        "{comparisons:?}"
+    );
+}
+
+#[tokio::test]
+async fn present_but_denied_base_is_not_treated_as_an_absent_base() {
+    let graph = inherited_query_graph(true);
+    let unrestricted =
+        ReadService::new(graph.clone(), Arc::new(AllowAll), ReadLimits::default()).unwrap();
+    let scoped = service(graph.clone(), ReadLimits::default());
+    for (filter, expected) in [("demo::Child", "child"), ("demo::Parent", "parent")] {
+        let pure = graph.read(|graph| {
+            graph
+                .read_all(filter, 0)
+                .unwrap()
+                .iter()
+                .map(|row| row.id().unwrap().val.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(pure, [expected]);
+        let controlled = typed(
+            unrestricted
+                .read(context(), request(ReadQuery::Filter(filter.into())))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(ids(&controlled), [expected]);
+        assert!(
+            typed(
+                scoped
+                    .read(context(), request(ReadQuery::Filter(filter.into())))
+                    .await
+                    .unwrap()
+            )
+            .is_empty()
+        );
+    }
+}
+
+fn queued_worker_stop(deadline: bool) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = runtime.spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let svc = service(
+        make_graph(&["a"]),
+        ReadLimits {
+            max_concurrent: 1,
+            max_queued: 0,
+            ..ReadLimits::default()
+        },
+    );
+    runtime.block_on(async {
+        let ctx = ReadContext::with_timeout(
+            Principal::Anonymous,
+            if deadline {
+                Duration::from_millis(30)
+            } else {
+                Duration::from_secs(5)
+            },
+        );
+        let token = ctx.cancellation.clone();
+        let mut read = {
+            let svc = svc.clone();
+            tokio::spawn(async move { svc.read(ctx, req_with_limit(1)).await })
+        };
+        wait_load(
+            &svc,
+            ReadLoad {
+                admitted: 1,
+                waiting: 0,
+            },
+        )
+        .await;
+        if !deadline {
+            token.cancel();
+        }
+        let prompt = tokio::time::timeout(Duration::from_millis(500), &mut read).await;
+        let held_before_release = svc.load();
+        let capacity = svc.read(context(), req_with_limit(1)).await.unwrap_err();
+        // Always release/join the unrelated blocker before asserting the timeout,
+        // so a red regression cannot strand a blocking runtime during teardown.
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        let (returned_promptly, outcome) = match prompt {
+            Ok(outcome) => (true, outcome.unwrap()),
+            Err(_) => (false, read.await.unwrap()),
+        };
+        wait_load(
+            &svc,
+            ReadLoad {
+                admitted: 0,
+                waiting: 0,
+            },
+        )
+        .await;
+        assert_eq!(
+            held_before_release,
+            ReadLoad {
+                admitted: 1,
+                waiting: 0
+            }
+        );
+        assert_eq!(capacity, ReadError::Capacity);
+        assert!(
+            returned_promptly,
+            "request stop waited for unrelated blocking work"
+        );
+        assert_eq!(
+            outcome.unwrap_err(),
+            if deadline {
+                ReadError::Deadline
+            } else {
+                ReadError::Cancelled
+            }
+        );
+        assert_eq!(
+            svc.read(context(), req_with_limit(1))
+                .await
+                .unwrap()
+                .row_count,
+            1
+        );
+    });
+}
+#[test]
+fn queued_blocking_worker_deadline_returns_before_unrelated_blocker_releases() {
+    queued_worker_stop(true);
+}
+#[test]
+fn queued_blocking_worker_cancellation_returns_before_unrelated_blocker_releases() {
+    queued_worker_stop(false);
+}
+
+#[tokio::test]
+async fn catalog_regex_parser_allocation_is_reserved_before_compilation() {
+    for (pattern, expected) in [
+        ("^ok$".to_string(), None),
+        (
+            ".".repeat(32_768),
+            Some(ReadError::Budget(BudgetKind::Retained)),
+        ),
+    ] {
+        let mut namespace = DefNamespace::new();
+        let mut spec = Spec::new("demo::Pattern", "demo", "Pattern");
+        spec.slots
+            .push(slot("text", false, false, &[("pattern", &pattern)]));
+        namespace.register_spec(spec);
+        let graph = SharedGraph::new(EntityGraph::with_namespace(namespace));
+        let mut record = row("a");
+        record.set("text", Kind::Str("ok".into()));
+        graph.add(record).unwrap();
+        let svc = service(
+            graph,
+            ReadLimits {
+                max_regex_bytes: 4096,
+                max_retained_bytes: 128 * 1024,
+                ..ReadLimits::default()
+            },
+        );
+        let result = svc
+            .read(
+                context(),
+                request(ReadQuery::Filter("demo::Pattern".into())),
+            )
+            .await;
+        match expected {
+            Some(expected) => assert_eq!(result.unwrap_err(), expected),
+            None => assert_eq!(result.unwrap().row_count, 1),
+        }
+    }
+}
+
+#[test]
+fn dropping_caller_while_worker_is_queued_keeps_admission_until_actual_release() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = runtime.spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let svc = service(
+        make_graph(&["a"]),
+        ReadLimits {
+            max_concurrent: 1,
+            max_queued: 0,
+            ..ReadLimits::default()
+        },
+    );
+    runtime.block_on(async {
+        let read = {
+            let svc = svc.clone();
+            tokio::spawn(async move { svc.read(context(), req_with_limit(1)).await })
+        };
+        wait_load(
+            &svc,
+            ReadLoad {
+                admitted: 1,
+                waiting: 0,
+            },
+        )
+        .await;
+        read.abort();
+        let cancelled = read.await.unwrap_err().is_cancelled();
+        let before_release = svc.load();
+        let capacity = svc.read(context(), req_with_limit(1)).await.unwrap_err();
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        wait_load(
+            &svc,
+            ReadLoad {
+                admitted: 0,
+                waiting: 0,
+            },
+        )
+        .await;
+        assert!(cancelled);
+        assert_eq!(
+            before_release,
+            ReadLoad {
+                admitted: 1,
+                waiting: 0
+            }
+        );
+        assert_eq!(capacity, ReadError::Capacity);
+        assert_eq!(
+            svc.read(context(), req_with_limit(1))
+                .await
+                .unwrap()
+                .row_count,
+            1
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_worker_cancellation_returns_before_worker_releases_admission() {
+    let (entered, rx) = std::sync::mpsc::channel();
+    let release = Arc::new(Barrier::new(2));
+    let svc = ReadService::new(
+        make_graph(&["a"]),
+        Arc::new(PausePolicy {
+            entered,
+            release: release.clone(),
+            calls: AtomicUsize::new(0),
+            panic_first: false,
+        }),
+        ReadLimits {
+            max_concurrent: 1,
+            max_queued: 0,
+            ..ReadLimits::default()
+        },
+    )
+    .unwrap();
+    let ctx = context();
+    let token = ctx.cancellation.clone();
+    let mut task = {
+        let svc = svc.clone();
+        tokio::spawn(async move { svc.read(ctx, req_with_limit(1)).await })
+    };
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    token.cancel();
+    let prompt = tokio::time::timeout(Duration::from_millis(500), &mut task).await;
+    let before_release = svc.load();
+    release.wait();
+    let (timely, result) = match prompt {
+        Ok(result) => (true, result.unwrap()),
+        Err(_) => (false, task.await.unwrap()),
+    };
+    wait_load(
+        &svc,
+        ReadLoad {
+            admitted: 0,
+            waiting: 0,
+        },
+    )
+    .await;
+    assert!(
+        timely,
+        "cancellation response is separate from worker completion"
+    );
+    assert_eq!(
+        before_release,
+        ReadLoad {
+            admitted: 1,
+            waiting: 0
+        }
+    );
+    assert_eq!(result.unwrap_err(), ReadError::Cancelled);
+    assert_eq!(
+        svc.read(context(), req_with_limit(1))
+            .await
+            .unwrap()
+            .row_count,
+        1
+    );
+}
+
+#[tokio::test]
+async fn regex_source_ceiling_and_unicode_reservations_preserve_bounded_patterns() {
+    for (pattern, text, limits, expected) in [
+        (
+            ".".repeat(500_000),
+            "x",
+            ReadLimits {
+                max_regex_source_bytes: 500_000,
+                max_retained_bytes: 1024 * 1024,
+                ..ReadLimits::default()
+            },
+            Some(ReadError::Budget(BudgetKind::Retained)),
+        ),
+        (
+            ".".repeat(500_000),
+            "x",
+            ReadLimits::default(),
+            Some(ReadError::Budget(BudgetKind::Regex)),
+        ),
+        (r"^\p{Han}+$".into(), "工程", ReadLimits::default(), None),
+        (r"(?i)^[a-z]+$".into(), "ABcd", ReadLimits::default(), None),
+        (r"^\w+$".into(), "工程", ReadLimits::default(), None),
+    ] {
+        let mut namespace = DefNamespace::new();
+        let mut spec = Spec::new("demo::Pattern", "demo", "Pattern");
+        spec.slots
+            .push(slot("text", false, false, &[("pattern", &pattern)]));
+        namespace.register_spec(spec);
+        let graph = SharedGraph::new(EntityGraph::with_namespace(namespace));
+        let mut record = row("a");
+        record.set("text", Kind::Str(text.into()));
+        graph.add(record).unwrap();
+        let svc = service(graph, limits);
+        let result = svc
+            .read(
+                context(),
+                request(ReadQuery::Filter("demo::Pattern".into())),
+            )
+            .await;
+        match expected {
+            Some(expected) => assert_eq!(result.unwrap_err(), expected),
+            None => assert_eq!(result.unwrap().row_count, 1),
+        }
+    }
 }

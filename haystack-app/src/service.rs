@@ -235,7 +235,7 @@ impl ReadAdmission {
         .await
     }
     async fn run(mut self, input: Input) -> Result<ReadPage, ReadError> {
-        let mut budget = self.budget.take().expect("live admission");
+        let budget = self.budget.take().expect("live admission");
         let principal = self.principal.take().expect("live admission");
         let permit = self.permit.take().expect("live admission");
         let cancel = budget.cancel.clone();
@@ -246,22 +246,46 @@ impl ReadAdmission {
         };
         budget.check()?;
         let inner = self.inner.clone();
-        // The worker owns this permit even while Tokio's blocking pool queues it.
-        // A dropped caller signals cancellation but cannot release admission while
-        // synchronous work or a bounded lock attempt remains alive.
-        let mut job = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            budget.check()?;
-            inner.execute(principal, input, &mut budget)
-        });
+        let mut job = spawn_read_worker(inner, principal, input, budget, permit);
         let result = tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                cancel.cancel();
+                job.abort();
+                Err(ReadError::Deadline)
+            },
+            _ = cancel.cancelled() => {
+                job.abort();
+                Err(ReadError::Cancelled)
+            },
             result = &mut job => result.map_err(|_| ReadError::Unavailable)?,
-            _ = cancel.cancelled() => { cancel.cancel(); let _ = job.await; Err(ReadError::Cancelled) },
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => { cancel.cancel(); let _ = job.await; Err(ReadError::Deadline) },
         };
+        // A stop is a prompt request outcome, not proof that the worker exited.
+        // Awaiting an aborted spawn_blocking job can wait indefinitely behind
+        // unrelated runtime work. Its capture retains admission until release.
         drop_guard.armed = false;
         result
     }
+}
+
+/// One spawn/completion-handle boundary for a future application lifecycle owner.
+/// The caller currently joins ordinary completion; stop or caller drop leaves
+/// execution owned by the caller's Tokio runtime. Neither abort nor a returned
+/// error is a join receipt. In particular, Tokio may keep an aborted closure in
+/// its blocking queue, so admission belongs in the closure capture, never in
+/// the awaiting caller. All captures release on real exit, panic or task drop.
+fn spawn_read_worker(
+    inner: Arc<Inner>,
+    principal: Principal,
+    input: Input,
+    mut budget: Budget,
+    permit: OwnedSemaphorePermit,
+) -> tokio::task::JoinHandle<Result<ReadPage, ReadError>> {
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        budget.check()?;
+        inner.execute(principal, input, &mut budget)
+    })
 }
 
 impl Inner {
