@@ -338,3 +338,150 @@ async fn trusted_custom_routes_keep_their_owned_body_status_and_version_headers(
     owner.close().await.unwrap();
     owner.terminated().await;
 }
+
+async fn authenticated_system_app() -> (
+    Router,
+    ReadService,
+    ApplicationOwner,
+    [haystack_app::SubscriptionSession; 2],
+) {
+    let graph = SharedGraph::new(EntityGraph::new());
+    let app = ApplicationBuilder::new(
+        graph.clone(),
+        Arc::new(AllowAll),
+        ReadLimits {
+            max_concurrent: 1,
+            max_queued: 1,
+            max_duration: Duration::from_secs(5),
+            ..ReadLimits::default()
+        },
+    )
+    .unwrap();
+    let service = app.handle().read_service();
+    let hash = crate::auth::users::hash_password("system-fixture");
+    let auth = AuthManager::from_toml_str(&format!(
+        "[users.user]\npassword_hash = \"{hash}\"\npermissions = [\"read\"]\n"
+    ))
+    .unwrap();
+    for token in ["a", "b"] {
+        auth.inject_token(
+            token.into(),
+            crate::auth::AuthUser {
+                username: "user".into(),
+                permissions: vec!["read".into()],
+            },
+        );
+    }
+    let sessions = [
+        auth.validate_session("a").unwrap().1,
+        auth.validate_session("b").unwrap().1,
+    ];
+    let router = HaystackServer::new(graph)
+        .with_scoped_reads(app.handle())
+        .with_auth(auth)
+        .into_external_router()
+        .unwrap();
+    let owner = app.start(&tokio::runtime::Handle::current()).unwrap();
+    owner.ready().await.unwrap();
+    (router, service, owner, sessions)
+}
+fn system_request(path: &str, token: &str, body: Body) -> Request<Body> {
+    Request::post(path)
+        .header("Authorization", format!("BEARER authToken={token}"))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .unwrap()
+}
+#[tokio::test]
+async fn system_revocation_stops_pending_typed_and_legacy_bodies() {
+    for path in ["/api/readById?xeto-version=5", "/api/read"] {
+        let (router, service, owner, auth) = authenticated_system_app().await;
+        let body = Body::from_stream(futures_util::stream::pending::<
+            Result<String, std::io::Error>,
+        >());
+        let mut request = tokio::spawn(router.oneshot(system_request(path, "a", body)));
+        load(&service, 1, 0).await;
+        auth[0].close();
+        let result = tokio::time::timeout(Duration::from_millis(200), &mut request).await;
+        if result.is_err() {
+            request.abort();
+            let _ = request.await;
+        }
+        load(&service, 0, 0).await;
+        owner.close().await.unwrap();
+        owner.terminated().await;
+        assert!(
+            matches!(result,Ok(Ok(Ok(ref response))) if response.status()==403),
+            "revocation must stop a pending built-in body: {path}"
+        );
+    }
+}
+#[tokio::test]
+async fn system_revocation_stops_queued_admission_without_cancelling_other_login() {
+    let (router, service, owner, auth) = authenticated_system_app().await;
+    let body = Body::from_stream(futures_util::stream::pending::<
+        Result<String, std::io::Error>,
+    >());
+    let active = tokio::spawn(router.clone().oneshot(system_request(
+        "/api/readById?xeto-version=5",
+        "b",
+        body,
+    )));
+    load(&service, 1, 0).await;
+    let mut waiting = tokio::spawn(router.clone().oneshot(system_request(
+        "/api/readById?xeto-version=5",
+        "a",
+        Body::from(r#"{"checked":false}"#),
+    )));
+    load(&service, 1, 1).await;
+    auth[0].close();
+    let result = tokio::time::timeout(Duration::from_millis(200), &mut waiting).await;
+    if result.is_err() {
+        waiting.abort();
+        let _ = waiting.await;
+    }
+    active.abort();
+    let _ = active.await;
+    load(&service, 0, 0).await;
+    assert!(auth[1].is_active());
+    owner.close().await.unwrap();
+    owner.terminated().await;
+    assert!(
+        matches!(result,Ok(Ok(Ok(ref response))) if response.status()==403),
+        "queued admission must observe the captured session"
+    );
+}
+#[tokio::test]
+async fn system_disclosure_fence_stops_prepared_payload_but_permits_own_close_ack() {
+    let (router, _, owner, auth) = authenticated_system_app().await;
+    let response = router
+        .clone()
+        .oneshot(system_request(
+            "/api/about?xeto-version=5",
+            "a",
+            Body::from("{}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    auth[0].close();
+    let body = axum::body::to_bytes(response.into_body(), 65536).await;
+    let response = router
+        .oneshot(system_request(
+            "/api/close?xeto-version=5",
+            "b",
+            Body::from("{}"),
+        ))
+        .await
+        .unwrap();
+    let closed = !auth[1].is_active();
+    assert_eq!(response.status(), 200);
+    let ack = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    owner.close().await.unwrap();
+    owner.terminated().await;
+    assert!(body.is_err(), "closed session disclosed a prepared payload");
+    assert!(closed);
+    assert_eq!(ack, "null");
+}

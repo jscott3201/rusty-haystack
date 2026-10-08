@@ -430,7 +430,16 @@ impl Parser {
             // Bare name = marker slot
             slot.is_marker = true;
 
-            // A marker slot can also have a ? suffix for maybe
+            // Bare members retain metadata. Enum admission interprets their
+            // implicit type and key; the parser does not invent a Marker type.
+            if *self.peek_type() == TokenType::Question {
+                self.advance();
+                slot.is_maybe = true;
+                slot.meta.insert("maybe".to_string(), Kind::Marker);
+            }
+            if *self.peek_type() == TokenType::LAngle {
+                slot.meta.extend(self.parse_meta()?);
+            }
             if *self.peek_type() == TokenType::Question {
                 self.advance();
                 slot.is_maybe = true;

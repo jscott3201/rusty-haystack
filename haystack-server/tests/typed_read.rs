@@ -1133,11 +1133,24 @@ async fn v5_ops_discovers_the_executable_profile_and_rejects_arguments() {
             rows.iter()
                 .map(|row| row["qname"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["sys.api::ops", "sys.api::readById"]
+            [
+                "sys.api::about",
+                "sys.api::close",
+                "sys.api::filetypes",
+                "sys.api::libs",
+                "sys.api::ops",
+                "sys.api::read",
+                "sys.api::readAll",
+                "sys.api::readById",
+                "sys.api::readByIds"
+            ]
         );
         for row in rows {
             assert!(row["signature"].as_str().is_some());
-            assert!(row.get("noSideEffects").is_some());
+            assert_eq!(
+                !row["noSideEffects"].is_null(),
+                row["qname"] != "sys.api::close"
+            );
         }
     }
     for body in [
@@ -1190,7 +1203,7 @@ async fn v5_ops_authentication_precedes_protocol_validation_and_h4_stays_public(
         200,
     )
     .await;
-    assert_eq!(value["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(value["rows"].as_array().unwrap().len(), 9);
     f.close().await;
 }
 
@@ -1352,7 +1365,7 @@ async fn ops_zero_arguments_accept_supported_containers_and_preserve_null_key_re
             200,
         )
         .await;
-        assert_eq!(value["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(value["rows"].as_array().unwrap().len(), 9);
     }
     for (media, body) in [
         (
@@ -1477,7 +1490,7 @@ impl ReadPolicy for ReadByIdOnly {
 
 #[tokio::test]
 async fn resolver_candidate_limit_counts_hidden_entries_before_a_null_read() {
-    for max_candidates in [1, 2] {
+    for max_candidates in [1, 9] {
         let f = Fixture::with_policy(
             true,
             ReadLimits {
@@ -1488,7 +1501,7 @@ async fn resolver_candidate_limit_counts_hidden_entries_before_a_null_read() {
         )
         .await;
         // An absent nullable id with checked=false does no graph lookup. Only
-        // the two registry entries, including policy-hidden ops, spend candidates.
+        // all nine registry entries, including policy-hidden entries, spend candidates.
         let response = f
             .get("/readById?checked=false")
             .header("Xeto-Version", "5")
@@ -1520,4 +1533,686 @@ async fn resolver_candidate_limit_counts_hidden_entries_before_a_null_read() {
         }
         f.close().await;
     }
+}
+
+#[tokio::test]
+async fn system_read_by_ids_preserves_positions_duplicates_and_literal_missing_zinc_rows() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    let value = json_response(
+        f.post("/readByIds")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"ids":["x","a","x","missing","denied"],"checked":false}"#)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    let rows = value["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 5);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["id"]["val"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("x"), Some("a"), Some("x"), None, None]
+    );
+    assert!(
+        rows[3]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(serde_json::Value::is_null)
+    );
+    assert!(
+        rows[4]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(serde_json::Value::is_null)
+    );
+    let response = f
+        .post("/readByIds")
+        .header("Xeto-Version", "5")
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/zinc")
+        .body(r#"{"ids":["missing","denied","missing"],"checked":false}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    assert_eq!(
+        text.lines().skip(1).collect::<Vec<_>>(),
+        ["id", "N", "N", "N"]
+    );
+    let empty = json_response(
+        f.post("/readByIds")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"ids":[]}"#)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert!(empty["rows"].as_array().unwrap().is_empty());
+    for id in ["missing", "denied"] {
+        api_error(
+            f.post("/readByIds")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(format!(r#"{{"ids":["a","{id}"]}}"#)),
+            404,
+            "UnknownEntityErr",
+        )
+        .await;
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_filter_reads_authorize_before_limits_and_sort_only_selected_rows() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for (id, dis) in [("aa", "Zulu"), ("ab", "Beta"), ("ac", "Aardvark")] {
+        let mut row = HDict::new();
+        row.set("id", Kind::Ref(HRef::from_val(id)));
+        row.set("dis", Kind::Str(dis.into()));
+        row.set("pr09", Kind::Marker);
+        f.graph.add(row).unwrap();
+    }
+    let first = json_response(
+        f.get("/read?filter=site")
+            .header("Xeto-Version", "5")
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(first["id"]["val"], "a");
+    let authorized = json_response(
+        f.post("/readAll")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"filter":"site","opts":{"limit":2}}"#)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(
+        authorized["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"]["val"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["a", "x"]
+    );
+    let ties = json_response(
+        f.post("/readAll")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"filter":"site","opts":{"limit":2,"sort":false}}"#)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(
+        ties["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"]["val"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["a", "x"]
+    );
+    let sorted = json_response(
+        f.post("/readAll")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"filter":"pr09","opts":{"limit":2,"sort":false}}"#)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(
+        sorted["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"]["val"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["ab", "aa"]
+    );
+    for body in [
+        r#"{"filter":"site","opts":{"search":null}}"#,
+        r#"{"filter":"site","opts":{"gridMeta":{}}}"#,
+        r#"{"filter":"site","opts":{"unknown":null}}"#,
+        r#"{"filter":"site","opts":{"limit":1.5}}"#,
+    ] {
+        api_error(
+            f.post("/readAll")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(body),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    api_error(
+        f.get("/readAll?filter=site&opts=%7B%22unknown%22%3Anull%7D")
+            .header("Xeto-Version", "5"),
+        400,
+        "InvalidArgsErr",
+    )
+    .await;
+    assert_eq!(
+        json_response(
+            f.get("/read?filter=missingMarker&checked=false")
+                .header("Xeto-Version", "5")
+                .send()
+                .await
+                .unwrap(),
+            200
+        )
+        .await,
+        serde_json::Value::Null
+    );
+    api_error(
+        f.get("/read?filter=missingMarker")
+            .header("Xeto-Version", "5"),
+        404,
+        "UnknownEntityErr",
+    )
+    .await;
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_filter_explicit_string_post_is_not_relabelled() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for operation in ["read", "readAll"] {
+        api_error(
+            f.post(&format!("/{operation}"))
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(r#"{"filter":{"spec":"sys::Str","val":"site"}}"#),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_filter_explicit_string_get_is_not_relabelled() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for operation in ["read", "readAll"] {
+        api_error(
+            f.get(&format!(
+                "/{operation}?filter=%7B%22spec%22%3A%22sys%3A%3AStr%22%2C%22val%22%3A%22site%22%7D"
+            ))
+            .header("Xeto-Version", "5"),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_filter_mixed_query_and_grid_does_not_promote_query_text() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for version in ["4", "5"] {
+        for body in [
+            r#"{"_kind":"grid","meta":{"ver":"3.0"},"cols":[],"rows":[{}]}"#,
+            r#"{"_kind":"grid","meta":{"ver":"3.0"},"cols":[],"rows":[]}"#,
+        ] {
+            api_error(
+                f.post("/sys.api::readAll?filter=%7B%22spec%22%3A%22sys%3A%3AStr%22%2C%22val%22%3A%22site%22%7D")
+                    .header("Xeto-Version", version)
+                    .header("Content-Type", "application/vnd.haystack+json")
+                    .body(body),
+                400,
+                "InvalidArgsErr",
+            )
+            .await;
+        }
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_filter_contextual_boxed_and_legacy_text_remain_valid() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for request in [
+        f.post("/readAll")
+            .header("Content-Type", "application/json")
+            .body(r#"{"filter":"site"}"#),
+        f.post("/readAll")
+            .header("Content-Type", "application/json")
+            .body(r#"{"filter":{"spec":"sys::Filter","val":"site"}}"#),
+        f.get("/readAll?filter=site"),
+        f.get("/readAll?filter=%7B%22spec%22%3A%22sys%3A%3AFilter%22%2C%22val%22%3A%22site%22%7D"),
+    ] {
+        let value = json_response(
+            request.header("Xeto-Version", "5").send().await.unwrap(),
+            200,
+        )
+        .await;
+        assert_eq!(value["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(value["rows"][0]["id"]["val"], "a");
+        assert_eq!(value["rows"][1]["id"]["val"], "x");
+    }
+    // The bridge follows actual Grid media, including Grid input under v5.
+    // These bytes are authored directly, without using the native encoder.
+    for version in ["4", "5"] {
+        for (media, body) in [
+            ("text/zinc", "ver:\"3.0\"\nfilter\n\"site\"\n"),
+            (
+                "application/vnd.haystack+json",
+                r#"{"_kind":"grid","meta":{"ver":"3.0"},"cols":[{"name":"filter"}],"rows":[{"filter":"site"}]}"#,
+            ),
+        ] {
+            let response = f
+                .post("/sys.api::readAll")
+                .header("Xeto-Version", version)
+                .header("Content-Type", media)
+                .header("Accept", "text/zinc")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200, "version={version} media={media}");
+            let body = response.text().await.unwrap();
+            assert!(body.contains("@a"), "{body}");
+            assert!(body.contains("@x"), "{body}");
+            assert!(!body.contains("@denied"), "{body}");
+        }
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_opts_structural_dict_post_preserves_limit() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    let value = json_response(
+        f.post("/readAll")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"filter":"site","opts":{"spec":"sys::Dict","limit":1}}"#)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(value["rows"][0]["id"]["val"], "a");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_opts_structural_dict_get_preserves_limit() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    let value = json_response(
+        f.get("/readAll?filter=site&opts=%7B%22spec%22%3A%22sys%3A%3ADict%22%2C%22limit%22%3A1%7D")
+            .header("Xeto-Version", "5")
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(value["rows"][0]["id"]["val"], "a");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_opts_malformed_spec_and_unknown_null_remain_invalid() {
+    let f = Fixture::start(false, ReadLimits::default()).await;
+    for opts in [
+        r#"{"spec":null,"limit":1}"#,
+        r#"{"spec":1,"limit":1}"#,
+        r#"{"spec":"sys::Str","limit":1}"#,
+        r#"{"spec":"sys::Grid","limit":1}"#,
+        r#"{"spec":"missing::Dict","limit":1}"#,
+        r#"{"spec":"rusty.http::Arguments","limit":1}"#,
+        r#"{"spec":{"spec":"sys::Ref","val":"sys::Dict"},"limit":1}"#,
+        r#"{"spec":"sys::Dict","unknown":null}"#,
+    ] {
+        api_error(
+            f.post("/readAll")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(format!(r#"{{"filter":"site","opts":{opts}}}"#)),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+        let mut url = reqwest::Url::parse(&format!("{}/readAll", f.base)).unwrap();
+        url.query_pairs_mut()
+            .append_pair("filter", "site")
+            .append_pair("opts", opts);
+        api_error(
+            f.client.get(url).header("Xeto-Version", "5"),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_metadata_is_typed_truthful_and_legacy_mapping_is_deliberate() {
+    let f = Fixture::start(true, ReadLimits::default()).await;
+    let token = "BEARER authToken=fixture-token";
+    let info = json_response(
+        f.get("/about")
+            .header("Xeto-Version", "5")
+            .header("Authorization", token)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(info["serverName"], "rusty-haystack");
+    assert_eq!(info["tz"], "UTC");
+    assert_eq!(info["protocolVersions"], serde_json::json!(["4", "5"]));
+    assert_eq!(info["productVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["whoami"], "user");
+    assert!(info["serverTime"].as_str().unwrap().contains('T'));
+    assert!(info["serverBootTime"].as_str().unwrap().contains('T'));
+    let again = json_response(
+        f.get("/about")
+            .header("Xeto-Version", "5")
+            .header("Authorization", token)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(again["serverBootTime"], info["serverBootTime"]);
+    let libs = json_response(
+        f.get("/libs")
+            .header("Xeto-Version", "5")
+            .header("Authorization", token)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(
+        libs["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["sys", "sys.api"]
+    );
+    assert_eq!(libs["rows"][0]["version"], "5.0.0");
+    for path in ["/about", "/libs"] {
+        api_error(
+            f.get(path)
+                .header("Xeto-Version", "5")
+                .header("Authorization", token)
+                .header("Accept", "text/zinc"),
+            406,
+            "NotAcceptableErr",
+        )
+        .await;
+    }
+    let legacy = f
+        .get("/sys.api::about")
+        .header("Xeto-Version", "4")
+        .header("Authorization", token)
+        .header("Accept", "text/zinc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), 200);
+    let legacy = codec_for("text/zinc")
+        .unwrap()
+        .decode_grid(&legacy.text().await.unwrap())
+        .unwrap();
+    assert_eq!(legacy.rows[0].get("tz"), Some(&Kind::Str("UTC".into())));
+    assert!(matches!(
+        legacy.rows[0].get("serverBootTime"),
+        Some(Kind::DateTime(_))
+    ));
+    let types = json_response(
+        f.get("/filetypes")
+            .header("Xeto-Version", "5")
+            .header("Authorization", token)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(
+        types["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["hayson", "jeto", "zinc"]
+    );
+    assert!(
+        types["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["canRead"] == true && row["canWrite"] == true)
+    );
+    let legacy = f
+        .get("/filetypes")
+        .header("Xeto-Version", "4")
+        .header("Authorization", token)
+        .header("Accept", "text/zinc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), 200);
+    let text = legacy.text().await.unwrap();
+    assert!(text.contains("^filetype:zinc"));
+    assert!(text.contains("text/zinc"));
+    assert!(!text.contains("canRead") && !text.contains("fileSpec"));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn system_limits_charge_positions_and_selected_rows_without_partial_results() {
+    let f = Fixture::start(
+        false,
+        ReadLimits {
+            max_rows: 1,
+            ..ReadLimits::default()
+        },
+    )
+    .await;
+    for body in [
+        r#"{"ids":["a","a"]}"#,
+        r#"{"ids":["missing","denied"],"checked":false}"#,
+    ] {
+        api_error(
+            f.post("/readByIds")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(body),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    api_error(
+        f.get("/readAll?filter=site").header("Xeto-Version", "5"),
+        400,
+        "InvalidArgsErr",
+    )
+    .await;
+    api_error(
+        f.get("/filetypes").header("Xeto-Version", "5"),
+        400,
+        "InvalidArgsErr",
+    )
+    .await;
+    for limit in ["1", "1.0", "0"] {
+        let value = json_response(
+            f.post("/readAll")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(format!(r#"{{"filter":"site","opts":{{"limit":{limit}}}}}"#))
+                .send()
+                .await
+                .unwrap(),
+            200,
+        )
+        .await;
+        assert_eq!(
+            value["rows"].as_array().unwrap().len(),
+            usize::from(limit != "0")
+        );
+    }
+    for limit in [
+        "-1",
+        "2",
+        "1.5",
+        r#"{"spec":"sys::Float","val":"INF"}"#,
+        r#"{"spec":"sys::Number","val":"1kW"}"#,
+    ] {
+        api_error(
+            f.post("/readAll")
+                .header("Xeto-Version", "5")
+                .header("Content-Type", "application/json")
+                .body(format!(r#"{{"filter":"site","opts":{{"limit":{limit}}}}}"#)),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    f.close().await;
+    let f = Fixture::start(
+        false,
+        ReadLimits {
+            max_candidates: 10,
+            ..ReadLimits::default()
+        },
+    )
+    .await;
+    api_error(
+        f.post("/readByIds")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"ids":["a","a"]}"#),
+        400,
+        "InvalidArgsErr",
+    )
+    .await;
+    f.close().await;
+}
+
+struct LibraryRules;
+impl ReadPolicy for LibraryRules {
+    fn snapshot(&self, _: &Principal) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
+        Ok(Arc::new(Self))
+    }
+}
+impl PolicySnapshot for LibraryRules {
+    fn scope_key(&self) -> &str {
+        "library-fixture"
+    }
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
+    fn operation(&self, _: ReadOperation) -> bool {
+        true
+    }
+    fn entity(&self, _: &str) -> bool {
+        true
+    }
+    fn tag(&self, _: &str, _: &str) -> bool {
+        true
+    }
+    fn reference(&self, _: &str) -> bool {
+        true
+    }
+    fn reference_display(&self, _: &str) -> bool {
+        true
+    }
+    fn catalog(&self, kind: haystack_app::CatalogKind, name: &str) -> bool {
+        kind != haystack_app::CatalogKind::Library || name == "sys.api"
+    }
+    fn nominal_provenance(&self, _: &NominalScalar) -> bool {
+        true
+    }
+}
+#[tokio::test]
+async fn system_libraries_respect_visibility_and_h4_keeps_name_version_columns() {
+    let f = Fixture::with_policy(false, ReadLimits::default(), Arc::new(LibraryRules)).await;
+    let value = json_response(
+        f.get("/libs")
+            .header("Xeto-Version", "5")
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(value["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(value["rows"][0]["name"], "sys.api");
+    let response = f
+        .get("/sys.api::libs")
+        .header("Xeto-Version", "4")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let grid = codec_for("text/zinc")
+        .unwrap()
+        .decode_grid(&response.text().await.unwrap())
+        .unwrap();
+    assert_eq!(
+        grid.cols
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["name", "version"]
+    );
+    assert_eq!(grid.rows.len(), 1);
+    assert_eq!(
+        grid.rows[0].get("version"),
+        Some(&Kind::Str("5.0.0".into()))
+    );
+    for path in [
+        "/sys.api::about?filter=site",
+        "/sys.api::libs?limit=1",
+        "/filetypes?limit=1",
+    ] {
+        api_error(
+            f.get(path).header("Xeto-Version", "4"),
+            400,
+            "InvalidArgsErr",
+        )
+        .await;
+    }
+    f.close().await;
 }

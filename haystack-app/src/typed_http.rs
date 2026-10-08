@@ -151,7 +151,19 @@ pub struct TypedInvocationInput {
     pub content_encoded: bool,
     pub body: Vec<u8>,
 }
+/// Opaque final disclosure check. It retains the original deadline, caller and
+/// owner cancellation, and exact session authority, without extending a worker
+/// lease after execution has actually ended.
+pub struct InvocationDisclosure {
+    budget: Budget,
+}
+impl InvocationDisclosure {
+    pub fn check(&self) -> Result<(), ApiError> {
+        self.budget.check().map_err(ApiError::from)
+    }
+}
 pub struct TypedInvocationResponse {
+    pub disclosure: InvocationDisclosure,
     pub body: Vec<u8>,
     pub content_type: &'static str,
     pub version: &'static str,
@@ -245,6 +257,31 @@ fn media(value: &str, v5: bool) -> Option<Media> {
         "text/zinc" if version.is_none() => Some(Media::Grid(H4Codec::Zinc)),
         _ => None,
     }
+}
+pub(crate) fn filetypes(
+    version: &str,
+) -> impl Iterator<
+    Item = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ),
+> {
+    [
+        (
+            "hayson",
+            "Haystack JSON",
+            "application/vnd.haystack+json",
+            "json",
+            "sys.files::HaysonFile",
+        ),
+        ("jeto", "Jeto", "text/jeto", "jeto", "sys.files::JetoFile"),
+        ("zinc", "Zinc", "text/zinc", "zinc", "sys.files::ZincFile"),
+    ]
+    .into_iter()
+    .filter(move |(_, _, mime, _, _)| media(mime, version == "5").is_some())
 }
 fn response_media(
     input: &TypedInvocationInput,
@@ -348,55 +385,114 @@ pub(crate) struct WireProfile {
     parameters: std::collections::BTreeMap<String, String>,
     result: String,
     strict_arguments: bool,
+    function: String,
 }
 impl WireProfile {
     pub(crate) fn new(
         profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
         declaration: &haystack_core::xeto::read_by_id::AdmittedSpec,
     ) -> Result<Self, ReadError> {
-        let mut parameters = std::collections::BTreeMap::new();
-        let mut result = None;
-        for slot in &declaration.spec.slots {
-            let name = slot.type_ref.as_ref().ok_or(ReadError::InvalidLimits)?;
-            if slot.name == "returns" {
-                result = Some(name.clone());
+        use std::collections::{BTreeMap, BTreeSet};
+        fn ty(
+            profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
+            name: &str,
+            definitions: &mut Vec<jeto::Definition>,
+            seen: &mut BTreeSet<String>,
+        ) -> Result<String, ReadError> {
+            if name == "sys.api::ApiVersion" {
+                return Ok("sys::Str".into());
+            }
+            if jeto::Context::standard().contains(name) {
+                return Ok(name.into());
+            }
+            if !seen.insert(name.into()) {
+                return Ok(name.into());
+            }
+            let definition = if let Some(keys) = profile.enum_keys(name) {
+                jeto::Definition::Enum {
+                    name: name.into(),
+                    keys: keys.to_vec(),
+                }
+            } else if matches!(name, "sys::Filter" | "sys::Version") {
+                jeto::Definition::Nominal {
+                    name: name.into(),
+                    pattern: if name == "sys::Filter" {
+                        "(?s:.*)"
+                    } else {
+                        "[0-9]+(?:\\.[0-9]+)*"
+                    }
+                    .into(),
+                }
             } else {
-                parameters.insert(slot.name.clone(), name.clone());
+                let declaration = profile.declaration(name).ok_or(ReadError::InvalidLimits)?;
+                if declaration.spec.base.as_deref() != Some("sys::Dict") {
+                    return Err(ReadError::InvalidLimits);
+                }
+                let mut members = BTreeMap::new();
+                for member in &declaration.spec.slots {
+                    members.insert(
+                        member.name.clone(),
+                        slot(profile, name, member, definitions, seen)?,
+                    );
+                }
+                jeto::Definition::Dict {
+                    name: name.into(),
+                    members,
+                }
+            };
+            definitions.push(definition);
+            Ok(name.into())
+        }
+        fn slot(
+            profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
+            owner: &str,
+            slot: &haystack_core::xeto::spec::Slot,
+            definitions: &mut Vec<jeto::Definition>,
+            seen: &mut BTreeSet<String>,
+        ) -> Result<String, ReadError> {
+            let name = slot.type_ref.as_deref().ok_or(ReadError::InvalidLimits)?;
+            if let Some(Kind::Ref(of)) = slot.meta.get("of") {
+                let of = ty(profile, &of.val, definitions, seen)?;
+                if name == "sys::List" {
+                    let name = format!(
+                        "rusty.http::{}_{}",
+                        owner.rsplit("::").next().unwrap_or(""),
+                        slot.name
+                    );
+                    definitions.push(jeto::Definition::List {
+                        name: name.clone(),
+                        of,
+                    });
+                    return Ok(name);
+                }
+                if name != "sys::Grid" {
+                    return Err(ReadError::InvalidLimits);
+                }
+            }
+            ty(profile, name, definitions, seen)
+        }
+        let mut parameters = BTreeMap::new();
+        let mut definitions = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut result = None;
+        for member in &declaration.spec.slots {
+            let name = slot(
+                profile,
+                &declaration.spec.qname,
+                member,
+                &mut definitions,
+                &mut seen,
+            )?;
+            if member.name == "returns" {
+                result = Some(name);
+            } else {
+                parameters.insert(member.name.clone(), name);
             }
         }
-        let mut definitions = vec![jeto::Definition::Dict {
+        definitions.push(jeto::Definition::Dict {
             name: ARGUMENTS.into(),
             members: parameters.clone(),
-        }];
-        if let Some(Kind::Ref(of)) = declaration
-            .spec
-            .slots
-            .iter()
-            .find(|slot| slot.name == "returns")
-            .and_then(|slot| slot.meta.get("of"))
-        {
-            let row = profile
-                .declaration(&of.val)
-                .ok_or(ReadError::InvalidLimits)?;
-            if row.spec.base.as_deref() != Some("sys::Dict") {
-                return Err(ReadError::InvalidLimits);
-            }
-            let members = row
-                .spec
-                .slots
-                .iter()
-                .map(|slot| {
-                    Ok((
-                        slot.name.clone(),
-                        slot.type_ref.clone().ok_or(ReadError::InvalidLimits)?,
-                    ))
-                })
-                .collect::<Result<_, ReadError>>()?;
-            definitions.push(jeto::Definition::Dict {
-                name: of.val.clone(),
-                members,
-            });
-        }
+        });
         let context = jeto::Context::new(
             &profile.provenance().repository,
             &profile.provenance().commit,
@@ -409,6 +505,7 @@ impl WireProfile {
         }
         Ok(Self {
             context,
+            function: declaration.spec.qname.clone(),
             parameters,
             result,
             strict_arguments: declaration.spec.qname != "sys.api::readById",
@@ -536,6 +633,26 @@ pub(crate) fn envelope(
         query_args,
     })
 }
+fn validate_opts_keys(value: Option<&Value>) -> Result<(), ApiError> {
+    if let Some(Value::Object(opts)) = value
+        && opts
+            .keys()
+            .any(|name| !matches!(name.as_str(), "limit" | "sort" | "spec"))
+    {
+        return Err(ApiError::InvalidArgs);
+    }
+    Ok(())
+}
+fn check_raw_opts(text: &str, budget: &mut Budget) -> Result<(), ApiError> {
+    budget.charge(
+        BudgetKind::Retained,
+        text.len().saturating_mul(512).saturating_add(2048),
+    )?;
+    budget.charge(BudgetKind::Work, text.len().saturating_add(1))?;
+    let raw: Value = serde_json::from_str(text).map_err(|_| ApiError::InvalidArgs)?;
+    validate_opts_keys(Some(&raw))
+}
+
 pub(crate) fn decode(
     input: &TypedInvocationInput,
     profile: &WireProfile,
@@ -563,6 +680,9 @@ pub(crate) fn decode(
         if args.has(&key) {
             return Err(ApiError::InvalidArgs);
         }
+        if profile.function == "sys.api::readAll" && key == "opts" {
+            check_raw_opts(&value, budget)?;
+        }
         let value = argument(&value, expected, profile, budget)?;
         if !matches!(value, Kind::Null) {
             args.set(key, value);
@@ -572,11 +692,18 @@ pub(crate) fn decode(
         return Err(ApiError::UnsupportedMediaType);
     }
     if input.post {
-        if input.content_types.len() != 1 {
+        let legacy_empty_close = profile.function == "sys.api::close"
+            && version == "4"
+            && input.body.is_empty()
+            && input.content_types.is_empty();
+        if input.content_types.len() != 1 && !legacy_empty_close {
             return Err(ApiError::UnsupportedMediaType);
         }
-        let input_media =
-            media(&input.content_types[0], version == "5").ok_or(ApiError::UnsupportedMediaType)?;
+        let input_media = if legacy_empty_close {
+            Media::Grid(H4Codec::Zinc)
+        } else {
+            media(&input.content_types[0], version == "5").ok_or(ApiError::UnsupportedMediaType)?
+        };
         budget.charge(BudgetKind::Work, input.body.len().saturating_add(1))?;
         let text = std::str::from_utf8(&input.body).map_err(|_| ApiError::InvalidArgs)?;
         if !text.trim().is_empty() {
@@ -594,6 +721,9 @@ pub(crate) fn decode(
                         let raw: Value =
                             serde_json::from_str(text).map_err(|_| ApiError::InvalidArgs)?;
                         let map = raw.as_object().ok_or(ApiError::InvalidArgs)?;
+                        if profile.function == "sys.api::readAll" {
+                            validate_opts_keys(map.get("opts"))?;
+                        }
                         if map
                             .keys()
                             .any(|name| name != "spec" && !profile.parameters.contains_key(name))
@@ -676,11 +806,26 @@ pub(crate) fn decode(
                         {
                             return Err(ApiError::InvalidArgs);
                         }
-                        for name in profile.parameters.keys() {
+                        for (name, expected) in &profile.parameters {
                             if let Some(value) = row.get(name)
                                 && !matches!(value, Kind::Null)
                             {
-                                args.set(name, value.clone());
+                                // Legacy Grid codecs have no native Filter scalar.
+                                // Adapt only their text; Jeto's explicit boxed type
+                                // must survive decoding for native fitting.
+                                let value = match (expected.as_str(), value) {
+                                    ("sys::Filter", Kind::Str(text)) => {
+                                        jeto::decode_scalar_text_metered(
+                                            text,
+                                            &profile.context,
+                                            expected,
+                                            &mut JetoMeter(budget),
+                                        )
+                                        .map_err(|e| codec_error(e, false))?
+                                    }
+                                    _ => value.clone(),
+                                };
+                                args.set(name, value);
                             }
                         }
                     }
@@ -698,7 +843,7 @@ pub(crate) fn decode(
 }
 
 pub(crate) fn encode(
-    value: Kind,
+    mut value: Kind,
     request: &Request,
     profile: &WireProfile,
     budget: &mut Budget,
@@ -707,7 +852,19 @@ pub(crate) fn encode(
     if let Some(hook) = &budget.typed_encode_hook {
         hook();
     }
+    // Only the fitted H4 metadata profile deliberately projects these fields.
+    if request.version == "4" {
+        legacy_metadata(&mut value, &profile.function, budget)?;
+    }
     let body = match request.output {
+        Media::Jeto(_) if matches!(value, Kind::None) => {
+            if budget.limits.max_output_bytes < 4 {
+                return Err(ReadError::Budget(BudgetKind::Output).into());
+            }
+            budget.charge(BudgetKind::Work, 4)?;
+            budget.charge(BudgetKind::Retained, 4)?;
+            b"null".to_vec()
+        }
         Media::Jeto(boxing) => {
             // This HTTP profile serves only exact output, including box=none.
             // Callers that deliberately want lossy unboxing use the core API's
@@ -727,7 +884,7 @@ pub(crate) fn encode(
             let mut grid = match value {
                 Kind::Grid(grid) => *grid,
                 Kind::Dict(dict) => output::grid(vec![*dict], true, None, budget)?,
-                Kind::Null => output::grid(vec![], true, None, budget)?,
+                Kind::Null | Kind::None => output::grid(vec![], true, None, budget)?,
                 _ => return Err(ApiError::Internal),
             };
             grid.meta.remove_tag("complete");
@@ -741,6 +898,53 @@ pub(crate) fn encode(
     };
     finish(body, request, budget, request.version)
 }
+fn legacy_metadata(value: &mut Kind, function: &str, budget: &mut Budget) -> Result<(), ApiError> {
+    if function == "sys.api::about"
+        && let Kind::Dict(info) = value
+        && let Some(Kind::Nominal(tz)) = info.remove_tag("tz")
+    {
+        info.set("tz", Kind::Str(budget.copy_string(tz.text())?));
+    }
+    if let Kind::Grid(grid) = value {
+        if function == "sys.api::libs" {
+            for row in &mut grid.rows {
+                row.remove_tag("doc");
+                if let Some(Kind::Nominal(version)) = row.remove_tag("version") {
+                    row.set("version", Kind::Str(budget.copy_string(version.text())?));
+                }
+            }
+            budget.charge(BudgetKind::Retained, 512)?;
+            grid.cols = vec![
+                haystack_core::data::HCol::new("name"),
+                haystack_core::data::HCol::new("version"),
+            ];
+        } else if function == "sys.api::filetypes" {
+            for row in &mut grid.rows {
+                let Some(Kind::Str(name)) = row.remove_tag("name") else {
+                    return Err(ApiError::Internal);
+                };
+                row.set(
+                    "def",
+                    Kind::Symbol(haystack_core::kinds::Symbol::new(format!(
+                        "filetype:{name}"
+                    ))),
+                );
+                row.set("filetype", Kind::Marker);
+                for name in ["canRead", "canWrite", "fileSpec"] {
+                    row.remove_tag(name);
+                }
+            }
+            let rows = std::mem::take(&mut grid.rows);
+            **grid = output::grid(rows, true, None, budget)?;
+            grid.meta.remove_tag("complete");
+        }
+        if matches!(function, "sys.api::libs" | "sys.api::filetypes") {
+            grid.meta.remove_tag("of");
+        }
+    }
+    Ok(())
+}
+
 /// A function failure in v4 is an operation error grid with HTTP 200. Decode,
 /// fitting, admission and media failures remain terminal ApiErr responses.
 pub(crate) fn missing(
@@ -829,7 +1033,10 @@ fn finish(
         body
     };
     budget.check()?;
+    let mut disclosure = budget.clone();
+    disclosure.lease = None;
     Ok(TypedInvocationResponse {
+        disclosure: InvocationDisclosure { budget: disclosure },
         body,
         content_type: request.output.content_type(),
         version,
@@ -1177,5 +1384,261 @@ mod tests {
             owner.terminated().await;
             assert_eq!(reads.load().admitted, 0);
         });
+    }
+    fn close_input() -> TypedInvocationInput {
+        TypedInvocationInput {
+            operation: "close".into(),
+            post: true,
+            versions: vec!["5".into()],
+            content_types: vec!["application/json".into()],
+            body: b"{}".to_vec(),
+            ..Default::default()
+        }
+    }
+    #[tokio::test]
+    async fn system_close_prepares_ack_before_revoking_exact_session() {
+        let reads = ReadService::new(
+            SharedGraph::new(EntityGraph::new()),
+            Arc::new(AllowAll),
+            ReadLimits::default(),
+        )
+        .unwrap();
+        let a = crate::SubscriptionSession::trusted("same-user", Duration::from_secs(30)).unwrap();
+        let b = crate::SubscriptionSession::trusted("same-user", Duration::from_secs(30)).unwrap();
+        let begin = || {
+            reads.begin(ReadContext::with_timeout(
+                a.principal().clone(),
+                Duration::from_secs(3),
+            ))
+        };
+        let mut admission = begin().await.unwrap();
+        admission
+            .bind_wire_session(a.principal().clone(), a.clone())
+            .unwrap();
+        let mut invalid = close_input();
+        invalid.body = br#"{"target":null}"#.to_vec();
+        assert!(matches!(
+            admission.invoke_wire(invalid).await,
+            Err(ApiError::InvalidArgs)
+        ));
+        assert!(a.is_active());
+        let mut admission = begin().await.unwrap();
+        admission
+            .bind_wire_session(a.principal().clone(), a.clone())
+            .unwrap();
+        let reply = admission.invoke_wire(close_input()).await.unwrap();
+        assert_eq!(reply.body, b"null");
+        assert!(!a.is_active());
+        assert!(b.is_active());
+        let reads = ReadService::new(
+            SharedGraph::new(EntityGraph::new()),
+            Arc::new(AllowAll),
+            ReadLimits {
+                max_output_bytes: 1,
+                ..ReadLimits::default()
+            },
+        )
+        .unwrap();
+        let mut admission = reads
+            .begin(ReadContext::with_timeout(
+                b.principal().clone(),
+                Duration::from_secs(3),
+            ))
+            .await
+            .unwrap();
+        admission
+            .bind_wire_session(b.principal().clone(), b.clone())
+            .unwrap();
+        assert!(matches!(
+            admission.invoke_wire(close_input()).await,
+            Err(ApiError::InvalidArgs)
+        ));
+        assert!(b.is_active());
+    }
+    #[test]
+    fn system_revocation_interrupts_encoding_but_retains_actual_worker_lease() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let reads = ReadService::new(
+                SharedGraph::new(EntityGraph::new()),
+                Arc::new(AllowAll),
+                ReadLimits {
+                    max_concurrent: 1,
+                    max_queued: 0,
+                    ..ReadLimits::default()
+                },
+            )
+            .unwrap();
+            let session =
+                crate::SubscriptionSession::trusted("reader", Duration::from_secs(30)).unwrap();
+            let mut admission = reads
+                .begin(ReadContext::with_timeout(
+                    session.principal().clone(),
+                    Duration::from_secs(3),
+                ))
+                .await
+                .unwrap();
+            admission
+                .bind_wire_session(session.principal().clone(), session.clone())
+                .unwrap();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release = std::sync::Mutex::new(release_rx);
+            admission.budget_mut().typed_encode_hook = Some(Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            }));
+            let mut result = Box::pin(admission.invoke_wire(input()));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(result.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            session.close();
+            let stopped = tokio::time::timeout(Duration::from_millis(200), &mut result).await;
+            let admitted = reads.load().admitted;
+            release_tx.send(()).unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            assert!(
+                matches!(stopped, Ok(Err(ApiError::Permission))),
+                "session revocation must finish the request promptly"
+            );
+            assert_eq!(admitted, 1);
+            assert_eq!(reads.load().admitted, 0);
+        });
+    }
+
+    #[test]
+    fn system_caller_cancellation_before_close_ack_prevents_the_effect() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let reads = ReadService::new(
+                SharedGraph::new(EntityGraph::new()),
+                Arc::new(AllowAll),
+                ReadLimits {
+                    max_concurrent: 1,
+                    max_queued: 0,
+                    ..ReadLimits::default()
+                },
+            )
+            .unwrap();
+            let session =
+                crate::SubscriptionSession::trusted("reader", Duration::from_secs(30)).unwrap();
+            let cancel = CancellationToken::new();
+            let mut admission = reads
+                .begin(ReadContext::new(
+                    session.principal().clone(),
+                    std::time::Instant::now() + Duration::from_secs(3),
+                    cancel.clone(),
+                ))
+                .await
+                .unwrap();
+            admission
+                .bind_wire_session(session.principal().clone(), session.clone())
+                .unwrap();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release = std::sync::Mutex::new(release_rx);
+            admission.budget_mut().typed_encode_hook = Some(Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            }));
+            let mut result = Box::pin(admission.invoke_wire(close_input()));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(result.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            cancel.cancel();
+            assert!(matches!(result.await, Err(ApiError::Unavailable)));
+            assert_eq!(reads.load().admitted, 1);
+            release_tx.send(()).unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            assert!(session.is_active());
+            assert_eq!(reads.load().admitted, 0);
+        });
+    }
+    #[tokio::test]
+    async fn system_about_uses_configured_label_and_close_requires_session_and_post() {
+        let app = ApplicationBuilder::new(
+            SharedGraph::new(EntityGraph::new()),
+            Arc::new(AllowAll),
+            ReadLimits::default(),
+        )
+        .unwrap()
+        .server_name("North Campus")
+        .unwrap();
+        let reads = app.handle().read_service();
+        let owner = app.start(&tokio::runtime::Handle::current()).unwrap();
+        owner.ready().await.unwrap();
+        let response = reads
+            .begin(ReadContext::with_timeout(
+                Principal::Anonymous,
+                Duration::from_secs(2),
+            ))
+            .await
+            .unwrap()
+            .invoke_wire(TypedInvocationInput {
+                operation: "about".into(),
+                versions: vec!["5".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let info: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(info["serverName"], "North Campus");
+        assert!(info.get("whoami").is_none());
+        let error = reads
+            .begin(ReadContext::with_timeout(
+                Principal::Anonymous,
+                Duration::from_secs(2),
+            ))
+            .await
+            .unwrap()
+            .invoke_wire(close_input())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error, ApiError::AuthRequired);
+        let session =
+            crate::SubscriptionSession::trusted("reader", Duration::from_secs(30)).unwrap();
+        let mut admission = reads
+            .begin(ReadContext::with_timeout(
+                session.principal().clone(),
+                Duration::from_secs(2),
+            ))
+            .await
+            .unwrap();
+        admission
+            .bind_wire_session(session.principal().clone(), session.clone())
+            .unwrap();
+        let mut input = close_input();
+        input.post = false;
+        input.body.clear();
+        assert_eq!(
+            admission.invoke_wire(input).await.err().unwrap(),
+            ApiError::MethodNotAllowed
+        );
+        assert!(session.is_active());
+        owner.close().await.unwrap();
+        owner.terminated().await;
     }
 }

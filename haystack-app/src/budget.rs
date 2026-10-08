@@ -1,9 +1,59 @@
 use crate::{BudgetKind, ReadError, ReadLimits};
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
+
+/// Revocation belongs to one authenticated invocation. The exception is set
+/// only by the exact close handler after its acknowledgment is fully encoded.
+#[derive(Clone)]
+pub(crate) struct SessionFence {
+    pub session: crate::SubscriptionSession,
+    acknowledgment: Arc<AtomicBool>,
+}
+impl SessionFence {
+    pub fn new(session: crate::SubscriptionSession) -> Self {
+        Self {
+            session,
+            acknowledgment: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    pub fn check(&self) -> Result<(), ReadError> {
+        if self
+            .session
+            .expires_at()
+            .is_some_and(|expires| Instant::now() >= expires)
+            || (!self.session.is_active() && !self.acknowledgment.load(Ordering::Acquire))
+        {
+            Err(ReadError::Forbidden)
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn cancelled(&self) {
+        self.session.closed().await;
+        if self.acknowledgment.load(Ordering::Acquire) {
+            match self.session.expires_at() {
+                Some(expires) => {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(expires)).await
+                }
+                None => std::future::pending::<()>().await,
+            }
+        }
+    }
+    pub fn close(&self) -> Result<(), ReadError> {
+        self.check()?;
+        if self.session.close_for_ack(&self.acknowledgment) {
+            Ok(())
+        } else {
+            Err(ReadError::Forbidden)
+        }
+    }
+}
 
 /// Clones share cumulative counters and the original work lease.
 #[derive(Clone)]
@@ -15,6 +65,7 @@ pub(crate) struct Budget {
     pub cancel: CancellationToken,
     pub owner_cancel: Option<CancellationToken>,
     pub owner_sealed: Option<CancellationToken>,
+    pub session: Option<SessionFence>,
     pub lease: Option<Arc<crate::service::WorkLease>>,
     usage: Arc<parking_lot::Mutex<Usage>>,
 }
@@ -39,6 +90,7 @@ impl Budget {
             cancel,
             owner_cancel: None,
             owner_sealed: None,
+            session: None,
             lease: None,
             usage: Arc::new(parking_lot::Mutex::new(Usage::default())),
         }
@@ -61,6 +113,8 @@ impl Budget {
                 .is_some_and(CancellationToken::is_cancelled)
         {
             Err(ReadError::Cancelled)
+        } else if let Some(session) = &self.session {
+            session.check()
         } else {
             Ok(())
         }
@@ -68,6 +122,7 @@ impl Budget {
     pub async fn cancelled(&self) {
         tokio::select! {
             _ = self.cancel.cancelled() => {},
+            _ = async { match &self.session { Some(session) => session.cancelled().await, None => std::future::pending::<()>().await } } => {},
             _ = async {
                 match &self.owner_cancel {
                     Some(token) => token.cancelled().await,

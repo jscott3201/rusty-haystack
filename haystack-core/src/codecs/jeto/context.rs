@@ -42,6 +42,11 @@ pub enum Definition {
         name: String,
         pattern: String,
     },
+    /// Finite scalar keys. Strings decode with this enum's nominal identity.
+    Enum {
+        name: String,
+        keys: Vec<String>,
+    },
     Dict {
         name: String,
         members: BTreeMap<String, String>,
@@ -63,6 +68,7 @@ impl Definition {
     fn name(&self) -> &str {
         match self {
             Self::Nominal { name, .. }
+            | Self::Enum { name, .. }
             | Self::Dict { name, .. }
             | Self::List { name, .. }
             | Self::Grid { name, .. }
@@ -92,13 +98,14 @@ pub(super) enum Class {
     Any,
     Scalar(Scalar),
     Nominal(Pattern),
+    Enum(Arc<[String]>),
     Dict(BTreeMap<String, String>),
     List(Option<String>),
     Grid(Option<String>),
 }
 impl Class {
     pub(super) fn scalar(&self) -> bool {
-        matches!(self, Self::Scalar(_) | Self::Nominal(_))
+        matches!(self, Self::Scalar(_) | Self::Nominal(_) | Self::Enum(_))
     }
 }
 /// Immutable, closed context. Nominals carry this explicit catalog identity and
@@ -109,6 +116,7 @@ pub struct Context {
     catalog: String,
     revision: String,
     types: BTreeMap<String, Class>,
+    max_enum_keys: usize,
 }
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("invalid Jeto context: {0}")]
@@ -145,6 +153,7 @@ impl Context {
             catalog: "project-haystack/xeto".into(),
             revision: crate::xeto::read_by_id::READ_BY_ID_UPSTREAM_COMMIT.into(),
             types,
+            max_enum_keys: 0,
         }
     }
     /// Add a bounded set of caller-admitted codec declarations. Duplicate names,
@@ -180,6 +189,32 @@ impl Context {
                     source_bytes = source_bytes.saturating_add(pattern.len());
                     let regex = Pattern::new(pattern)?;
                     Class::Nominal(regex)
+                }
+                Definition::Enum { keys, .. } => {
+                    if keys.is_empty()
+                        || keys.len() > 4096
+                        || keys.iter().any(|key| key.is_empty() || key.len() > 256)
+                    {
+                        return Err(ContextError("enum member bound"));
+                    }
+                    let bytes = keys
+                        .iter()
+                        .try_fold(0usize, |n, key| n.checked_add(key.len()))
+                        .ok_or(ContextError("enum source bound"))?;
+                    if bytes > 64 * 1024 {
+                        return Err(ContextError("enum source bound"));
+                    }
+                    source_bytes = source_bytes.saturating_add(bytes);
+                    if source_bytes > 128 * 1024 {
+                        return Err(ContextError("context source bound"));
+                    }
+                    let mut keys = keys.clone();
+                    keys.sort();
+                    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+                        return Err(ContextError("duplicate enum key"));
+                    }
+                    context.max_enum_keys = context.max_enum_keys.max(keys.len());
+                    Class::Enum(keys.into())
                 }
                 Definition::Dict { members, .. } => {
                     if members.len() > 256
@@ -250,6 +285,16 @@ impl Context {
     }
     pub fn contains(&self, name: &str) -> bool {
         self.types.contains_key(name)
+    }
+    // Binary search uses no allocation and at most log2(n)+2 comparisons.
+    // Reserve their worst-case common-prefix scans before scalar membership.
+    pub(super) fn enum_work(&self, bytes: usize) -> usize {
+        if self.max_enum_keys == 0 {
+            return 0;
+        }
+        bytes
+            .saturating_add(1)
+            .saturating_mul(self.max_enum_keys.ilog2() as usize + 2)
     }
     pub(super) fn lookup(&self, name: &str) -> Option<&Class> {
         self.types.get(name)

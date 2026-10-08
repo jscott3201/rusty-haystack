@@ -777,3 +777,162 @@ async fn review_malformed_raw_json_cannot_create_or_acknowledge_a_watch() {
         app.stop().await;
     }
 }
+
+#[tokio::test]
+async fn system_close_isolates_two_real_logins_and_eventually_reclaims_only_its_watches() {
+    let graph = SharedGraph::new(EntityGraph::with_changelog_capacity(8));
+    graph.add(entity(1.0)).unwrap();
+    let app =
+        ApplicationBuilder::new(graph.clone(), Arc::new(AllowAll), ReadLimits::default()).unwrap();
+    let subscriptions = StateSubscriptionService::new(
+        app.handle().read_service(),
+        EphemeralMutationStore::new(graph.clone()),
+        SubscriptionLimits::default(),
+    )
+    .unwrap();
+    let app = app.state_subscriptions(subscriptions.clone()).unwrap();
+    let credentials=parse_password_hash("W22ZaJ0SNY7soEsUEjb6gQ==:4096:WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU=").unwrap();
+    let auth = AuthManager::new(
+        HashMap::from([(
+            "user".into(),
+            UserRecord {
+                credentials,
+                permissions: vec!["read".into()],
+            },
+        )]),
+        Duration::from_secs(60),
+    );
+    let listener = HaystackServer::new(graph)
+        .with_scoped_reads(app.handle())
+        .with_auth(auth)
+        .port(0)
+        .into_listener();
+    let owner = app
+        .owned_resource(listener)
+        .start(&tokio::runtime::Handle::current())
+        .unwrap();
+    let address = owner.ready().await.unwrap().listeners[0].address;
+    let base = format!("http://{address}/api");
+    let ws = format!("ws://{address}/api/ws");
+    let client = haystack_client::ClientConfig::default()
+        .build_reqwest_client()
+        .unwrap();
+    let a = haystack_client::auth::authenticate(&client, &base, "user", "pencil")
+        .await
+        .unwrap();
+    let b = haystack_client::auth::authenticate(&client, &base, "user", "pencil")
+        .await
+        .unwrap();
+    assert!(a != b);
+    let http_a = HaystackClient::from_transport(HttpTransport::new(&base, a.clone()));
+    let http_b = HaystackClient::from_transport(HttpTransport::new(&base, b.clone()));
+    let watch_a = delivery(
+        http_a
+            .state_subscription(&create(subscriptions.authority(), "same-creation-key"))
+            .await
+            .unwrap(),
+    );
+    let watch_b = delivery(
+        http_b
+            .state_subscription(&create(subscriptions.authority(), "same-creation-key"))
+            .await
+            .unwrap(),
+    );
+    assert!(watch_a.watch != watch_b.watch);
+    http_a.state_subscription(&ack(&watch_a)).await.unwrap();
+    http_b.state_subscription(&ack(&watch_b)).await.unwrap();
+    let socket_a = http_a.attach_subscription_ws(&ws).await.unwrap();
+    let socket_b = http_b.attach_subscription_ws(&ws).await.unwrap();
+    assert_eq!(subscriptions.active_watches(), 2);
+    assert_eq!(subscriptions.binding_count(), 2);
+    let response = client
+        .post(format!("{base}/close?xeto-version=5"))
+        .header("Authorization", format!("BEARER authToken={a}"))
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.unwrap(), "null");
+    let response = client
+        .get(format!("{base}/about?xeto-version=5"))
+        .header("Authorization", format!("BEARER authToken={a}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    let repeated = client
+        .post(format!("{base}/close?xeto-version=5"))
+        .header("Authorization", format!("BEARER authToken={a}"))
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repeated.status(), 403);
+    let response = client
+        .get(format!("{base}/about?xeto-version=5"))
+        .header("Authorization", format!("BEARER authToken={b}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(matches!(
+        socket_b
+            .state_subscription(&SubscriptionRequest::Poll {
+                watch: watch_b.watch.clone()
+            })
+            .await
+            .unwrap(),
+        SubscriptionOutcome::Idle { .. }
+    ));
+    let a_result = tokio::time::timeout(
+        Duration::from_secs(2),
+        socket_a.state_subscription(&SubscriptionRequest::Poll {
+            watch: watch_a.watch.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!matches!(
+        a_result,
+        Ok(SubscriptionOutcome::Delivery(_) | SubscriptionOutcome::Idle { .. })
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while subscriptions.active_watches() != 1 || subscriptions.binding_count() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(owner.state(), ApplicationState::Running);
+    // The legacy unqualified endpoint closes its captured bearer, with an empty
+    // H4 grid acknowledgment, even when no request Content-Type was supplied.
+    let response = client
+        .post(format!("{base}/close"))
+        .header("Authorization", format!("BEARER authToken={b}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    let grid = haystack_core::codecs::codec_for("text/zinc")
+        .unwrap()
+        .decode_grid(&text)
+        .unwrap();
+    assert!(grid.rows.is_empty() && !grid.meta.has("err"));
+    let response = client
+        .get(format!("{base}/about?xeto-version=5"))
+        .header("Authorization", format!("BEARER authToken={b}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    let _ = socket_a.close().await;
+    let _ = socket_b.close().await;
+    owner.close().await.unwrap();
+    owner.terminated().await;
+    assert_eq!(subscriptions.active_watches(), 0);
+    assert_eq!(subscriptions.binding_count(), 0);
+}

@@ -61,7 +61,17 @@ async fn handle(
         .get::<std::sync::Arc<haystack_app::WorkGuard>>()
         .ok_or(ReadError::Closed)?
         .child();
-    let admission = service.begin_admitted(context, guard).await?;
+    let admission = match request
+        .extensions()
+        .get::<haystack_app::SubscriptionSession>()
+    {
+        Some(session) => {
+            service
+                .begin_admitted_session(context, guard, session.clone())
+                .await?
+        }
+        None => service.begin_admitted(context, guard).await?,
+    };
     let (parts, body) = request.into_parts();
     let content_type = parts
         .headers
@@ -84,7 +94,7 @@ async fn handle(
     }
     let bytes = tokio::select! {
         biased;
-        _ = admission.cancelled() => return Err(ReadError::Cancelled),
+        _ = admission.cancelled() => return Err(admission.check().err().unwrap_or(ReadError::Cancelled)),
         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(admission.deadline())) => return Err(ReadError::Deadline),
         result = to_bytes(body, service.limits().max_input_bytes) => result.map_err(|_| ReadError::Budget(BudgetKind::Input))?,
     };

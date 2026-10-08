@@ -1,7 +1,7 @@
 # Pinned Xeto readById admission profile
 
 The native bootstrap profile admits readById and its required type/metadata
-closure; the HTTP profile additionally admits ops and its reachable types/errors from
+closure; the HTTP profile adds the selected nine read/system functions and their reachable types/errors from
 [Project-Haystack/xeto at 873b922451d3ef4c0c9c08ef3daa542f352d69f3](https://github.com/Project-Haystack/xeto/tree/873b922451d3ef4c0c9c08ef3daa542f352d69f3).
 It is a bootstrap subset of `sys` and `sys.api`, **not complete upstream libraries**.
 The pinned build properties say version `5.0.0`, maturity `alpha`, and dependency
@@ -93,28 +93,38 @@ The legacy loader gains no HTTP, Jeto or full-library semantics from this profil
 
 ## Executable HTTP closure
 
-`load_http_pinned()` uses `http-manifest.json`, verifying all nine retained files
-and their exact line selections. It adds the reachable API error types, ApiVersion,
-Number/Int/List carriers and `of`/`unitless` metadata. The ops extension adds only
-`sys::Grid` at sys/types.xeto:145-146, `sys.api::OpInfo` at sys.api/types.xeto:54-73
-and `sys.api::ops` at sys.api/funcs.xeto:88-95. The newly reachable
-AmbiguousFuncErr and MethodNotAllowedErr use errs.xeto:32-39 and :55-59.
-The raw originals, hashes, pin, license and `complete_libraries:false` stay intact.
+`load_http_pinned()` uses `http-manifest.json`, verifying all eleven retained
+files and their exact line selections. The function augmentation selects
+sys.api/funcs.xeto:1-110: readById, readByIds, read, readAll, about, close, ops,
+libs and filetypes. The API result closure adds AboutInfo, OpInfo, LibInfo and
+FiletypeInfo with explicit scalar and collection fitting. `sys::Filter` and
+`sys::Version` retain nominal catalog/revision/qname identity. DateTime, Uri and
+None fit their concrete native variants. ApiVersion remains native digit-only
+Str, including the previously admitted API error contract.
 
-```xeto
-ops: Func <op, noSideEffects> { returns: Grid<of:OpInfo> }
-```
+The complete pinned `sys::TimeZone` declaration has 341 members. Bare enum members
+retain metadata; an explicit `key` overrides the programmatic member name, so
+`gmtPlus1` has effective key `GMT+1`. Unkeyed members use their exact name. Enum
+members are not implicit Marker fields. Admission rejects nullable, typed,
+defaulted, nested, query or duplicate effective-key members, unsupported extension,
+and tables above 4096 keys, 256 bytes per key or 64 KiB total key text. The default
+is not the first member. TimeZone fitting requires exact nominal identity and an
+exact member key; `UTC` fits while `utc` and `America/New_York` do not.
 
-The operation remains a `sys::Funcs` augmentation member with callable qname
-`sys.api::ops`. It accepts no arguments, including no `returns` argument.
-Native result fitting requires a Grid and validates every row against OpInfo:
-required qname/signature Str fields, optional doc Str and noSideEffects Marker.
-A generic Dict result remains unconstrained for readById. Legitimate structural
-row-spec information and extension fields are preserved. Missing closure members,
-unresolved `of` targets, duplicate declarations and unsupported signatures fail
-admission. The profile does not admit unrelated sibling operations or types.
-The [HTTP executable profile](../../../docs/typed-http-read.md) documents the
-application registry and transport policy, which are separate from core admission.
+The unchanged raw timezones.xeto and Enums.md are retained with hashes and
+upstream attribution. Enums.md is checksum-verified evidence, not parsed library
+source. The original pin, license and `complete_libraries:false` stay intact;
+adding this prerequisite does not admit unrelated enums or complete libraries.
+
+All functions remain `sys::Funcs` augmentation members. `close` requires native
+None; null does not fit its native return declaration. Typed result grids validate
+every row against their `of` declaration, including required fields, optional
+fields and List element types. A generic Dict remains unconstrained for readById
+and read. Legitimate structural row-spec information and extension fields remain
+preserved. Missing closure members, unresolved `of` targets, duplicate declarations
+and unsupported signatures fail admission. The [HTTP executable
+profile](../../../docs/typed-http-read.md) documents the application registry and
+transport policy separately from core admission.
 
 ## Independent validation evidence
 

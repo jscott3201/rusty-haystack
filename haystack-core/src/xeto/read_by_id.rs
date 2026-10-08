@@ -22,7 +22,27 @@ use super::spec::{Slot, Spec, spec_from_def};
 pub const READ_BY_ID_UPSTREAM_COMMIT: &str = "873b922451d3ef4c0c9c08ef3daa542f352d69f3";
 const PROFILE: &str = "pinned-xeto-readById";
 const HTTP_PROFILE: &str = "pinned-xeto-readById-http";
-const HTTP_TYPES: &[&str] = &["Number", "Int", "List", "Grid"];
+const HTTP_TYPES: &[&str] = &[
+    "Number", "Int", "List", "Grid", "None", "Uri", "Version", "DateTime", "Enum", "TimeZone",
+    "Filter",
+];
+const HTTP_FUNCTIONS: &[&str] = &[
+    "readByIds",
+    "read",
+    "readAll",
+    "about",
+    "close",
+    "ops",
+    "libs",
+    "filetypes",
+];
+const HTTP_API_TYPES: &[&str] = &[
+    "ApiVersion",
+    "AboutInfo",
+    "OpInfo",
+    "LibInfo",
+    "FiletypeInfo",
+];
 const HTTP_ERRORS: &[&str] = &[
     "ApiErr",
     "AmbiguousFuncErr",
@@ -41,7 +61,7 @@ const HTTP_ERRORS: &[&str] = &[
     "UnsupportedMediaTypeErr",
     "UnsupportedVersionErr",
 ];
-const HTTP_META: &[&str] = &["of", "unitless"];
+const HTTP_META: &[&str] = &["of", "unitless", "key"];
 const HTTP_MANIFEST: &str = include_str!("../../xeto-profiles/read-by-id/http-manifest.json");
 const HTTP_RAW: &[(&str, &str)] = &[
     (
@@ -51,6 +71,14 @@ const HTTP_RAW: &[(&str, &str)] = &[
     (
         "src/xeto/sys.api/types.xeto",
         include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/sys.api/types.xeto"),
+    ),
+    (
+        "src/xeto/sys/timezones.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/sys/timezones.xeto"),
+    ),
+    (
+        "src/xeto/doc.xeto/Enums.md",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/doc.xeto/Enums.md"),
     ),
 ];
 const FUNCTION: &str = "sys.api::readById";
@@ -181,6 +209,7 @@ pub struct AdmittedMetadata {
 #[derive(Debug, Clone)]
 pub struct AdmittedLibrary {
     pub name: String,
+    pub doc: String,
     pub version: String,
     pub maturity: String,
     pub depends: Vec<String>,
@@ -232,6 +261,7 @@ pub struct ReadByIdProfile {
     specs: BTreeMap<String, AdmittedSpec>,
     metadata: BTreeMap<String, AdmittedMetadata>,
     augmentations: Vec<AdmittedAugmentation>,
+    enums: BTreeMap<String, Vec<String>>,
 }
 
 impl ReadByIdProfile {
@@ -333,6 +363,12 @@ impl ReadByIdProfile {
     }
     pub fn augmentations(&self) -> &[AdmittedAugmentation] {
         &self.augmentations
+    }
+
+    /// Exact sorted effective keys of an admitted finite enum. The immutable
+    /// table keeps membership separate from scalar construction defaults.
+    pub fn enum_keys(&self, qname: &str) -> Option<&[String]> {
+        self.enums.get(qname).map(Vec::as_slice)
     }
 
     /// Operations are derived from admitted +Funcs members and their own metadata.
@@ -501,12 +537,52 @@ impl ReadByIdProfile {
         false
     }
 
+    fn nominal_text<'a>(&self, qname: &str, value: &'a Kind) -> Option<&'a str> {
+        match value {
+            Kind::Nominal(n)
+                if n.spec() == qname
+                    && n.catalog() == self.provenance.repository
+                    && n.revision() == self.provenance.commit =>
+            {
+                Some(n.text())
+            }
+            _ => None,
+        }
+    }
+
     fn fits_type(&self, qname: &str, value: &Kind) -> bool {
         if matches!(value, Kind::Null) {
             return false;
         }
         if qname == "sys::Obj" {
             return true;
+        }
+        if let Some(keys) = self.enums.get(qname) {
+            return self
+                .nominal_text(qname, value)
+                .is_some_and(|text| keys.binary_search_by(|key| key.as_str().cmp(text)).is_ok());
+        }
+        if matches!(qname, "sys::Filter" | "sys::Version") {
+            return self.nominal_text(qname, value).is_some_and(|text| {
+                if qname == "sys::Filter" {
+                    return true;
+                }
+                !text.is_empty()
+                    && text
+                        .split('.')
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            });
+        }
+        match qname {
+            "sys::None" => return matches!(value, Kind::None),
+            "sys::Uri" => return matches!(value, Kind::Uri(_)),
+            "sys::DateTime" => {
+                return matches!(value, Kind::DateTime(time) if !time.tz_name.is_empty() && time.tz_name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_+-".contains(&b)));
+            }
+            "sys::Enum" => {
+                return matches!(value, Kind::Nominal(n) if self.enums.contains_key(n.spec()) && self.fits_type(n.spec(), value));
+            }
+            _ => {}
         }
         if let Kind::Dict(row) = value {
             return self.fits_dict(qname, row);
@@ -567,6 +643,7 @@ impl ReadByIdProfile {
         let mut specs = BTreeMap::new();
         let mut metadata = BTreeMap::new();
         let mut augmentations = Vec::new();
+        let mut enums = BTreeMap::new();
         for (source, ast) in parsed {
             let identity = &source.identity;
             match identity.role.as_str() {
@@ -615,6 +692,31 @@ impl ReadByIdProfile {
                         )?;
                     }
                 }
+                "enum" if http => {
+                    reject_pragma(identity, &ast)?;
+                    if identity.library != "sys"
+                        || ast.specs.len() != 1
+                        || ast.specs[0].name != "TimeZone"
+                    {
+                        return Err(resolve_error(
+                            identity,
+                            "TimeZone",
+                            "only complete TimeZone is admitted",
+                        ));
+                    }
+                    let def = &ast.specs[0];
+                    let keys = enum_keys(def, identity)?;
+                    let spec = spec_from_def(def, &identity.library);
+                    enums.insert(spec.qname.clone(), keys);
+                    insert_spec(
+                        &mut specs,
+                        AdmittedSpec {
+                            spec,
+                            source: identity.clone(),
+                            member_of: None,
+                        },
+                    )?;
+                }
                 "errors" | "api-types" if http => {
                     reject_pragma(identity, &ast)?;
                     for def in ast.specs {
@@ -623,7 +725,7 @@ impl ReadByIdProfile {
                             || !(identity.role == "errors"
                                 && HTTP_ERRORS.contains(&def.name.as_str())
                                 || identity.role == "api-types"
-                                    && matches!(def.name.as_str(), "ApiVersion" | "OpInfo"))
+                                    && HTTP_API_TYPES.contains(&def.name.as_str()))
                         {
                             return Err(resolve_error(
                                 identity,
@@ -723,7 +825,8 @@ impl ReadByIdProfile {
                     let mut members = Vec::new();
                     validate_slot_syntax(&def.slots, identity, "+Funcs")?;
                     for member in &def.slots {
-                        if !(member.name == "readById" || http && member.name == "ops")
+                        if !(member.name == "readById"
+                            || http && HTTP_FUNCTIONS.contains(&member.name.as_str()))
                             || member.is_global
                             || member.is_query
                             || member.is_marker
@@ -823,6 +926,24 @@ impl ReadByIdProfile {
                     &entry.source,
                     &entry.spec.qname,
                 )?);
+            }
+            if entry
+                .spec
+                .base
+                .as_ref()
+                .is_some_and(|base| enums.contains_key(base))
+            {
+                return Err(resolve_error(
+                    &entry.source,
+                    &entry.spec.qname,
+                    "enums cannot be extended",
+                ));
+            }
+            if enums.contains_key(&entry.spec.qname) {
+                for slot in &mut entry.spec.slots {
+                    slot.type_ref = Some(entry.spec.qname.clone());
+                    slot.is_marker = false;
+                }
             }
             resolve_slots(
                 &mut entry.spec.slots,
@@ -925,6 +1046,7 @@ impl ReadByIdProfile {
                 name.clone(),
                 AdmittedLibrary {
                     name: name.clone(),
+                    doc: pragma.doc,
                     version: pragma.version,
                     maturity: match pragma.meta.get("maturity") {
                         Some(Kind::Str(v)) => v.clone(),
@@ -951,6 +1073,7 @@ impl ReadByIdProfile {
             specs,
             metadata,
             augmentations,
+            enums,
         };
         for entry in profile.specs.values() {
             if let Some(value) = entry.spec.meta.get("val")
@@ -1086,7 +1209,7 @@ fn extract_sources(
     }
     let mut result = Vec::new();
     for source in &provenance.files {
-        if matches!(source.role.as_str(), "license" | "build") {
+        if matches!(source.role.as_str(), "license" | "build" | "evidence") {
             continue;
         }
         let raw = raw
@@ -1412,7 +1535,7 @@ fn validate_closure(
                 return Err(source_error(HTTP_PROFILE, "missing HTTP carrier"));
             }
         }
-        for name in HTTP_ERRORS.iter().chain([&"ApiVersion", &"OpInfo"]) {
+        for name in HTTP_ERRORS.iter().chain(HTTP_API_TYPES) {
             if !specs.contains_key(&format!("sys.api::{name}")) {
                 return Err(source_error(HTTP_PROFILE, "missing HTTP declaration"));
             }
@@ -1427,7 +1550,32 @@ fn validate_closure(
         let allowed: &[&str] = match entry.spec.qname.as_str() {
             "sys::Func" => &["returns"],
             FUNCTION => &["id", "checked", "returns"],
-            "sys.api::ops" if http => &["returns"],
+            "sys.api::ops" | "sys.api::about" | "sys.api::close" | "sys.api::libs"
+            | "sys.api::filetypes"
+                if http =>
+            {
+                &["returns"]
+            }
+            "sys.api::readByIds" if http => &["ids", "checked", "returns"],
+            "sys.api::read" if http => &["filter", "checked", "returns"],
+            "sys.api::readAll" if http => &["filter", "opts", "returns"],
+            "sys.api::AboutInfo" if http => &[
+                "serverName",
+                "serverTime",
+                "serverBootTime",
+                "tz",
+                "protocolVersions",
+                "productName",
+                "productVersion",
+                "productUri",
+                "vendorName",
+                "vendorUri",
+                "whoami",
+            ],
+            "sys.api::LibInfo" if http => &["name", "version", "doc"],
+            "sys.api::FiletypeInfo" if http => &[
+                "name", "dis", "mime", "fileExt", "fileSpec", "canRead", "canWrite",
+            ],
             "sys.api::OpInfo" if http => &["qname", "doc", "noSideEffects", "signature"],
             "sys.api::ApiErr" if http => &["status", "dis", "errTrace"],
             "sys.api::AmbiguousFuncErr" if http => &["funcName", "candidates"],
@@ -1438,7 +1586,10 @@ fn validate_closure(
             _ => &[],
         };
         for slot in &entry.spec.slots {
-            if !allowed.contains(&slot.name.as_str()) || !slot.children.is_empty() {
+            if !(allowed.contains(&slot.name.as_str())
+                || http && entry.spec.qname == "sys::TimeZone")
+                || !slot.children.is_empty()
+            {
                 return Err(resolve_error(
                     &entry.source,
                     format!("{}.{}", entry.spec.qname, slot.name),
@@ -1582,6 +1733,28 @@ fn decode_default(
                 text.parse()
                     .map_err(|_| resolve_error(source, declaration, "malformed Number default"))?,
             ))),
+            "sys::None" if text == "∅" => Some(Kind::None),
+            "sys::Uri" => Some(Kind::Uri(crate::kinds::Uri::new(text))),
+            "sys::Version" => Some(Kind::Nominal(
+                crate::kinds::NominalScalar::new(
+                    name,
+                    "https://github.com/Project-Haystack/xeto",
+                    READ_BY_ID_UPSTREAM_COMMIT,
+                    text,
+                )
+                .map_err(|_| resolve_error(source, declaration, "invalid Version default"))?,
+            )),
+            "sys::DateTime" => {
+                let (iso, zone) = text.split_once(' ').ok_or_else(|| {
+                    resolve_error(source, declaration, "invalid DateTime default")
+                })?;
+                Some(Kind::DateTime(crate::kinds::HDateTime::new(
+                    chrono::DateTime::parse_from_rfc3339(iso).map_err(|_| {
+                        resolve_error(source, declaration, "invalid DateTime default")
+                    })?,
+                    zone,
+                )))
+            }
             "sys::Str" => Some(Kind::Str(text.clone())),
             "sys::Ref" => Some(Kind::Ref(HRef::from_val(text))),
             "sys::Marker" if text == "✓" => Some(Kind::Marker),
@@ -1623,6 +1796,67 @@ fn decode_slots(
         decode_slots(&mut slot.children, types, schema, source, &qname)?;
     }
     Ok(())
+}
+
+fn enum_keys(
+    def: &super::ast::SpecDef,
+    source: &ProfileSource,
+) -> Result<Vec<String>, ProfileError> {
+    if def.is_augmentation
+        || !matches!(def.base.as_deref(), Some("Enum" | "sys::Enum"))
+        || def.default.is_some()
+        || def.meta.contains_key("val")
+        || def.slots.is_empty()
+        || def.slots.len() > 4096
+    {
+        return Err(resolve_error(
+            source,
+            &def.name,
+            "invalid or oversized closed enum",
+        ));
+    }
+    let mut names = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    let mut bytes = 0usize;
+    for slot in &def.slots {
+        if !names.insert(&slot.name)
+            || slot.type_ref.is_some()
+            || !slot.is_marker
+            || slot.is_maybe
+            || slot.meta.contains_key("maybe")
+            || slot.default.is_some()
+            || slot.meta.contains_key("val")
+            || slot.is_global
+            || slot.is_query
+            || !slot.children.is_empty()
+        {
+            return Err(resolve_error(
+                source,
+                &slot.name,
+                "invalid enum member shape",
+            ));
+        }
+        let key = match slot.meta.get("key") {
+            None => slot.name.as_str(),
+            Some(Kind::Str(key)) => key.as_str(),
+            _ => {
+                return Err(resolve_error(
+                    source,
+                    &slot.name,
+                    "enum key must be a String",
+                ));
+            }
+        };
+        bytes = bytes.saturating_add(key.len());
+        if key.is_empty() || key.len() > 256 || bytes > 64 * 1024 || !keys.insert(key.to_owned()) {
+            return Err(resolve_error(
+                source,
+                &slot.name,
+                "duplicate or oversized effective enum key",
+            ));
+        }
+    }
+    Ok(keys.into_iter().collect())
 }
 
 fn validate_slot_syntax(
@@ -1968,6 +2202,56 @@ mod tests {
             .1 = "changed upstream source";
         assert!(
             matches!(extract_sources(&provenance, &raw), Err(ProfileError::Source { message, .. }) if message == "SHA-256 mismatch")
+        );
+    }
+
+    #[test]
+    fn finite_enum_admission_rejects_invalid_members_keys_and_extension() {
+        let source = ProfileSource {
+            path: "literal-enum.xeto".into(),
+            sha256: String::new(),
+            role: "enum".into(),
+            library: "test".into(),
+            lines: vec![],
+        };
+        for (text, expected) in [
+            ("Suit: Enum { clubs, diamonds }", vec!["clubs", "diamonds"]),
+            (
+                r#"Suit: Enum { clubs <key:"Clubs">, diamonds }"#,
+                vec!["Clubs", "diamonds"],
+            ),
+        ] {
+            let ast = parse_xeto(text).unwrap();
+            assert_eq!(enum_keys(&ast.specs[0], &source).unwrap(), expected);
+        }
+        for text in [
+            r#"Suit: Enum { a <key:"same">, b <key:"same"> }"#,
+            r#"Suit: Enum { a <key:"b">, b }"#,
+            "Suit: Enum { a, a }",
+            "Suit: Enum { a: Str }",
+            "Suit: Enum { a? }",
+            "Suit: Enum { *a }",
+            "Suit: Enum { a: Query<of:Str> }",
+            "Suit: Enum { a: Dict { child: Str } }",
+            r#"Suit: Enum { a: Str "a" }"#,
+            "Suit: Enum { a <key:7> }",
+            r#"Suit: Enum <val:"a"> { a }"#,
+            "Suit: OtherEnum { a }",
+        ] {
+            if let Ok(ast) = parse_xeto(text) {
+                assert!(enum_keys(&ast.specs[0], &source).is_err(), "{text}");
+            }
+        }
+        let provenance = serde_json::from_str(HTTP_MANIFEST).unwrap();
+        let raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+        let mut sources = extract_sources(&provenance, &raw).unwrap();
+        let source = sources
+            .iter_mut()
+            .find(|source| source.identity.role == "types")
+            .unwrap();
+        source.text = source.text.replace("Str: Scalar", "Str: TimeZone");
+        assert!(
+            matches!(ReadByIdProfile::admit(provenance, sources), Err(ProfileError::Resolve { message, .. }) if message.contains("enums cannot be extended"))
         );
     }
 }

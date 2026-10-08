@@ -167,6 +167,17 @@ impl ApplicationBuilder {
             shutdown: ShutdownPolicy::default(),
         })
     }
+    /// Configure the bounded label reported by typed `about`. The boot timestamp
+    /// is captured once when this owner starts on its selected runtime.
+    pub fn server_name(self, name: impl Into<String>) -> Result<Self, ReadError> {
+        self.parts
+            .as_ref()
+            .expect("unconsumed builder")
+            .application
+            .reads
+            .set_server_name(name.into())?;
+        Ok(self)
+    }
     pub fn handle(&self) -> ApplicationHandle {
         self.parts
             .as_ref()
@@ -299,6 +310,7 @@ impl ApplicationBuilder {
             ));
         }
         let mut parts = self.parts.take().expect("unconsumed builder");
+        parts.application.reads.start_system_clock();
         if let Some(subscriptions) = parts.application.subscription_service() {
             parts
                 .resources

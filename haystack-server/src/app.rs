@@ -586,6 +586,9 @@ fn required_permission(path: &str) -> Option<&'static str> {
     Some("read")
 }
 
+#[derive(Clone, Copy)]
+struct BuiltinSessionGuard;
+
 // The built-in default fallback participates in typed dispatch. Custom
 // authenticated routers use only auth_middleware and retain their own fallback.
 async fn builtin_auth_middleware(
@@ -595,9 +598,12 @@ async fn builtin_auth_middleware(
 ) -> Response {
     req.extensions_mut()
         .insert(ops::shared_read::ReadStarted(std::time::Instant::now()));
-    if crate::typed_http::selected(&req) {
+    if crate::typed_http::selected(&req)
+        || (req.uri().path() == "/api/close" && state.auth.is_enabled())
+    {
         return crate::typed_http::handle(State(state), req).await;
     }
+    req.extensions_mut().insert(BuiltinSessionGuard);
     auth_middleware(State(state), req, next).await
 }
 
@@ -655,8 +661,31 @@ async fn auth_middleware(
 
                         // Inject AuthUser into request extensions
                         req.extensions_mut().insert(auth_user);
-                        req.extensions_mut().insert(session);
-                        next.run(req).await
+                        req.extensions_mut().insert(session.clone());
+                        if req.extensions().get::<BuiltinSessionGuard>().is_none() {
+                            return next.run(req).await;
+                        }
+                        let response = tokio::select! {
+                            biased;
+                            _ = session.closed() => return crate::error::HaystackError::forbidden("session closed").into_response(),
+                            response = next.run(req) => response,
+                        };
+                        if !session.is_active() {
+                            return crate::error::HaystackError::forbidden("session closed")
+                                .into_response();
+                        }
+                        let (parts, body) = response.into_parts();
+                        use futures_util::StreamExt as _;
+                        let body = body.into_data_stream().map(move |chunk| {
+                            if !session.is_active() {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    "session closed",
+                                ));
+                            }
+                            chunk.map_err(std::io::Error::other)
+                        });
+                        Response::from_parts(parts, Body::from_stream(body))
                     }
                     None => crate::error::HaystackError::new(
                         "invalid or expired auth token",

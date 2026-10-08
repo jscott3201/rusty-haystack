@@ -43,16 +43,26 @@ fn pinned_ops_closure_retains_identity_and_zero_argument_contract() {
             .operations()
             .map(|op| op.spec.qname.as_str())
             .collect::<Vec<_>>(),
-        [OPS, "sys.api::readById"]
+        [
+            "sys.api::about",
+            "sys.api::close",
+            "sys.api::filetypes",
+            "sys.api::libs",
+            OPS,
+            "sys.api::read",
+            "sys.api::readAll",
+            "sys.api::readById",
+            "sys.api::readByIds"
+        ]
     );
     for name in ["sys.api::OpInfo", "sys::Grid"] {
         assert!(profile.declaration(name).is_some());
     }
     for name in [
-        "sys.api::AboutInfo",
-        "sys.api::about",
-        "sys.api::close",
-        "sys.api::LibInfo",
+        "sys::Spec",
+        "sys::Entity",
+        "sys.api::watchPoll",
+        "sys.api::pointWrite",
     ] {
         assert!(profile.declaration(name).is_none());
     }
