@@ -232,7 +232,7 @@ impl PyDef {
     /// Full meta tags as HDict.
     #[getter]
     fn tags(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyHDict::from_core(&self.inner.tags)
+        Ok(PyHDict::from_core(&self.inner.tags)?
             .into_pyobject(py)?
             .into_any()
             .unbind())

@@ -219,8 +219,10 @@ impl PyHDict {
 }
 
 impl PyHDict {
-    pub fn from_core(d: &data::HDict) -> Self {
-        Self { inner: d.clone() }
+    pub fn from_core(d: &data::HDict) -> PyResult<Self> {
+        haystack_core::kinds::projection::ensure_h4_dict(d)
+            .map_err(crate::convert::unsupported_value)?;
+        Ok(Self { inner: d.clone() })
     }
 
     pub fn to_core(&self) -> data::HDict {
@@ -279,7 +281,7 @@ impl PyHCol {
     /// Column metadata as an HDict.
     #[getter]
     fn meta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyHDict::from_core(&self.meta)
+        Ok(PyHDict::from_core(&self.meta)?
             .into_pyobject(py)?
             .into_any()
             .unbind())
@@ -295,11 +297,13 @@ impl PyHCol {
 }
 
 impl PyHCol {
-    pub fn from_core(c: &data::HCol) -> Self {
-        Self {
+    pub fn from_core(c: &data::HCol) -> PyResult<Self> {
+        haystack_core::kinds::projection::ensure_h4_dict(&c.meta)
+            .map_err(crate::convert::unsupported_value)?;
+        Ok(Self {
             name: c.name.clone(),
             meta: c.meta.clone(),
-        }
+        })
     }
 }
 
@@ -367,12 +371,17 @@ impl PyHGrid {
         self.inner
             .rows
             .iter()
-            .map(|r| Ok(PyHDict::from_core(r).into_pyobject(py)?.into_any().unbind()))
+            .map(|r| {
+                Ok(PyHDict::from_core(r)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
             .collect()
     }
 
     /// Return all columns as a list of HCol.
-    fn cols(&self) -> Vec<PyHCol> {
+    fn cols(&self) -> PyResult<Vec<PyHCol>> {
         self.inner.cols.iter().map(PyHCol::from_core).collect()
     }
 
@@ -388,8 +397,8 @@ impl PyHGrid {
 
     /// Look up a column by name. Returns HCol or None.
     #[pyo3(signature = (name,))]
-    fn col(&self, name: &str) -> Option<PyHCol> {
-        self.inner.col(name).map(PyHCol::from_core)
+    fn col(&self, name: &str) -> PyResult<Option<PyHCol>> {
+        self.inner.col(name).map(PyHCol::from_core).transpose()
     }
 
     /// Return column names as a list of strings.
@@ -404,7 +413,7 @@ impl PyHGrid {
 
     /// Return the grid metadata as an HDict.
     fn meta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyHDict::from_core(&self.inner.meta)
+        Ok(PyHDict::from_core(&self.inner.meta)?
             .into_pyobject(py)?
             .into_any()
             .unbind())
@@ -423,7 +432,7 @@ impl PyHGrid {
             ));
         }
         match self.inner.row(idx as usize) {
-            Some(row) => Ok(PyHDict::from_core(row)
+            Some(row) => Ok(PyHDict::from_core(row)?
                 .into_pyobject(py)?
                 .into_any()
                 .unbind()),
@@ -458,8 +467,10 @@ impl PyHGrid {
 }
 
 impl PyHGrid {
-    pub fn from_core(g: &data::HGrid) -> Self {
-        Self { inner: g.clone() }
+    pub fn from_core(g: &data::HGrid) -> PyResult<Self> {
+        haystack_core::kinds::projection::ensure_h4_grid(g)
+            .map_err(crate::convert::unsupported_value)?;
+        Ok(Self { inner: g.clone() })
     }
 
     pub fn to_core(&self) -> data::HGrid {
@@ -486,7 +497,7 @@ impl PyGridRowIter {
             let row = &self.rows[self.index];
             self.index += 1;
             Ok(Some(
-                PyHDict::from_core(row)
+                PyHDict::from_core(row)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind(),
@@ -623,8 +634,12 @@ impl PyHList {
 }
 
 impl PyHList {
-    pub fn from_core(l: &data::HList) -> Self {
-        Self { inner: l.clone() }
+    pub fn from_core(l: &data::HList) -> PyResult<Self> {
+        for value in &l.0 {
+            haystack_core::kinds::projection::ensure_h4(value)
+                .map_err(crate::convert::unsupported_value)?;
+        }
+        Ok(Self { inner: l.clone() })
     }
 
     pub fn to_core(&self) -> data::HList {

@@ -7,9 +7,9 @@
 //!
 //! | Module | Description |
 //! |--------|-------------|
-//! | [`kinds`] | Central value type ([`Kind`](kinds::Kind)) with 15 scalar types (Marker, Number, Str, Ref, etc.) |
+//! | [`kinds`] | Central semantic value type ([`Kind`](kinds::Kind)), H4 projection and typed scalars |
 //! | [`data`] | Collection types: [`HDict`](data::HDict) (tag map), [`HGrid`](data::HGrid) (table), [`HCol`](data::HCol), [`HList`](data::HList) |
-//! | [`codecs`] | Wire format codecs: Zinc, Trio, JSON, Haystack JSON v3, CSV |
+//! | [`codecs`] | H4 wire codecs plus the project-owned versioned [`typed`](codecs::typed) payload |
 //! | [`filter`] | Haystack filter expression parser and evaluator (`site and area > 1000`) |
 //! | [`graph`] | In-memory entity graph with bitmap tag indexes, B-tree value indexes, ref adjacency, and change tracking |
 //! | [`ontology`] | Haystack 4 def/lib/namespace system with taxonomy, validation, and Xeto support |

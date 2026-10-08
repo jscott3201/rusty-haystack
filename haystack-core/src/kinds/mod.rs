@@ -1,6 +1,10 @@
-//! Haystack type system — the [`Kind`] enum and its 15 scalar types.
+//! Shared semantic values — the [`Kind`] enum, H4 scalars and rich typed values.
 //!
-//! Every value in the Haystack data model is represented as a [`Kind`] variant:
+//! Existing H4 values retain their forms below. [`Kind::Int`], [`Kind::Float`],
+//! [`Kind::None`], [`Kind::Buf`] and [`Kind::Nominal`] require explicit H4
+//! projection or the project-owned [`crate::codecs::typed`] payload.
+//!
+//! Existing H4 variants:
 //!
 //! | Variant | Rust Type | Zinc Example |
 //! |---------|-----------|--------------|
@@ -49,6 +53,9 @@ pub use xstr::XStr;
 mod datetime;
 pub use datetime::HDateTime;
 
+mod rich;
+pub use rich::{Float, NominalError, NominalScalar};
+
 mod kind;
 pub use kind::Kind;
 
@@ -62,3 +69,9 @@ mod tz;
 #[cfg(feature = "chrono-tz")]
 pub use tz::resolve_local_offset;
 pub use tz::{tz_for, tz_map};
+
+pub mod projection;
+pub use projection::{
+    H4Projection, ProjectionError, ProjectionIssue, ProjectionPolicy, ProjectionReason, ValuePath,
+    ValuePathSegment,
+};

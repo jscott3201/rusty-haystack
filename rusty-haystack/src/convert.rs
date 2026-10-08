@@ -10,9 +10,19 @@ use crate::kinds::{
     PyCoord, PyHDateTime, PyMarker, PyNA, PyNumber, PyRef_, PyRemove, PySymbol, PyUri, PyXStr,
 };
 
+pub(crate) fn unsupported_value(error: haystack_core::codecs::CodecError) -> PyErr {
+    pyo3::exceptions::PyTypeError::new_err(error.to_string())
+}
+
 /// Convert a Rust Kind to a Python object.
 pub fn kind_to_py(py: Python<'_>, kind: &Kind) -> PyResult<Py<PyAny>> {
+    haystack_core::kinds::projection::ensure_h4(kind).map_err(unsupported_value)?;
     match kind {
+        Kind::Int(_) | Kind::Float(_) | Kind::None | Kind::Buf(_) | Kind::Nominal(_) => {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "typed value is not supported by the H4 Python mapping",
+            ))
+        }
         Kind::Null => Ok(py.None()),
         Kind::Marker => Ok(PyMarker::new().into_pyobject(py)?.into_any().unbind()),
         Kind::NA => Ok(PyNA::new().into_pyobject(py)?.into_any().unbind()),
@@ -60,13 +70,19 @@ pub fn kind_to_py(py: Python<'_>, kind: &Kind) -> PyResult<Py<PyAny>> {
         Kind::XStr(x) => Ok(PyXStr::from_core(x).into_pyobject(py)?.into_any().unbind()),
         Kind::List(items) => {
             let hlist = haystack_core::data::HList::from_vec(items.clone());
-            Ok(PyHList::from_core(&hlist)
+            Ok(PyHList::from_core(&hlist)?
                 .into_pyobject(py)?
                 .into_any()
                 .unbind())
         }
-        Kind::Dict(d) => Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()),
-        Kind::Grid(g) => Ok(PyHGrid::from_core(g).into_pyobject(py)?.into_any().unbind()),
+        Kind::Dict(d) => Ok(PyHDict::from_core(d)?
+            .into_pyobject(py)?
+            .into_any()
+            .unbind()),
+        Kind::Grid(g) => Ok(PyHGrid::from_core(g)?
+            .into_pyobject(py)?
+            .into_any()
+            .unbind()),
     }
 }
 
@@ -191,4 +207,63 @@ pub fn py_to_kind(obj: &Bound<'_, PyAny>) -> PyResult<Kind> {
         "Cannot convert Python type '{}' to Haystack Kind",
         obj.get_type().name()?
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::PyHCol;
+    use haystack_core::data::{HCol, HDict, HGrid, HList};
+    use haystack_core::kinds::{Float, NominalScalar};
+
+    #[test]
+    fn rich_values_and_all_container_boundaries_raise_type_error() {
+        Python::initialize();
+        Python::attach(|py| {
+            for value in [
+                Kind::Int(i64::MAX),
+                Kind::Float(Float::from_bits(0x7ff8000000000001)),
+                Kind::None,
+                Kind::Buf(vec![0, 255]),
+                Kind::Nominal(NominalScalar::new("example::Serial", "A", "r1", "00042").unwrap()),
+            ] {
+                let assert_type_error = |error: PyErr| {
+                    assert!(error.is_instance_of::<pyo3::exceptions::PyTypeError>(py))
+                };
+                assert_type_error(kind_to_py(py, &value).err().unwrap());
+                let mut dict = HDict::new();
+                dict.set("nested", Kind::List(vec![value.clone()]));
+                assert_type_error(PyHDict::from_core(&dict).err().unwrap());
+                assert_type_error(
+                    PyHList::from_core(&HList::from_vec(vec![value]))
+                        .err()
+                        .unwrap(),
+                );
+                assert_type_error(
+                    PyHCol::from_core(&HCol::with_meta("v", dict.clone()))
+                        .err()
+                        .unwrap(),
+                );
+                for grid in [
+                    HGrid::from_parts(dict.clone(), vec![], vec![]),
+                    HGrid::from_parts(
+                        HDict::new(),
+                        vec![HCol::with_meta("v", dict.clone())],
+                        vec![],
+                    ),
+                    HGrid::from_parts(HDict::new(), vec![], vec![dict.clone()]),
+                ] {
+                    assert_type_error(PyHGrid::from_core(&grid).err().unwrap());
+                    assert_type_error(kind_to_py(py, &Kind::Grid(Box::new(grid))).err().unwrap());
+                }
+                assert_type_error(kind_to_py(py, &Kind::Dict(Box::new(dict))).err().unwrap());
+            }
+            assert!(kind_to_py(py, &Kind::Null).unwrap().is_none(py));
+            assert_eq!(py_to_kind(py.None().bind(py)).unwrap(), Kind::Null);
+            assert!(matches!(
+                py_to_kind(&42_i64.into_pyobject(py).unwrap()).unwrap(),
+                Kind::Number(_)
+            ));
+        });
+    }
 }

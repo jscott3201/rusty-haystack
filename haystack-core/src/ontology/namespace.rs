@@ -622,13 +622,8 @@ impl DefNamespace {
             .get(lib_name)
             .ok_or_else(|| format!("library '{}' not found", lib_name))?;
         let specs: Vec<&crate::xeto::Spec> = self.specs(Some(lib_name));
-        Ok(crate::xeto::export::export_lib(
-            lib_name,
-            &lib.version,
-            &lib.doc,
-            &lib.depends,
-            &specs,
-        ))
+        crate::xeto::export::export_lib(lib_name, &lib.version, &lib.doc, &lib.depends, &specs)
+            .map_err(|e| e.to_string())
     }
 
     /// Save a library to a file on disk as Xeto text.

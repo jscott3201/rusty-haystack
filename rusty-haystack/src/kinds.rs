@@ -190,15 +190,14 @@ impl PyNumber {
 
     fn __hash__(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.val.to_bits().hash(&mut hasher);
-        self.unit.hash(&mut hasher);
+        self.to_core().hash(&mut hasher);
         hasher.finish()
     }
 
     fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
         match op {
-            CompareOp::Eq => Ok(self.val == other.val && self.unit == other.unit),
-            CompareOp::Ne => Ok(self.val != other.val || self.unit != other.unit),
+            CompareOp::Eq => Ok(self.to_core() == other.to_core()),
+            CompareOp::Ne => Ok(self.to_core() != other.to_core()),
             CompareOp::Lt => {
                 if self.unit != other.unit {
                     return Ok(false);
@@ -512,15 +511,14 @@ impl PyCoord {
 
     fn __hash__(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.lat.to_bits().hash(&mut hasher);
-        self.lng.to_bits().hash(&mut hasher);
+        self.to_core().hash(&mut hasher);
         hasher.finish()
     }
 
     fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
         match op {
-            CompareOp::Eq => Ok(self.lat == other.lat && self.lng == other.lng),
-            CompareOp::Ne => Ok(self.lat != other.lat || self.lng != other.lng),
+            CompareOp::Eq => Ok(self.to_core() == other.to_core()),
+            CompareOp::Ne => Ok(self.to_core() != other.to_core()),
             _ => Ok(false),
         }
     }
