@@ -8,13 +8,22 @@
 //! compatibility API. Pure `EntityGraph` remains a trusted in-process API.
 mod budget;
 mod history;
+mod history_admission;
+mod history_mutation;
+mod history_mutation_wire;
 mod history_provider;
+pub use history_mutation_wire::HistoryMutationWireOperation;
 mod history_range;
 mod history_store;
 pub use haystack_core::codecs::history::*;
+pub use haystack_core::codecs::history_mutation::{
+    HistoryOperationIdentity, HistoryReceiptQualification, HistoryWriteOutcome,
+    HistoryWriteReceipt, HistoryWriteRejection, HistoryWriteRequest, HistoryWriteUnknown,
+};
 pub use history::*;
+pub use history_mutation::*;
 pub use history_provider::*;
-pub use history_store::HisStore;
+pub use history_store::{HisStore, HistoryChangeRecord, HistoryStoreLimits};
 mod entity_wire;
 mod feed;
 mod mutation;

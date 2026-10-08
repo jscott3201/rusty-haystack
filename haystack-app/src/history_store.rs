@@ -1,20 +1,49 @@
-//! Generation-checked memory history. Sessions retain one point handle and a
-//! cursor, never a range snapshot; copying happens only in a requested batch.
+//! One in-memory history authority. Publication lock order is policy -> graph
+//! read -> authority -> point. Native writes/reset use authority -> point only;
+//! read sessions retain a point handle and never acquire authority while held.
+use crate::history_mutation::{HistoryBinding, HistoryRecord};
 use crate::history_provider::*;
 use chrono::{DateTime, FixedOffset};
 use haystack_core::{
-    codecs::history::{HistoryCapabilities, HistoryReason, HistoryState, HistoryTerminal},
+    codecs::{
+        history::{HistoryCapabilities, HistoryReason, HistoryState, HistoryTerminal},
+        history_mutation::HistoryOperationIdentity,
+    },
     kinds::Kind,
 };
-use parking_lot::RwLock;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use parking_lot::{Mutex, RwLock};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 const MAX_ITEMS_PER_SERIES: usize = 1_000_000;
-struct Series {
-    incarnation: [u8; 16],
-    generation: u64,
-    items: Vec<HisItem>,
-    evicted: Option<DateTime<FixedOffset>>,
+#[derive(Debug, Clone)]
+pub struct HistoryStoreLimits {
+    pub max_items_per_point: usize,
+    pub max_points: usize,
+    pub receipt_capacity: usize,
+    pub receipt_bytes: usize,
+    pub change_capacity: usize,
+}
+impl Default for HistoryStoreLimits {
+    fn default() -> Self {
+        Self {
+            max_items_per_point: MAX_ITEMS_PER_SERIES,
+            max_points: 4096,
+            receipt_capacity: 1024,
+            receipt_bytes: 64 * 1024 * 1024,
+            change_capacity: 4096,
+        }
+    }
+}
+#[derive(Clone)]
+pub(crate) struct Series {
+    pub(crate) incarnation: [u8; 16],
+    pub(crate) generation: u64,
+    pub(crate) items: Vec<HisItem>,
+    pub(crate) evicted: Option<DateTime<FixedOffset>>,
 }
 impl Default for Series {
     fn default() -> Self {
@@ -26,16 +55,43 @@ impl Default for Series {
         }
     }
 }
-type Points = Arc<RwLock<HashMap<String, Arc<RwLock<Series>>>>>;
+/// Required bounded in-process publication record. This is not a public stream
+/// protocol, nor a promise to retain all historical values or records forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryChangeRecord {
+    pub sequence: u64,
+    pub point: String,
+    pub before: HistoryState,
+    pub after: HistoryState,
+    pub submitted_samples: u64,
+    pub unique_samples: u64,
+    pub retained_samples: u64,
+    pub evicted_samples: u64,
+    pub evicted_through: Option<DateTime<FixedOffset>>,
+    /// None denotes a trusted native write or explicit point reset.
+    pub operation: Option<HistoryOperationIdentity>,
+}
+pub(crate) struct AuthorityState {
+    pub(crate) points: HashMap<String, Arc<RwLock<Series>>>,
+    pub(crate) receipts: HashMap<HistoryBinding, HistoryRecord>,
+    pub(crate) receipt_bytes: usize,
+    pub(crate) changes: VecDeque<HistoryChangeRecord>,
+    pub(crate) sequence: u64,
+}
+pub(crate) struct HistoryStoreInner {
+    pub(crate) authority: [u8; 16],
+    pub(crate) limits: HistoryStoreLimits,
+    pub(crate) state: Mutex<AuthorityState>,
+}
+/// Retain this handle to preserve series, incarnation/generation and receipts
+/// together. A fresh store has a fresh authority; none of this survives a crash.
 #[derive(Clone)]
 pub struct HisStore {
-    points: Points,
-    authority: [u8; 16],
-    capacity: usize,
+    pub(crate) inner: Arc<HistoryStoreInner>,
 }
 impl Default for HisStore {
     fn default() -> Self {
-        Self::with_retention(MAX_ITEMS_PER_SERIES).expect("positive default retention")
+        Self::with_limits(HistoryStoreLimits::default()).expect("valid memory history defaults")
     }
 }
 impl HisStore {
@@ -43,32 +99,164 @@ impl HisStore {
         Self::default()
     }
     pub fn with_retention(max_items_per_point: usize) -> Result<Self, HistoryProviderError> {
-        if max_items_per_point == 0 || max_items_per_point > MAX_ITEMS_PER_SERIES {
-            return Err(HistoryProviderError::Limit);
-        }
-        Ok(Self {
-            points: Arc::new(RwLock::new(HashMap::new())),
-            authority: rand::random(),
-            capacity: max_items_per_point,
+        Self::with_limits(HistoryStoreLimits {
+            max_items_per_point,
+            ..HistoryStoreLimits::default()
         })
     }
-    /// Trusted in-process write. Duplicate timestamps use the last input value.
-    /// Any nonempty successful write advances this point's generation once.
+    pub fn with_limits(limits: HistoryStoreLimits) -> Result<Self, HistoryProviderError> {
+        if limits.max_items_per_point == 0
+            || limits.max_items_per_point > MAX_ITEMS_PER_SERIES
+            || limits.max_points == 0
+            || limits.max_points > 100_000
+            || limits.receipt_capacity == 0
+            || limits.receipt_capacity > 100_000
+            || limits.receipt_bytes == 0
+            || limits.receipt_bytes > 256 * 1024 * 1024
+            || limits.change_capacity == 0
+            || limits.change_capacity > 100_000
+        {
+            return Err(HistoryProviderError::Limit);
+        }
+        let mut changes = VecDeque::new();
+        // Reserving the finite ledger once makes publication allocation-free.
+        changes
+            .try_reserve_exact(limits.change_capacity)
+            .map_err(|_| HistoryProviderError::Limit)?;
+        Ok(Self {
+            inner: Arc::new(HistoryStoreInner {
+                authority: rand::random(),
+                limits,
+                state: Mutex::new(AuthorityState {
+                    points: HashMap::new(),
+                    receipts: HashMap::new(),
+                    receipt_bytes: 0,
+                    changes,
+                    sequence: 0,
+                }),
+            }),
+        })
+    }
+    pub fn authority(&self) -> [u8; 16] {
+        self.inner.authority
+    }
+    pub fn shares_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+    pub fn receipt_count(&self) -> usize {
+        self.inner.state.lock().receipts.len()
+    }
+    pub fn point_count(&self) -> usize {
+        self.inner.state.lock().points.len()
+    }
+    /// Trusted in-process fixture/inspection view of the bounded change ledger.
+    pub fn retained_changes(&self) -> Vec<HistoryChangeRecord> {
+        self.inner.state.lock().changes.iter().cloned().collect()
+    }
+    pub(crate) fn point_in(
+        &self,
+        state: &mut AuthorityState,
+        id: &str,
+    ) -> Result<Arc<RwLock<Series>>, HistoryProviderError> {
+        if id.is_empty() || id.len() > 256 {
+            return Err(HistoryProviderError::Limit);
+        }
+        if let Some(point) = state.points.get(id) {
+            return Ok(point.clone());
+        }
+        if state.points.len() >= self.inner.limits.max_points {
+            return Err(HistoryProviderError::Limit);
+        }
+        state
+            .points
+            .try_reserve(1)
+            .map_err(|_| HistoryProviderError::Limit)?;
+        let point = Arc::new(RwLock::new(Series::default()));
+        state.points.insert(id.to_owned(), point.clone());
+        Ok(point)
+    }
+    /// Trusted observation, allocating at most one bounded empty point identity.
+    pub fn state(&self, id: &str) -> Result<HistoryState, HistoryProviderError> {
+        let mut state = self.inner.state.lock();
+        let point = self.point_in(&mut state, id)?;
+        let series = point.read();
+        Ok(self.series_state(&series))
+    }
+    pub(crate) fn series_state(&self, series: &Series) -> HistoryState {
+        HistoryState {
+            authority: self.authority(),
+            incarnation: series.incarnation,
+            generation: series.generation,
+        }
+    }
+    pub(crate) fn append_change(&self, state: &mut AuthorityState, change: HistoryChangeRecord) {
+        if state.changes.len() == self.inner.limits.change_capacity {
+            state.changes.pop_front();
+        }
+        state.sequence = change.sequence;
+        state.changes.push_back(change);
+    }
+    /// Explicit trusted history reset, independent of graph replacement. The
+    /// same point handle receives a newly minted incarnation; old plans/sessions
+    /// cannot revive previous state. Recognized receipts remain in this authority.
+    pub fn reset_point(&self, id: &str) -> Result<HistoryState, HistoryProviderError> {
+        let mut state = self.inner.state.lock();
+        let sequence = state
+            .sequence
+            .checked_add(1)
+            .ok_or(HistoryProviderError::Exhausted)?;
+        let point = self.point_in(&mut state, id)?;
+        let mut series = point.write();
+        let before = self.series_state(&series);
+        let next = Series::default();
+        let after = self.series_state(&next);
+        let change = HistoryChangeRecord {
+            sequence,
+            point: id.to_owned(),
+            before,
+            after,
+            submitted_samples: 0,
+            unique_samples: 0,
+            retained_samples: 0,
+            evicted_samples: series.items.len() as u64,
+            evicted_through: series.items.last().map(|item| item.ts),
+            operation: None,
+        };
+        *series = next;
+        self.append_change(&mut state, change);
+        Ok(after)
+    }
+    /// Trusted native write. A nonempty write advances the same generation and
+    /// change ledger once. Empty native writes have no effect or allocation.
+    /// This compatibility API does not perform scoped schema/policy admission.
     pub fn write(&self, id: &str, items: Vec<HisItem>) -> Result<(), HistoryProviderError> {
         if items.is_empty() {
             return Ok(());
         }
-        let point = self
-            .points
-            .write()
-            .entry(id.to_owned())
-            .or_default()
-            .clone();
+        let mut state = self.inner.state.lock();
+        let sequence = state
+            .sequence
+            .checked_add(1)
+            .ok_or(HistoryProviderError::Exhausted)?;
+        let point = self.point_in(&mut state, id)?;
         let mut series = point.write();
+        let before = self.series_state(&series);
         let generation = series
             .generation
             .checked_add(1)
             .ok_or(HistoryProviderError::Exhausted)?;
+        let submitted_samples = items.len() as u64;
+        let mut instants = items.iter().map(|item| item.ts).collect::<Vec<_>>();
+        instants.sort_unstable();
+        instants.dedup();
+        // Native compatibility keeps the existing allocation behavior: reserve
+        // before effects, then move incoming values under the publication locks.
+        // No full series clone is needed for this trusted writer.
+        series
+            .items
+            .try_reserve(items.len())
+            .map_err(|_| HistoryProviderError::Limit)?;
+        let point_id = id.to_owned();
         for item in items {
             match series
                 .items
@@ -78,24 +266,31 @@ impl HisStore {
                 Err(index) => series.items.insert(index, item),
             }
         }
-        let excess = series.items.len().saturating_sub(self.capacity);
-        if excess > 0 {
-            let through = series.items[excess - 1].ts;
-            series.evicted = Some(series.evicted.map_or(through, |old| old.max(through)));
-            series.items.drain(..excess);
-        }
+        let evicted_samples = trim(&mut series, self.inner.limits.max_items_per_point);
         series.generation = generation;
+        let change = HistoryChangeRecord {
+            sequence,
+            point: point_id,
+            before,
+            after: self.series_state(&series),
+            submitted_samples,
+            unique_samples: instants.len() as u64,
+            retained_samples: series.items.len() as u64,
+            evicted_samples: evicted_samples as u64,
+            evicted_through: series.evicted,
+            operation: None,
+        };
+        self.append_change(&mut state, change);
         Ok(())
     }
-    /// Unbounded trusted native compatibility read; neither authorized nor used
-    /// by the bounded service. Its legacy end remains inclusive.
+    /// Unbounded trusted compatibility read; legacy end is inclusive.
     pub fn read(
         &self,
         id: &str,
         start: Option<DateTime<FixedOffset>>,
         end: Option<DateTime<FixedOffset>>,
     ) -> Vec<HisItem> {
-        let point = self.points.read().get(id).cloned();
+        let point = self.inner.state.lock().points.get(id).cloned();
         let Some(point) = point else {
             return vec![];
         };
@@ -108,14 +303,21 @@ impl HisStore {
             .collect()
     }
     pub fn len(&self, id: &str) -> usize {
-        self.points
-            .read()
-            .get(id)
-            .map_or(0, |point| point.read().items.len())
+        let point = self.inner.state.lock().points.get(id).cloned();
+        point.map_or(0, |point| point.read().items.len())
     }
     pub fn is_empty(&self, id: &str) -> bool {
         self.len(id) == 0
     }
+}
+pub(crate) fn trim(series: &mut Series, capacity: usize) -> usize {
+    let excess = series.items.len().saturating_sub(capacity);
+    if excess > 0 {
+        let through = series.items[excess - 1].ts;
+        series.evicted = Some(series.evicted.map_or(through, |old| old.max(through)));
+        series.items.drain(..excess);
+    }
+    excess
 }
 /// Conservative source allocation measure, before any sample clone. Unsupported
 /// rich values are rejected without traversal or projection/type erasure.
@@ -142,47 +344,30 @@ fn open_memory(
     budget: HistoryPullBudget,
 ) -> Result<Box<dyn HistorySession>, HistoryProviderError> {
     let point = loop {
-        if let Some(map) = store.points.try_read_for(quantum(&budget)?) {
-            break map.get(&id).cloned();
+        if let Some(mut state) = store.inner.state.try_lock_for(quantum(&budget)?) {
+            if !state.points.contains_key(&id)
+                && (budget.max_bytes < 512 + id.len() || budget.max_work < 512 + id.len())
+            {
+                return Err(HistoryProviderError::Limit);
+            }
+            break store.point_in(&mut state, &id)?;
         }
     };
-    let mut cursor = 0;
-    let (state, coverage) = match &point {
-        Some(point) => loop {
-            if let Some(series) = point.try_read_for(quantum(&budget)?) {
-                cursor = series.items.partition_point(|item| item.ts < start);
-                break (
-                    HistoryState {
-                        authority: store.authority,
-                        incarnation: series.incarnation,
-                        generation: series.generation,
-                    },
-                    ProviderCoverage {
-                        retained_start: series.items.first().map(|item| item.ts),
-                        retained_end: series.items.last().map(|item| item.ts),
-                        retained_count: series.items.len() as u64,
-                        evicted_through: series.evicted,
-                    },
-                );
-            }
-        },
-        None => (
-            HistoryState {
-                authority: store.authority,
-                incarnation: rand::random(),
-                generation: 0,
-            },
-            ProviderCoverage {
-                retained_start: None,
-                retained_end: None,
-                retained_count: 0,
-                evicted_through: None,
-            },
-        ),
+    let (cursor, state, coverage) = loop {
+        if let Some(series) = point.try_read_for(quantum(&budget)?) {
+            break (
+                series.items.partition_point(|item| item.ts < start),
+                store.series_state(&series),
+                ProviderCoverage {
+                    retained_start: series.items.first().map(|item| item.ts),
+                    retained_end: series.items.last().map(|item| item.ts),
+                    retained_count: series.items.len() as u64,
+                    evicted_through: series.evicted,
+                },
+            );
+        }
     };
     Ok(Box::new(MemorySession {
-        store,
-        id,
         point,
         cursor,
         end,
@@ -196,9 +381,7 @@ fn open_memory(
 }
 #[derive(Clone)]
 struct MemorySession {
-    store: HisStore,
-    id: String,
-    point: Option<Arc<RwLock<Series>>>,
+    point: Arc<RwLock<Series>>,
     cursor: usize,
     end: DateTime<FixedOffset>,
     metadata: ProviderHistoryMetadata,
@@ -214,21 +397,8 @@ impl MemorySession {
             return Err(HistoryProviderError::Stopped);
         }
         let mut items = Vec::new();
-        let Some(point) = &self.point else {
-            loop {
-                if let Some(map) = self.store.points.try_read_for(quantum(budget)?) {
-                    if map.contains_key(&self.id) {
-                        return Err(HistoryProviderError::Changed);
-                    }
-                    return Ok(ProviderHistoryBatch {
-                        items,
-                        terminal: Some(HistoryTerminal::Complete),
-                    });
-                }
-            }
-        };
         let series = loop {
-            if let Some(series) = point.try_read_for(quantum(budget)?) {
+            if let Some(series) = self.point.try_read_for(quantum(budget)?) {
                 break series;
             }
         };
@@ -302,6 +472,19 @@ impl HistorySession for MemorySession {
     }
 }
 impl HistoryProvider for HisStore {
+    fn history_write_capability(&self) -> Option<crate::HistoryWriteCapability> {
+        Some(crate::HistoryWriteCapability {
+            store: self.clone(),
+            qualification: crate::HistoryReceiptQualification::EphemeralMemory,
+        })
+    }
+    fn commit_history(
+        &self,
+        prepared: crate::PreparedHistoryMutation,
+    ) -> crate::HistoryWriteOutcome {
+        prepared.publish()
+    }
+
     fn open(
         &self,
         id: String,
@@ -362,7 +545,15 @@ mod tests {
     fn generation_exhaustion_has_no_native_write_effect() {
         let store = HisStore::new();
         store.write("p", vec![item(1, 1.0)]).unwrap();
-        store.points.read().get("p").unwrap().write().generation = u64::MAX;
+        store
+            .inner
+            .state
+            .lock()
+            .points
+            .get("p")
+            .unwrap()
+            .write()
+            .generation = u64::MAX;
         assert_eq!(
             store.write("p", vec![item(1, 9.0), item(2, 2.0)]),
             Err(HistoryProviderError::Exhausted)
@@ -387,7 +578,7 @@ mod tests {
             .open("p".into(), item(0, 0.0).ts, item(3, 0.0).ts, budget.clone())
             .await
             .unwrap();
-        let point = store.points.read().get("p").unwrap().clone();
+        let point = store.inner.state.lock().points.get("p").unwrap().clone();
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {

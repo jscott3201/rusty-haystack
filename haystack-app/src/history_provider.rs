@@ -26,6 +26,8 @@ pub enum HistoryProviderError {
     Failed,
     #[error("history generation exhausted")]
     Exhausted,
+    #[error("history writes are unsupported")]
+    Unsupported,
 }
 pub type HistoryFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, HistoryProviderError>> + Send + 'a>>;
@@ -88,7 +90,22 @@ pub trait HistoryProvider: Send + Sync + 'static {
         end: DateTime<FixedOffset>,
         budget: HistoryPullBudget,
     ) -> HistoryFuture<'_, Box<dyn HistorySession>>;
-    /// Trusted native write compatibility, outside the authorized history API.
-    /// PR03 only maintains generation and retention bookkeeping here.
-    fn his_write(&self, id: &str, items: Vec<HisItem>) -> HistoryFuture<'_, ()>;
+    /// Explicit scoped write opt-in, binding the same series/receipt authority
+    /// used by reads and every native writer. No capability means read-only.
+    fn history_write_capability(&self) -> Option<crate::HistoryWriteCapability> {
+        None
+    }
+    /// A provider may delay/retain this opaque plan, publish it at most once, or
+    /// reject before effects. Detached work must retain the plan's work lease.
+    fn commit_history(
+        &self,
+        prepared: crate::PreparedHistoryMutation,
+    ) -> crate::HistoryWriteOutcome {
+        prepared.reject(crate::HistoryWriteRejection::Unsupported)
+    }
+    /// Trusted native compatibility. Implementations must advance the same
+    /// authority/generation advertised by history_write_capability.
+    fn his_write(&self, _id: &str, _items: Vec<HisItem>) -> HistoryFuture<'_, ()> {
+        Box::pin(async { Err(HistoryProviderError::Unsupported) })
+    }
 }

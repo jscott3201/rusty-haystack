@@ -342,3 +342,15 @@ terminal metadata and does not retry. First-party HTTP constructors collect one
 bounded response in Zinc or JSON v3/v4. No remote pull protocol is implied.
 The existing `his_read` remains an explicit legacy grid call; Python and CLI
 helpers do not silently opt into partial results. See [history reads](history-reads.md).
+
+## Scoped history mutation extension
+
+`his_write_scoped(&HistoryWriteRequest)` submits one point's ordered samples with
+an operation identity and expected point-history generation on an explicitly
+opted-in `HistoryMutationTransport`. It returns typed committed/rejected/unknown
+outcomes. `reconcile_history(&HistoryOperationIdentity)` separately retrieves a
+receipt; an unreadable, malformed, foreign or empty acknowledgement never causes
+automatic resubmission. First-party HTTP clients disable retries/redirects and
+bound the complete response body. The legacy `his_write` helper supplies no
+operation control and fails closed on scoped servers. See
+[history mutation contracts](history-mutations.md).

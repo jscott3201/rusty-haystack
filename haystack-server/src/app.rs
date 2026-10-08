@@ -329,12 +329,17 @@ impl HaystackServer {
             .application
             .as_ref()
             .and_then(|app| app.history_service());
+        let history_mutation_service = self
+            .application
+            .as_ref()
+            .and_then(|app| app.history_mutation_service());
         let his = history_service.as_ref().map(|service| service.provider());
 
         let mutation_service = self.application.as_ref().and_then(|a| a.mutation_service());
         let state: SharedState = Arc::new(AppState {
             mutation_service,
             history_service,
+            history_mutation_service,
             application: self.application,
             graph: self.graph,
             read_service: self.read_service,
@@ -353,6 +358,7 @@ impl HaystackServer {
                 profile,
                 state.mutation_service.is_some(),
                 state.history_service.is_some(),
+                state.history_mutation_service.is_some(),
             )
         }) {
             core_router = core_router.route(capability.path, capability.router(profile));

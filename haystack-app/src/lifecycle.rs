@@ -157,6 +157,7 @@ impl ApplicationBuilder {
                     reads,
                     mutations: Arc::new(Mutex::new(None)),
                     history: Arc::new(Mutex::new(None)),
+                    history_mutations: Arc::new(Mutex::new(None)),
                 },
                 resources: vec![],
                 history_resource: None,
@@ -182,6 +183,31 @@ impl ApplicationBuilder {
         let mut selected = app.mutations.lock();
         if selected.is_some() {
             return Err(ReadError::InvalidQuery("mutation service already selected"));
+        }
+        *selected = Some(service);
+        drop(selected);
+        Ok(self)
+    }
+    /// Select authorized history writes after the exact history service. Its
+    /// provider remains initialized/closed once by the existing history owner.
+    pub fn history_mutations(
+        self,
+        service: crate::HistoryMutationService,
+    ) -> Result<Self, ReadError> {
+        let app = &self.parts.as_ref().expect("unconsumed builder").application;
+        if !app
+            .history
+            .lock()
+            .as_ref()
+            .is_some_and(|history| history.same_selection(service.history_service()))
+        {
+            return Err(ReadError::Forbidden);
+        }
+        let mut selected = app.history_mutations.lock();
+        if selected.is_some() {
+            return Err(ReadError::InvalidQuery(
+                "history mutations already selected",
+            ));
         }
         *selected = Some(service);
         drop(selected);
@@ -298,8 +324,12 @@ pub struct ApplicationHandle {
     reads: ReadService,
     mutations: Arc<Mutex<Option<MutationService>>>,
     history: Arc<Mutex<Option<HistoryService>>>,
+    history_mutations: Arc<Mutex<Option<crate::HistoryMutationService>>>,
 }
 impl ApplicationHandle {
+    pub fn history_mutation_service(&self) -> Option<crate::HistoryMutationService> {
+        self.history_mutations.lock().clone()
+    }
     pub fn history_service(&self) -> Option<HistoryService> {
         self.history.lock().clone()
     }

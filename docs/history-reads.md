@@ -107,8 +107,9 @@ partial samples. `Complete` covers retained records in the requested interval;
 it never claims to reconstruct data removed by retention. The native memory
 store retains at most one million items per point by default. Its trusted
 `write` and inclusive-end, materializing `read` compatibility methods are outside
-the authorized bounded service. History write authorization and receipts are
-separate future work.
+the authorized bounded service. Missing-series observations now allocate one
+bounded, stable generation-zero identity. Authorized scoped writes and retained
+receipts use that same authority; see [history mutations](history-mutations.md).
 
 ## HTTP and client contract
 
@@ -123,8 +124,8 @@ H4 wire format or an Arrow/Parquet encoding.
 This HTTP adapter collects **one bounded response**. It does not implement a
 remote open/pull/close protocol or progressive HTTP streaming. Zinc and JSON
 v3/v4 are admitted; unsupported negotiation fails before provider work. Only
-selected history appears in scoped operation discovery; scoped `hisWrite`
-remains disabled. External routers and owned listeners consume the exact
+selected history appears in scoped operation discovery. Scoped `hisWrite` and
+`hisReceipt` require a separate explicit history mutation selection. External routers and owned listeners consume the exact
 application selection, and reject independently configured providers.
 
 `Complete`, `Limited`, `Interrupted` and `Failed` are explicit terminal outcomes.

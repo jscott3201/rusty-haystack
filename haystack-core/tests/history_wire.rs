@@ -266,3 +266,15 @@ fn second_review_finite_number_oracle_preserves_original_bits_in_all_h4_formats(
         }
     }
 }
+
+#[test]
+fn scoped_zinc_history_response_requires_complete_rows_and_scalars() {
+    let codec = codec_for("text/zinc").unwrap();
+    let encoded = String::from_utf8(encode_result(&result(), codec).unwrap()).unwrap();
+    let mut rows: Vec<_> = encoded.lines().map(str::to_owned).collect();
+    rows[2].push_str(",unused");
+    assert!(decode_result(rows.join("\n").as_bytes(), codec).is_err());
+    let malformed = encoded.replacen("12.5°C", "NaN1", 1);
+    assert_ne!(malformed, encoded);
+    assert!(decode_result(malformed.as_bytes(), codec).is_err());
+}

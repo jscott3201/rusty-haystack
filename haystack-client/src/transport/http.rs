@@ -146,6 +146,13 @@ impl HttpTransport {
             ))
         }
     }
+    pub(crate) fn check_history_submission_policy(&self) -> Result<(), ClientError> {
+        if self.entity_submission_safe {
+            Ok(())
+        } else {
+            Err(ClientError::Connection("history submission requires a first-party no-retry/no-redirect client; use connect_with_config or HttpTransport::with_bearer_config".into()))
+        }
+    }
     pub(crate) fn check_entity_submission_policy(&self) -> Result<(), ClientError> {
         if self.entity_submission_safe {
             Ok(())
@@ -204,6 +211,24 @@ impl Transport for HttpTransport {
         } else {
             None
         };
+        let history_write = if op == "hisWrite" && req.meta.has("historyWrite") {
+            self.check_history_submission_policy()?;
+            Some(
+                haystack_core::codecs::history_mutation::request_from_grid(req)
+                    .map_err(|_| ClientError::Codec("invalid scoped history write".into()))?,
+            )
+        } else {
+            None
+        };
+        let history_lookup = if op == "hisReceipt" {
+            self.check_history_submission_policy()?;
+            Some(
+                haystack_core::codecs::history_mutation::lookup_from_grid(req)
+                    .map_err(|_| ClientError::Codec("invalid history receipt lookup".into()))?,
+            )
+        } else {
+            None
+        };
         let entity_extension = matches!(op, "entityBatch" | "entityReceipt")
             || (op == "changes" && req.cols.len() == 1 && req.cols[0].name == "payload");
         let mut response = if GET_OPS.contains(&op) {
@@ -216,10 +241,18 @@ impl Transport for HttpTransport {
             let codec = codec_for(&self.format).ok_or_else(|| {
                 ClientError::Codec(format!("unsupported format: {}", self.format))
             })?;
-            let text = codec
-                .encode_grid(req)
-                .map_err(|e| ClientError::Codec(e.to_string()))?;
-            let body_bytes = text.into_bytes();
+            let body_bytes = if let Some(request) = &history_write {
+                haystack_core::codecs::history_mutation::encode_request(request, codec)
+                    .map_err(|error| ClientError::Codec(error.to_string()))?
+            } else if let Some(identity) = &history_lookup {
+                haystack_core::codecs::history_mutation::encode_lookup(identity, codec)
+                    .map_err(|error| ClientError::Codec(error.to_string()))?
+            } else {
+                codec
+                    .encode_grid(req)
+                    .map_err(|error| ClientError::Codec(error.to_string()))?
+                    .into_bytes()
+            };
             let content_type = codec.mime_type();
 
             self.apply_auth(self.client.post(&url))?
@@ -279,6 +312,51 @@ impl Transport for HttpTransport {
             })?;
             return history::result_grid(&result)
                 .map_err(|_| ClientError::Codec("invalid bounded history response".into()));
+        }
+        if history_write.is_some() || history_lookup.is_some() {
+            use haystack_core::codecs::history_mutation as wire;
+            let response_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    ClientError::Codec("missing history receipt response format".into())
+                })?;
+            if response_type != codec.mime_type() {
+                return Err(ClientError::Codec(
+                    "unexpected history receipt response format".into(),
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > wire::MAX_RECEIPT_BYTES as u64)
+            {
+                return Err(ClientError::Codec(
+                    "history receipt exceeds byte limit".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(crate::error::http_error)? {
+                if chunk.len() > wire::MAX_RECEIPT_BYTES.saturating_sub(bytes.len()) {
+                    return Err(ClientError::Codec(
+                        "history receipt exceeds byte limit".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let outcome = wire::decode_outcome(&bytes, codec)
+                .map_err(|_| ClientError::Codec("invalid history receipt response".into()))?;
+            if let Some(request) = history_write {
+                wire::validate_for_request(&outcome, &request).map_err(|_| {
+                    ClientError::Codec("history receipt does not match request".into())
+                })?;
+            } else if history_lookup.as_ref() != Some(outcome.identity()) {
+                return Err(ClientError::Codec(
+                    "history receipt identity mismatch".into(),
+                ));
+            }
+            return wire::outcome_grid(&outcome)
+                .map_err(|_| ClientError::Codec("invalid history receipt response".into()));
         }
         if entity_extension {
             use haystack_core::codecs::entity;

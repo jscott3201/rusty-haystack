@@ -158,7 +158,11 @@ impl<'a> ZincParser<'a> {
         // -INF (must check before general number since '-' followed by 'I' is not a digit)
         if ch == '-' && self.remaining().starts_with("-INF") {
             self.pos += 4;
-            return Ok(Kind::Number(Number::unitless(f64::NEG_INFINITY)));
+            let unit = self.read_unit();
+            return Ok(Kind::Number(Number::new(
+                f64::NEG_INFINITY,
+                (!unit.is_empty()).then_some(unit),
+            )));
         }
 
         // Number, Date, Time, DateTime (starts with digit or '-' followed by digit)
@@ -742,11 +746,28 @@ impl<'a> ZincParser<'a> {
         }
         let name = &self.src[start..self.pos];
 
-        match name {
-            "INF" => return Ok(Kind::Number(Number::unitless(f64::INFINITY))),
-            "NaN" => return Ok(Kind::Number(Number::unitless(f64::NAN))),
-            "NA" => return Ok(Kind::NA),
-            _ => {}
+        // A special Number has the same optional unit suffix as a finite
+        // Number. Preserve it for the caller's admission rules (notably NaN).
+        // An actual XStr such as INFType("value") remains an XStr.
+        let special = if name.starts_with("INF") {
+            Some(f64::INFINITY)
+        } else if name.starts_with("NaN") {
+            Some(f64::NAN)
+        } else {
+            None
+        };
+        if let Some(value) =
+            special.filter(|_| self.peek() != Some('(') || matches!(name, "INF" | "NaN"))
+        {
+            self.pos = start + 3;
+            let unit = self.read_unit();
+            return Ok(Kind::Number(Number::new(
+                value,
+                (!unit.is_empty()).then_some(unit),
+            )));
+        }
+        if name == "NA" {
+            return Ok(Kind::NA);
         }
 
         // XStr: Type("value")
@@ -793,6 +814,15 @@ pub fn decode_scalar(input: &str) -> Result<Kind, CodecError> {
 
 /// Decode a Zinc-formatted string into an HGrid.
 pub fn decode_grid(input: &str) -> Result<HGrid, CodecError> {
+    decode_grid_rows(input, false)
+}
+/// Decode with complete scalar consumption and no surplus row cells. Scoped
+/// mutation protocols use this boundary; legacy grid callers retain their
+/// existing permissive handling of surplus cells.
+pub fn decode_grid_complete_rows(input: &str) -> Result<HGrid, CodecError> {
+    decode_grid_rows(input, true)
+}
+fn decode_grid_rows(input: &str, complete_rows: bool) -> Result<HGrid, CodecError> {
     let lines: Vec<&str> = input
         .lines()
         .map(|l| l.trim())
@@ -841,7 +871,7 @@ pub fn decode_grid(input: &str) -> Result<HGrid, CodecError> {
         if row_line.is_empty() {
             continue;
         }
-        let row = parse_row(row_line, &cols)?;
+        let row = parse_row(row_line, &cols, complete_rows)?;
         rows.push(row);
     }
 
@@ -883,8 +913,14 @@ fn parse_cols(line: &str) -> Result<Vec<HCol>, CodecError> {
     Ok(cols)
 }
 
-fn parse_row(line: &str, cols: &[HCol]) -> Result<HDict, CodecError> {
+fn parse_row(line: &str, cols: &[HCol], complete: bool) -> Result<HDict, CodecError> {
     let parts = split_csv_aware(line);
+    if complete && parts.len() > cols.len() {
+        return Err(CodecError::Parse {
+            pos: 0,
+            message: "surplus Zinc row cells".into(),
+        });
+    }
     let mut dict = HDict::new();
     // Omitted trailing cells are absent. Do not visit every declared column
     // for each short row; wide headers and short rows otherwise multiply work.
@@ -893,7 +929,11 @@ fn parse_row(line: &str, cols: &[HCol]) -> Result<HDict, CodecError> {
         let cell = part.trim();
         if !cell.is_empty() && cell != "N" {
             let mut parser = ZincParser::new(cell);
-            let val = parser.read_val()?;
+            let val = if complete {
+                parser.parse_scalar()?
+            } else {
+                parser.read_val()?
+            };
             dict.set(&col.name, val);
         }
     }

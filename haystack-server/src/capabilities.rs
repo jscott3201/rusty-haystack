@@ -41,6 +41,7 @@ capabilities! {
     ("pointWrite", "Write a value to a writable point", false),
     ("hisRead", "Read historical time-series data", false),
     ("hisWrite", "Write historical time-series data", false),
+    ("hisReceipt", "Reconcile a scoped history operation (history-write-v1)", false),
     ("invokeAction", "Invoke an action on an entity", false),
     ("import", "Import entity records", false),
     ("export", "Export entity records", false),
@@ -53,12 +54,25 @@ capabilities! {
     ("entityReceipt", "Reconcile an entity operation (entity-v1)", false),
 }
 impl Capability {
-    pub fn enabled(&self, profile: ServiceProfile, mutations: bool, history: bool) -> bool {
+    pub fn enabled(
+        &self,
+        profile: ServiceProfile,
+        mutations: bool,
+        history: bool,
+        history_mutations: bool,
+    ) -> bool {
         if self.name == "hisRead" {
             return history;
         }
         if self.name == "hisWrite" {
-            return history && profile == ServiceProfile::LegacyUnrestricted;
+            return if profile == ServiceProfile::ScopedReadService {
+                history_mutations
+            } else {
+                history
+            };
+        }
+        if self.name == "hisReceipt" {
+            return profile == ServiceProfile::ScopedReadService && history_mutations;
         }
         if matches!(self.name, "entityBatch" | "entityReceipt") {
             return profile == ServiceProfile::ScopedReadService && mutations;
@@ -78,6 +92,8 @@ impl Capability {
             "entityReceipt" => post(ops::entity::receipt),
             "changes" if scoped => post(ops::entity::changes),
             "hisRead" if scoped => post(ops::his::handle_scoped_read),
+            "hisWrite" if scoped => post(ops::his::handle_scoped_write),
+            "hisReceipt" => post(ops::his::handle_receipt),
             "read" if scoped => post(ops::shared_read::read),
             "nav" if scoped => post(ops::shared_read::nav),
             "defs" if scoped => post(ops::shared_read::definitions),
