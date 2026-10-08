@@ -10,8 +10,31 @@ use super::lexer::{TokenType, XetoLexer};
 
 /// Parse Xeto source text into an AST.
 pub fn parse_xeto(source: &str) -> Result<XetoFile, XetoError> {
+    // Bound both allocation and recursive grammar depth before descending.
+    if source.len() > 10 * 1024 * 1024 {
+        return Err(XetoError::Parse {
+            line: 1,
+            col: 1,
+            message: "Xeto source exceeds 10 MiB".into(),
+        });
+    }
     let mut lexer = XetoLexer::new(source);
     let tokens = lexer.tokenize()?;
+    let mut depth = 0_usize;
+    for token in &tokens {
+        match token.typ {
+            TokenType::LBrace | TokenType::LAngle => depth += 1,
+            TokenType::RBrace | TokenType::RAngle => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth > 64 {
+            return Err(XetoError::Parse {
+                line: token.line,
+                col: token.col,
+                message: "Xeto nesting exceeds 64 levels".into(),
+            });
+        }
+    }
     let mut parser = Parser::new(tokens);
     parser.parse_file()
 }
@@ -107,11 +130,7 @@ impl Parser {
     fn parse_file(&mut self) -> Result<XetoFile, XetoError> {
         self.skip_newlines();
 
-        let pragma = if *self.peek_type() == TokenType::Ident && self.peek().val == "pragma" {
-            Some(self.parse_pragma()?)
-        } else {
-            None
-        };
+        let mut pragma = None;
 
         let mut specs = Vec::new();
         loop {
@@ -125,6 +144,19 @@ impl Parser {
             self.skip_newlines();
             if self.at_end() {
                 break;
+            }
+
+            if *self.peek_type() == TokenType::Ident && self.peek().val == "pragma" {
+                if pragma.is_some() || !specs.is_empty() {
+                    let tok = self.peek();
+                    return Err(XetoError::Parse {
+                        line: tok.line,
+                        col: tok.col,
+                        message: "library pragma must occur once before declarations".into(),
+                    });
+                }
+                pragma = Some(self.parse_pragma()?);
+                continue;
             }
 
             let mut spec = self.parse_spec()?;
@@ -141,7 +173,14 @@ impl Parser {
     fn parse_pragma(&mut self) -> Result<LibPragma, XetoError> {
         self.expect(TokenType::Ident)?; // "pragma"
         self.expect(TokenType::Colon)?;
-        self.expect(TokenType::Ident)?; // "Lib"
+        let lib = self.expect(TokenType::Ident)?;
+        if lib.val != "Lib" {
+            return Err(XetoError::Parse {
+                line: lib.line,
+                col: lib.col,
+                message: "expected Lib pragma".into(),
+            });
+        }
         self.skip_newlines();
 
         let meta = if *self.peek_type() == TokenType::LAngle {
@@ -203,8 +242,13 @@ impl Parser {
 
     /// Spec := Name (":" TypeRef)? Meta? Default? Body?
     fn parse_spec(&mut self) -> Result<SpecDef, XetoError> {
+        let is_augmentation = *self.peek_type() == TokenType::Plus;
+        if is_augmentation {
+            self.advance();
+        }
         let name = self.parse_dotted_name()?;
         let mut spec = SpecDef::new(name);
+        spec.is_augmentation = is_augmentation;
 
         self.skip_newlines();
 
@@ -260,6 +304,10 @@ impl Parser {
             }
             slots.push(slot);
             self.skip_newlines();
+            if *self.peek_type() == TokenType::Comma {
+                self.advance();
+                self.skip_newlines();
+            }
         }
 
         self.expect(TokenType::RBrace)?;
@@ -417,6 +465,12 @@ impl Parser {
             let part = self.expect(TokenType::Ident)?;
             name.push_str("::");
             name.push_str(&part.val.clone());
+            while *self.peek_type() == TokenType::Dot {
+                self.advance();
+                let member = self.expect(TokenType::Ident)?;
+                name.push('.');
+                name.push_str(&member.val.clone());
+            }
         }
 
         Ok(name)
@@ -436,6 +490,13 @@ impl Parser {
             }
 
             let tag_name = self.expect(TokenType::Ident)?;
+            if meta.contains_key(&tag_name.val) {
+                return Err(XetoError::Parse {
+                    line: tag_name.line,
+                    col: tag_name.col,
+                    message: format!("duplicate metadata tag '{}'", tag_name.val),
+                });
+            }
             let tag_name = tag_name.val.clone();
             self.skip_newlines();
 
@@ -504,56 +565,7 @@ impl Parser {
                     Ok(Kind::Str(full_name))
                 }
             }
-            TokenType::LBrace => {
-                // Parse a dict or list-of-dicts value
-                self.advance(); // consume {
-                self.skip_newlines();
-                let mut items: Vec<Kind> = Vec::new();
-                while *self.peek_type() != TokenType::RBrace && *self.peek_type() != TokenType::Eof
-                {
-                    if *self.peek_type() == TokenType::LBrace {
-                        // Nested dict: { key: val, ... }
-                        self.advance(); // consume inner {
-                        self.skip_newlines();
-                        let mut dict = crate::data::HDict::new();
-                        while *self.peek_type() != TokenType::RBrace
-                            && *self.peek_type() != TokenType::Eof
-                        {
-                            let key = self.expect(TokenType::Ident)?.val.clone();
-                            self.expect(TokenType::Colon)?;
-                            self.skip_newlines();
-                            let val = self.parse_meta_value()?;
-                            dict.set(&key, val);
-                            self.skip_newlines();
-                            if *self.peek_type() == TokenType::Comma {
-                                self.advance();
-                                self.skip_newlines();
-                            }
-                        }
-                        self.expect(TokenType::RBrace)?;
-                        items.push(Kind::Dict(Box::new(dict)));
-                        self.skip_newlines();
-                    } else {
-                        // Key-value pair at top level: key: val
-                        let _key = self.expect(TokenType::Ident)?.val.clone();
-                        self.expect(TokenType::Colon)?;
-                        self.skip_newlines();
-                        let val = self.parse_meta_value()?;
-                        items.push(val);
-                        self.skip_newlines();
-                        if *self.peek_type() == TokenType::Comma {
-                            self.advance();
-                            self.skip_newlines();
-                        }
-                    }
-                }
-                self.expect(TokenType::RBrace)?;
-                if items.len() == 1 {
-                    Ok(items.into_iter().next().unwrap())
-                } else {
-                    Ok(Kind::List(items))
-                }
-            }
+            TokenType::LBrace => self.parse_meta_collection(),
             _ => {
                 let tok = self.peek();
                 Err(XetoError::Parse {
@@ -563,6 +575,49 @@ impl Parser {
                 })
             }
         }
+    }
+
+    /// Braces contain either named dict fields or a list of values. Keep names
+    /// and singleton lists intact (notably library dependency declarations).
+    fn parse_meta_collection(&mut self) -> Result<Kind, XetoError> {
+        self.expect(TokenType::LBrace)?;
+        self.skip_newlines();
+        let is_dict = *self.peek_type() == TokenType::Ident
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.typ == TokenType::Colon);
+        let mut dict = crate::data::HDict::new();
+        let mut items = Vec::new();
+        while *self.peek_type() != TokenType::RBrace && !self.at_end() {
+            if is_dict {
+                let key = self.expect(TokenType::Ident)?;
+                if dict.has(&key.val) {
+                    return Err(XetoError::Parse {
+                        line: key.line,
+                        col: key.col,
+                        message: format!("duplicate dictionary field '{}'", key.val),
+                    });
+                }
+                let key = key.val.clone();
+                self.expect(TokenType::Colon)?;
+                self.skip_newlines();
+                dict.set(key, self.parse_meta_value()?);
+            } else {
+                items.push(self.parse_meta_value()?);
+            }
+            self.skip_newlines();
+            if *self.peek_type() == TokenType::Comma {
+                self.advance();
+                self.skip_newlines();
+            }
+        }
+        self.expect(TokenType::RBrace)?;
+        Ok(if is_dict {
+            Kind::Dict(Box::new(dict))
+        } else {
+            Kind::List(items)
+        })
     }
 
     /// Parse a value literal (string or number).
@@ -605,6 +660,12 @@ impl Parser {
             let part = self.expect(TokenType::Ident)?;
             name.push_str("::");
             name.push_str(&part.val.clone());
+            while *self.peek_type() == TokenType::Dot {
+                self.advance();
+                let member = self.expect(TokenType::Ident)?;
+                name.push('.');
+                name.push_str(&member.val.clone());
+            }
         }
 
         Ok(name)

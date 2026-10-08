@@ -143,12 +143,18 @@ impl From<&super::ast::SlotDef> for Slot {
 pub fn spec_from_def(def: &super::ast::SpecDef, lib_name: &str) -> Spec {
     let qname = format!("{}::{}", lib_name, def.name);
     let is_abstract = def.meta.contains_key("abstract");
+    let mut meta = def.meta.clone();
+    if let Some(default) = &def.default {
+        // Xeto exposes a declared construction default as val metadata. It is
+        // not an invariant and must not become an inherited argument default.
+        meta.insert("val".into(), default.clone());
+    }
     Spec {
         qname,
         name: def.name.clone(),
         lib: lib_name.to_string(),
         base: def.base.clone(),
-        meta: def.meta.clone(),
+        meta,
         slots: def.slots.iter().map(Slot::from).collect(),
         is_abstract,
         doc: def.doc.clone(),

@@ -1,0 +1,111 @@
+//
+// Copyright (c) 2025, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   14 Feb 2025  Brian Frank  Creation
+//   28 Jul 2026  Brian Frank  Flush out core op funcs
+//
+
++Funcs {
+
+//////////////////////////////////////////////////////////////////////////
+// Reads
+//////////////////////////////////////////////////////////////////////////
+
+  // Read an entity by `id`.  If not found raise error or
+  // return null based on checked flag.  A null id behaves as
+  // an entity which is not found.
+  //
+  // Examples:
+  //
+  //      readById(@2b00f9dc-82690ed6)
+  //      readById(@2b00f9dc-82690ed6, false)
+  readById: Func <op, noSideEffects> { id: Ref?, checked: Bool "true", returns: Dict? }
+
+  // Read a list of entities by their ids into a grid.  The rows in the
+  // result correspond by index to the ids list.  If checked is true,
+  // then every id must be found or an error is raised.  If checked
+  // is false, then an unknown entity is returned as a row with every column
+  // set to null (including the `id` tag).
+  //
+  // Examples:
+  //
+  //     readByIds([@2af6f9ce-6ddc5075, @2af6f9ce-2d56b43a])
+  //     readByIds([@2af6f9ce-6ddc5075, @2af6f9ce-2d56b43a], false)
+  readByIds: Func <op, noSideEffects> { ids: List <of:Ref>, checked: Bool "true", returns: Grid }
+
+  // Read the first entity which matches [filter](doc.xeto::Filters).
+  // If no matches found raise error or return null based on checked
+  // flag.  If there are multiple matches it is indeterminate which one is
+  // returned.
+  //
+  // Examples:
+  //
+  //     read(Site)                 // read any entity which subtypes Site
+  //     read(Site and dis=="HQ")   // read site with specific dis tag
+  //     read(Room)                 // raise error if no room entities
+  //     read(Room, false)          // return null if no room entities
+  read: Func <op, noSideEffects> { filter: Filter, checked: Bool "true", returns: Dict? }
+
+  // Read all entities which match the [filter](doc.xeto::Filters).
+  //
+  // Options:
+  //   - `limit`: max number of entities to return
+  //   - `sort`: sort by display name
+  //   - `search`: platform specific search pattern
+  //   - `gridMeta`: dict to use for the result's grid level meta
+  //
+  // Examples:
+  //
+  //     readAll(Site)                      // read all site entities
+  //     readAll(Equip and siteRef==@xyz)   // read all equip in a given site
+  //     readAll(Equip, {limit:10})         // read up to ten equips
+  //     readAll(Equip, {sort})             // read all equip sorted by dis
+  readAll: Func <op, noSideEffects> { filter: Filter, opts: Dict?, returns: Grid }
+
+//////////////////////////////////////////////////////////////////////////
+// Server
+//////////////////////////////////////////////////////////////////////////
+
+  // Return summary information about the server. See [AboutInfo] for
+  // the tags a server should report where applicable.  Vendors may add
+  // their own tags.
+  //
+  // See [ph.doc::Ops#about].
+  about: Func <op, noSideEffects> { returns: AboutInfo }
+
+  // Close the client's current session and release any server side
+  // resources held by it.  Any future requests using the session's
+  // authentication token are rejected and the client must reauthenticate.
+  //
+  // Servers which do not maintain per-session state may implement this
+  // as a no-op.
+  //
+  // See [ph.doc::Ops#close].
+  close: Func <op> { returns: None }
+
+  // List the operations this server supports, one row per op; see
+  // `OpInfo` for the columns.  This is a quick summary for debugging
+  // and discovery - to inspect an op's full definition, or to generate
+  // a client or an API schema, use the openapi op instead.
+  //
+  // Clients written against an older protocol version receive that
+  // version's format instead; see [ph.doc::Ops#ops].
+  ops: Func <op, noSideEffects> { returns: Grid<of:OpInfo> }
+
+  // List the libraries composing the server's namespace, one row per
+  // lib sorted by name; see [LibInfo] for the columns.  These are the
+  // libs a client resolves to mirror the namespace locally.
+  libs: Func <op, noSideEffects> { returns: Grid<of:LibInfo> }
+
+  // List the filetypes available for content negotiation, one row per
+  // format sorted by name; see [FiletypeInfo] for the columns and
+  // [doc.xeto::HttpApi#filetypes] for how a format is selected.
+  //
+  // Clients written against an older protocol version receive the
+  // legacy def format instead.
+  filetypes: Func <op, noSideEffects> { returns: Grid<of:FiletypeInfo> }
+
+}
+

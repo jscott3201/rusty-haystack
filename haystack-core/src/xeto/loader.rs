@@ -285,6 +285,15 @@ fn load_from_ast(
         }
     }
 
+    // Augmentations require membership-aware admission; the compatibility
+    // loader must not silently install +Funcs as a new ordinary type.
+    if let Some(augmentation) = xeto_file.specs.iter().find(|s| s.is_augmentation) {
+        return Err(XetoError::Load(format!(
+            "augmentation '+{}' requires a selected admission profile",
+            augmentation.name
+        )));
+    }
+
     // Resolve names and convert to Specs
     let mut specs = Vec::new();
     for spec_def in &xeto_file.specs {

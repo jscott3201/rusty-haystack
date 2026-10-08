@@ -61,6 +61,8 @@ impl SlotDef {
 pub struct SpecDef {
     /// Spec name.
     pub name: String,
+    /// True for an augmentation such as `+Funcs { ... }`.
+    pub is_augmentation: bool,
     /// Base type reference (after the `:`).
     pub base: Option<String>,
     /// Metadata tags from angle-bracket meta section.
@@ -78,6 +80,7 @@ impl SpecDef {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            is_augmentation: false,
             base: None,
             meta: HashMap::new(),
             slots: Vec::new(),
