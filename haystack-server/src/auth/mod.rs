@@ -681,6 +681,16 @@ mod tests {
                 a.clone(),
             )
             .unwrap();
+        let mut close_admitted = service
+            .begin(ReadContext::with_timeout(
+                a.principal().clone(),
+                Duration::from_secs(1),
+            ))
+            .await
+            .unwrap();
+        close_admitted
+            .bind_wire_session(a.principal().clone(), a.clone())
+            .unwrap();
         auth.inject_token("fixture".into(), user);
         let (validated, b) = auth.validate_session("fixture").unwrap();
         assert!(!a.is_active() && b.is_active());
@@ -691,6 +701,19 @@ mod tests {
         };
         assert!(matches!(
             admitted.invoke_wire(input()).await,
+            Err(ApiError::Permission)
+        ));
+        assert!(b.is_active());
+        let close = TypedInvocationInput {
+            operation: "close".into(),
+            post: true,
+            versions: vec!["5".into()],
+            content_types: vec!["application/json".into()],
+            body: b"{}".to_vec(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            close_admitted.invoke_wire(close).await,
             Err(ApiError::Permission)
         ));
         assert!(b.is_active());

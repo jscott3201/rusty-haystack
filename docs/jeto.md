@@ -12,7 +12,7 @@ execution equivalence against an upstream runtime or complete H5 conformance.
 
 `Context::standard()` admits the implemented built-in scalar and container
 names. `Context::new(catalog, revision, definitions)` adds caller-admitted
-nominal patterns, dictionary member types, list element types, grid row types,
+nominal patterns, finite enum keys, dictionary member types, list element types, grid row types,
 and Ref subtypes. The context is immutable and validates duplicate names,
 qualified references, bounded pattern complexity, and compatible grid row
 types. Construction validates the codec schema; the caller remains responsible
@@ -34,6 +34,14 @@ restrictions, not complete Xeto pattern-language admission. Recursive Dict/List
 references are permitted: admission resolves names without expanding them,
 and decoding/encoding follows only concrete values under the same depth and
 node limits. A grid row type must resolve to an admitted Dict.
+
+A `Definition::Enum` contains 1 to 4096 distinct effective keys, each at most
+256 bytes and together at most 64 KiB; the overall context bound still applies.
+Admission sorts and validates the table once, and context clones share its
+immutable storage. Decode and encode charge a conservative binary-search comparison
+bound before membership checks. Matching strings become Nominal values with the
+exact enum qname, catalog, revision and key; a native Str is not relabeled as an
+enum. No first-member default or locale-based timezone normalization is inferred.
 
 An optional qualified expected type applies scalar, member, element or row
 context. Explicit boxed scalar types override expected context. An explicit
@@ -65,7 +73,7 @@ including canonical trailing bits.
 
 Nominal decoding retains the exact scalar text plus this context's catalog
 identity and revision. Encoding requires both to match and validates the
-admitted pattern. A wire qualified name alone proves no provenance. The
+admitted pattern or exact finite enum key. A wire qualified name alone proves no provenance. The
 selected exact profile rejects native Str under nominal context because that
 combination changes contextual scalar identity in the retained reference
 behavior. It does not silently relabel the native Str as a nominal.

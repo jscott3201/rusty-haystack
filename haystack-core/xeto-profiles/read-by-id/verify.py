@@ -49,7 +49,7 @@ def main():
         args.output.mkdir(parents=True, exist_ok=True)
     selected = 0
     for entry in manifest["files"]:
-        if entry["role"] in ("license", "build"):
+        if entry["role"] in ("license", "build", "evidence"):
             continue
         lines = raw[entry["path"]].splitlines()
         pieces = []

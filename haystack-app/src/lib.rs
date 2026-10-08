@@ -45,7 +45,9 @@ mod sanitize;
 mod service;
 mod typed_http;
 mod types;
-pub use typed_http::{ApiError, TypedInvocationInput, TypedInvocationResponse};
+pub use typed_http::{
+    ApiError, InvocationDisclosure, TypedInvocationInput, TypedInvocationResponse,
+};
 mod wire;
 
 pub use haystack_core::filter::CatalogKind;

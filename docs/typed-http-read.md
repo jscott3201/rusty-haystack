@@ -1,9 +1,10 @@
 # Typed HTTP executable profile
 
-`GET` or `POST /api/readById` and `/api/sys.api::readById` execute the pinned
-`sys.api::readById` signature. Version-5 `/api/ops` and `/api/sys.api::ops`
-execute `sys.api::ops`, returning the caller-visible executable operations.
-One immutable application registry owns both production bindings, their admitted
+The installed `sys.api` functions are `readById`, `readByIds`, `read`, `readAll`,
+`about`, `close`, `ops`, `libs`, and `filetypes`. Each is available at its simple
+and qualified `/api/` name. Select version 5 to use typed dispatch on names
+shared with legacy H4 routes, or use the qualified name explicitly.
+One immutable application registry owns the nine production bindings, their admitted
 signature/profile, codec contexts, selected library version, source provenance,
 GET eligibility, and handler selection. Registration rejects duplicate
 qname/version bindings and unsupported handler/signature shapes before the
@@ -54,8 +55,8 @@ from arguments. Other argument names and extra grid columns cannot confer
 projection, cursor, page, or policy authority. GET values beginning with `[` or
 `{` are parsed as JSON; other decoded values are contextual scalar text.
 An empty GET `id` is a present empty Ref under the pinned Ref pattern; it does
-not default to `x`. The immutable codec argument context is derived from the
-admitted function's actual Ref and Bool parameter declarations at construction;
+not default to `x`. The immutable codec argument and result contexts are derived recursively from the
+admitted function declarations, including List element and metadata row types;
 it does not guess types from tag names. POST named JSON is decoded completely
 through this context before only the declared arguments bind. Contextual scalar
 text and explicit boxes follow the core codec's precedence; native fitting then
@@ -65,12 +66,14 @@ own default. Omitted or null id defaults to Null, which behaves as a missing
 entity. Omitted or null checked defaults to true. Native explicit-null fitting
 remains unchanged.
 
-POST requires Content-Type, including for an empty body. Version 4 interprets
+POST requires Content-Type, including for an empty body, except that H4 `close`
+accepts the legacy empty request without that header. Version 4 interprets
 bare `application/json` as Hayson; version 5 interprets it as Jeto.
 `application/vnd.haystack+json` (optionally `version=4`) selects Hayson in either
 version. `text/zinc` accepts grid arguments. `text/jeto` is accepted in version 5.
 Grid input uses only the first row's declared arguments; null cells apply the
-parameter's own default just as absent cells do. `ops` has zero arguments:
+parameter's own default just as absent cells do. `ops`, `about`, `close`, `libs`,
+and `filetypes` have zero arguments:
 undeclared names, including `returns`, are rejected before null-to-absence
 normalization, for named JSON, GET parameters and the supported first-row grid
 representations. Reserved `xeto-*` query controls stay outside arguments. The typed adapter
@@ -108,9 +111,10 @@ Grid and column native Ref-valued `of` metadata maps to unboxed structural wire
 fields even in all mode. Grid row and column order, sparse cells, domain
 metadata, and nested context scope are preserved. Null dictionary members,
 ordinary record data in `spec`, invalid grid shapes, and metadata collisions
-are rejected when they cannot preserve identity. This service admits no domain
-nominal catalog; such results return 406. The core codec can preserve nominal
-values only under an explicitly supplied matching catalog identity/revision.
+are rejected when they cannot preserve identity. Function contexts admit only the nominal types reachable from their signatures:
+Filter, Version and the finite TimeZone enum where needed. Unrelated nominal
+values return 406. The core codec preserves nominal values only under an
+explicitly supplied matching catalog identity/revision.
 H4 output keeps its existing strict projection and rejects rich values it
 cannot preserve.
 
@@ -119,8 +123,7 @@ cannot preserve.
 `noSideEffects:Marker?` are optional. Signatures are descriptive, not a client
 schema. Empty grids fit, while wrong native kinds, missing required row fields
 and incorrectly typed optional fields fail fitting. Structural row specifications
-remain compatible with contextual Jeto. The production entries are
-`sys.api::ops` and `sys.api::readById`, subject to caller policy.
+remain compatible with contextual Jeto. The production entries are the nine functions listed above, subject to caller policy.
 
 A null, missing or denied id is indistinguishable: `checked=false` returns null;
 `checked=true` produces the same UnknownEntity error for both. Version-4
@@ -132,14 +135,66 @@ AmbiguousFuncErr includes only bounded visible candidates.
 This bounded error path remains available after a request budget or deadline
 is exhausted. Unsupported methods, including HEAD, return 501. GET requires the
 exact `noSideEffects` marker on the executable entry; absence of a side-effects
-flag or read permission cannot grant GET. Both production bindings permit GET;
-the dispatcher rejects GET with `MethodNotAllowedErr` before execution for a
-binding without that marker. No watchPoll or session-close binding is added.
+flag or read permission cannot grant GET. `close` requires POST; the other eight
+bindings carry the marker. The dispatcher rejects GET with
+`MethodNotAllowedErr` before executing a binding without that marker. No typed
+watchPoll binding is installed.
+
+## System functions
+
+| Function | Native contract and selected behavior |
+| --- | --- |
+| `readByIds` | `ids:List<of:Ref>`, `checked:Bool=true`, returns Grid. One row per original input position, including duplicates. |
+| `read` | `filter:Filter`, `checked:Bool=true`, returns the first authorized matching Dict or null. Selection follows deterministic entity ID order. |
+| `readAll` | `filter:Filter`, `opts:Dict?`, returns a Grid of authorized matches. |
+| `about` | Returns a fitted AboutInfo with configured server label, actual UTC wall time and boot time, built product version, enabled protocol strings, and the validated caller when present. |
+| `close` | Returns native None, represented as v5 JSON null or an H4 empty Grid, after revoking the exact validated session. |
+| `libs` | Returns fitted LibInfo rows for admitted libraries allowed by the current catalog policy, ordered by name. These are partial admitted library views. |
+| `filetypes` | Returns fitted FiletypeInfo rows for formats actually accepted by the selected protocol version. JSON is an alias rather than an additional format. |
+
+`readByIds` performs one coherent authorized graph read. Unchecked missing and
+denied IDs produce all-null positional rows; a nonempty all-missing result
+retains an `id` column so Zinc preserves its cardinality. Checked failure returns
+no partial rows and does not reveal whether an unavailable ID exists. ID, row,
+candidate and copy budgets count repeated positions. Empty input yields an empty
+grid.
+
+Filters use the shared bounded parser, evaluator and authorized View. Contextual
+Jeto text and explicit `sys::Filter` boxes are accepted; explicit `sys::Str` boxes
+fail native fitting. Text from legacy Grid input is adapted to Filter under either
+protocol version. Authorization precedes the limit. Supported `readAll` options
+are `limit` and `sort`; validated structural `spec:"sys::Dict"` metadata is retained
+separately and other spec values reject. The limit
+must be a finite, unitless, nonnegative integer within the request's row ceiling;
+Int, integral Float and integral Number values are accepted. Without an explicit
+limit, exceeding that ceiling fails atomically. The presence of the `sort` tag,
+including `sort:false`, sorts only the selected bounded rows by their visible
+display string, then ID for ties. Jeto null fields follow its normal absence
+rule. Unsupported options such as `search` and `gridMeta` reject explicitly,
+including unsupported keys whose Jeto value is null.
+
+`ApplicationBuilder::server_name` configures a nonempty label of at most 256 bytes
+without control characters. The default is `rusty-haystack`. A managed application
+captures its boot wall time once at owner start; unmanaged `ReadService::new`
+captures it at service construction. Clones share that timestamp. `tz` is the
+admitted nominal `sys::TimeZone` key `UTC`; protocol versions are `"4"` and `"5"`.
+No vendor identity or library-wide runtime capability is invented.
+
+Typed result fitting precedes H4 metadata projection. H4 about maps only TimeZone
+to its exact key string; the timestamps remain DateTime. H4 libs retains the
+project's two-column `name`/`version` Str representation. H4 filetypes uses
+`def:Symbol(filetype:<name>)`, a `filetype` Marker, and `dis`/`mime`/`fileExt` Str
+fields; it omits unowned icon/doc and the H5 capability fields. The selected typed
+metadata functions reject legacy filter/limit controls. V5 about and libs keep
+nominal identities, so requesting legacy media for them returns 406 under this
+preview's exact-output restriction. This is narrower than the general pinned
+legacy-media bridge. Unqualified H4 about/read/libs retain their separate existing
+compatibility adapters.
 
 ## Authentication and ownership
 
-Authentication precedes version resolution. Version-5 `ops` enters this path
-before the legacy public bypass. Only GET `/api/ops` with absent or explicitly
+Authentication precedes version resolution. Version-5 about, read, libs, ops and
+close enter typed dispatch before their legacy routes or public/SCRAM bypasses. Only GET `/api/ops` with absent or explicitly
 selected v4 controls retains public H4 `name`/`summary` discovery. Unsupported,
 duplicate and other version selections authenticate before their error response;
 query-over-header precedence includes percent-encoded control names. The existing H4 profile keeps its
@@ -151,12 +206,30 @@ Configured CORS origins stay unchanged; Xeto-Version is added only to the
 allowed and exposed header sets. Trusted custom routes and fallbacks retain their authority for both API and
 non-API paths. Authenticated custom fallbacks retain bearer enforcement.
 
-The transport retains the exact noncredential `SubscriptionSession` returned by
-its authentication lookup in private admitted invocation state. A replacement
-bearer binding cannot retarget an admitted request. The retained session is
-checked for revocation at invocation worker entry; principal/session mismatches
-are rejected. Session handles cannot be supplied by arguments. Session close
-and ongoing body, queue, and disclosure fencing are reserved for PR09.
+The transport captures the exact noncredential `SubscriptionSession` returned
+by one authentication lookup before waiting for a read slot. Body collection,
+queueing, execution and response/publication handoff observe that handle's
+revocation and expiry. A replacement bearer binding cannot retarget a request;
+principal/session mismatches reject, and arguments cannot select session authority.
+Authenticated H4 built-in reads also retain this authority; custom routers retain
+their own behavior.
+
+Typed close requires a validated session and the function's permission. Its zero
+arguments, result fitting, bounded encoding and optional gzip complete before
+revocation. Only that successful invocation can disclose its prepared acknowledgment
+after its own revocation; caller cancellation, application stop and the absolute
+deadline still apply. Authenticated unqualified H4 close uses this same captured
+session and acknowledgment ordering; its legacy anonymous no-op remains separate.
+
+Close does not stop ApplicationOwner or another login for the same username.
+Bounded subscription maintenance eventually removes the closed session's watches,
+creation bindings and reservations. The acknowledgment does not synchronously join
+all session workers or subscription tasks. Work leases remain with workers until
+actual exit, even when their callers stop waiting. Disclosure fencing applies at
+the server's response/publication handoff boundary; it cannot recall bytes already
+handed to the network. A lost close acknowledgment remains uncertain and is not
+automatically replayed. Later bearer rejection establishes unusability, without
+uniquely attributing it to close rather than expiry.
 
 One admission owns raw URI/header/body reservation, contextual decode, signature
 fitting, registry discovery or the authorized read, result fitting, encoding and

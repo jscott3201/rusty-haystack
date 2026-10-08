@@ -1,3 +1,4 @@
+mod system;
 use crate::{
     budget::Budget,
     lifecycle::{ApplicationError, Lifecycle, WorkGuard},
@@ -39,6 +40,7 @@ pub struct ReadService {
 }
 struct Inner {
     registry: crate::registry::Registry,
+    system: system::SystemInfo,
     lifecycle: Option<Arc<Lifecycle>>,
     graph: SharedGraph,
     dataset: [u8; 16],
@@ -108,6 +110,7 @@ impl ReadService {
         Ok(Self {
             inner: Arc::new(Inner {
                 registry,
+                system: system::SystemInfo::new(false),
                 lifecycle: None,
                 graph,
                 dataset: rand::random(),
@@ -127,9 +130,9 @@ impl ReadService {
         lifecycle: Arc<Lifecycle>,
     ) -> Result<Self, ReadError> {
         let mut service = Self::new(graph, policy, limits)?;
-        Arc::get_mut(&mut service.inner)
-            .expect("new service")
-            .lifecycle = Some(lifecycle);
+        let inner = Arc::get_mut(&mut service.inner).expect("new service");
+        inner.lifecycle = Some(lifecycle);
+        inner.system = system::SystemInfo::new(true);
         Ok(service)
     }
     /// Whether both handles share this exact service, including policy, cursor
@@ -200,7 +203,7 @@ impl ReadService {
             .as_ref()
             .map(|life| life.admit().map_err(application_read_error))
             .transpose()?;
-        self.begin_with_guard(context, guard).await
+        self.begin_with_guard(context, guard, None).await
     }
     /// Continue an operation already admitted by this application's transport.
     /// The guard must belong to the exact application; no fresh admission is
@@ -218,25 +221,61 @@ impl ReadService {
         {
             return Err(ReadError::Forbidden);
         }
-        self.begin_with_guard(context, Some(guard)).await
+        self.begin_with_guard(context, Some(guard), None).await
+    }
+    /// Capture authenticated authority before waiting for an execution slot.
+    /// The handle is validated once; body/queue/worker/disclosure share it.
+    pub async fn begin_admitted_session(
+        &self,
+        context: ReadContext,
+        guard: WorkGuard,
+        session: crate::SubscriptionSession,
+    ) -> Result<ReadAdmission, ReadError> {
+        if !self
+            .inner
+            .lifecycle
+            .as_ref()
+            .is_some_and(|life| Arc::ptr_eq(life, &guard.lifecycle))
+        {
+            return Err(ReadError::Forbidden);
+        }
+        self.begin_with_guard(context, Some(guard), Some(session))
+            .await
     }
     async fn begin_with_guard(
         &self,
         context: ReadContext,
         guard: Option<WorkGuard>,
+        session: Option<crate::SubscriptionSession>,
     ) -> Result<ReadAdmission, ReadError> {
+        if session
+            .as_ref()
+            .is_some_and(|s| !s.matches(&context.principal) || !s.is_active())
+        {
+            return Err(ReadError::Forbidden);
+        }
         let now = Instant::now();
         let deadline = context.deadline.min(now + self.inner.limits.max_duration);
         let cancel = context.cancellation.child_token();
         let mut budget = Budget::new(self.inner.limits.clone(), deadline, cancel);
         budget.owner_cancel = guard.as_ref().map(WorkGuard::cancellation);
         budget.owner_sealed = guard.as_ref().map(WorkGuard::closing);
+        budget.session = session.clone().map(crate::budget::SessionFence::new);
+        if session.is_some() {
+            let bytes = context.principal.bytes();
+            budget.charge(BudgetKind::Input, bytes)?;
+            budget.charge(BudgetKind::Work, bytes.saturating_mul(4).saturating_add(1))?;
+            budget.charge(
+                BudgetKind::Retained,
+                bytes.saturating_mul(4).saturating_add(256),
+            )?;
+        }
         budget.check()?;
         let permit = self.admit(&budget).await?;
         Ok(ReadAdmission {
             inner: self.inner.clone(),
             principal: Some(context.principal),
-            session: None,
+            session,
             budget: Some(budget),
             permit: Some(permit),
             guard,
@@ -258,7 +297,7 @@ impl ReadService {
             .map_err(|_| ReadError::Capacity)?;
         tokio::select! {
             permit = self.inner.active.clone().acquire_owned() => { budget.check()?; permit.map_err(|_| ReadError::Unavailable) },
-            _ = budget.cancelled() => Err(ReadError::Cancelled),
+            _ = budget.cancelled() => Err(budget.check().err().unwrap_or(ReadError::Cancelled)),
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(budget.deadline)) => Err(ReadError::Deadline),
         }
     }
@@ -307,6 +346,7 @@ impl ReadAdmission {
         self.reserve_wire_input(principal.bytes())?;
         self.principal = Some(principal);
         self.session = None;
+        self.budget_mut().session = None;
         Ok(())
     }
     /// Bind the exact noncredential handle returned by trusted authentication.
@@ -320,6 +360,7 @@ impl ReadAdmission {
             return Err(ReadError::Forbidden);
         }
         self.bind_wire_principal(principal)?;
+        self.budget_mut().session = Some(crate::budget::SessionFence::new(session.clone()));
         self.session = Some(session);
         Ok(())
     }
@@ -329,14 +370,20 @@ impl ReadAdmission {
     ) -> Result<crate::TypedInvocationResponse, crate::ApiError> {
         let inner = self.inner.clone();
         let session = self.session.take();
-        self.run_task(move |principal, budget| {
-            Ok(inner.execute_typed(principal, session, input, budget))
-        })
-        .await
-        .map_err(crate::ApiError::from)?
+        let response = self
+            .run_task(move |principal, budget| {
+                Ok(inner.execute_typed(principal, session, input, budget))
+            })
+            .await
+            .map_err(crate::ApiError::from)??;
+        response.disclosure.check()?;
+        Ok(response)
     }
     pub fn deadline(&self) -> Instant {
         self.budget.as_ref().expect("live admission").deadline
+    }
+    pub fn check(&self) -> Result<(), ReadError> {
+        self.budget.as_ref().expect("live admission").check()
     }
     pub fn cancellation(&self) -> CancellationToken {
         self.budget.as_ref().expect("live admission").cancel.clone()
@@ -417,6 +464,7 @@ impl ReadAdmission {
         let cancel = budget.cancel.clone();
         let deadline = budget.deadline;
         let owner_cancel = budget.owner_cancel.clone();
+        let session = budget.session.clone();
         let mut drop_guard = CancelOnDrop {
             token: cancel.clone(),
             armed: true,
@@ -444,6 +492,9 @@ impl ReadAdmission {
             _ = cancel.cancelled() => {
                 job.abort();
                 Err(ReadError::Cancelled)
+            },
+            _ = async { match &session { Some(session) => session.cancelled().await, None => std::future::pending::<()>().await } } => {
+                cancel.cancel(); job.abort(); Err(ReadError::Forbidden)
             },
             // A completed result wins an owner stop racing delivery. The
             // caller's cancellation and absolute deadline keep their priority;
@@ -506,9 +557,7 @@ impl Inner {
         {
             return Err(ApiError::Permission);
         }
-        // The handle is retained through invocation; no token lookup can rebind
-        // a request to a replacement login. Closing sessions is a later binding.
-        let _session = session;
+        // No token lookup can rebind an invocation to a replacement login.
         let envelope = typed_http::envelope(&input, budget)?;
         let policy = self.policy.snapshot(&principal)?;
         budget.check()?;
@@ -520,15 +569,19 @@ impl Inner {
             .resolve(&envelope.operation, policy.as_ref(), budget)?;
         entry.permits_method(input.post)?;
         let request = typed_http::decode(&input, &entry.wire, envelope, budget)?;
-        // This closed profile binds at most two scalar arguments. Reserve before
-        // the native binder constructs its immutable values and origin table.
+        // Reserve native binding copies before the binder constructs immutable
+        // values. Collection arguments need the decoded expansion allowance.
         budget.charge(
             BudgetKind::Retained,
             input
                 .body
                 .len()
                 .saturating_add(input.query.len())
-                .saturating_mul(4)
+                .saturating_mul(if entry.handler == crate::registry::Handler::ReadById {
+                    4
+                } else {
+                    512
+                })
                 .saturating_add(4096),
         )?;
         let args = self
@@ -538,6 +591,23 @@ impl Inner {
             .map_err(|_| ApiError::InvalidArgs)?;
         let value = match entry.handler {
             crate::registry::Handler::Ops => self.registry.ops(policy.as_ref(), budget)?,
+            crate::registry::Handler::About => self.about(&principal, budget)?,
+            crate::registry::Handler::Libs => self.libraries(policy.as_ref(), budget)?,
+            crate::registry::Handler::Filetypes => self.filetypes(request.version, budget)?,
+            crate::registry::Handler::Close => {
+                if session.is_none() {
+                    return Err(ApiError::AuthRequired);
+                }
+                Kind::None
+            }
+            handler @ (crate::registry::Handler::ReadByIds
+            | crate::registry::Handler::Read
+            | crate::registry::Handler::ReadAll) => {
+                match self.system_read(handler, args.values(), policy.as_ref(), budget) {
+                    Err(ApiError::UnknownEntity) => return typed_http::missing(&request, budget),
+                    value => value?,
+                }
+            }
             crate::registry::Handler::ReadById => {
                 let checked = matches!(args.values().get("checked"), Some(Kind::Bool(true)));
                 match args.values().get("id") {
@@ -573,7 +643,17 @@ impl Inner {
             .profile
             .fit_result(&entry.identity.qname, &value)
             .map_err(|_| ApiError::Internal)?;
-        typed_http::encode(value, &request, &entry.wire, budget)
+        let response = typed_http::encode(value, &request, &entry.wire, budget)?;
+        if entry.handler == crate::registry::Handler::Close {
+            budget.check()?;
+            budget
+                .session
+                .as_ref()
+                .ok_or(ApiError::AuthRequired)?
+                .close()?;
+        }
+        budget.check()?;
+        Ok(response)
     }
     fn execute(
         &self,

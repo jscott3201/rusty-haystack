@@ -16,8 +16,11 @@ use std::{sync::Arc, time::Instant};
 
 pub(crate) fn selected(request: &Request<Body>) -> bool {
     let path = request.uri().path();
-    if path == "/api/ops" {
-        return !legacy_ops(request);
+    if matches!(
+        path,
+        "/api/ops" | "/api/about" | "/api/read" | "/api/libs" | "/api/close"
+    ) {
+        return !legacy_selection(request);
     }
     path.starts_with("/api/")
         && !crate::capabilities::CAPABILITIES
@@ -27,8 +30,8 @@ pub(crate) fn selected(request: &Request<Body>) -> bool {
 // Only absent or one explicitly selected v4 control retains the public legacy
 // GET path. This is a routing hint, not version validation: every malformed,
 // duplicate or other selection goes through authentication first.
-fn legacy_ops(request: &Request<Body>) -> bool {
-    if request.method() != axum::http::Method::GET {
+fn legacy_selection(request: &Request<Body>) -> bool {
+    if request.uri().path() == "/api/ops" && request.method() != axum::http::Method::GET {
         return false;
     }
     let mut query_version = None;
@@ -128,16 +131,6 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
         .get::<Arc<haystack_app::WorkGuard>>()
         .ok_or(ApiError::Unavailable)?
         .child();
-    let mut admission = service
-        .begin_admitted(
-            ReadContext::new(
-                Principal::Anonymous,
-                started + service.limits().max_duration,
-                CancellationToken::new(),
-            ),
-            guard,
-        )
-        .await?;
     let raw_bytes = request.headers().iter().fold(
         request
             .uri()
@@ -150,9 +143,11 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
                 .saturating_add(64)
         },
     );
-    admission.reserve_wire_input(raw_bytes)?;
+    if raw_bytes > service.limits().max_input_bytes {
+        return Err(ApiError::InvalidArgs);
+    }
     let v5 = v5_hint(&request);
-    if state.auth.is_enabled() {
+    let (principal, session) = if state.auth.is_enabled() {
         let mut headers = request.headers().get_all(header::AUTHORIZATION).iter();
         let first = headers.next();
         let malformed = if v5 {
@@ -184,11 +179,27 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
         if !AuthManager::check_permission(&user, "read") {
             return Err(ApiError::Permission);
         }
-        admission.bind_wire_session(
+        (
             Principal::authenticated(user.username, user.permissions),
-            session,
-        )?;
-    }
+            Some(session),
+        )
+    } else {
+        (Principal::Anonymous, None)
+    };
+    let context = ReadContext::new(
+        principal,
+        started + service.limits().max_duration,
+        CancellationToken::new(),
+    );
+    let mut admission = match session {
+        Some(session) => {
+            service
+                .begin_admitted_session(context, guard, session)
+                .await?
+        }
+        None => service.begin_admitted(context, guard).await?,
+    };
+    admission.reserve_wire_input(raw_bytes)?;
     if !matches!(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::POST
@@ -229,7 +240,7 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
     loop {
         let chunk = tokio::select! {
             biased;
-            _ = admission.cancelled() => return Err(ApiError::from(ReadError::Cancelled)),
+            _ = admission.cancelled() => return Err(ApiError::from(admission.check().err().unwrap_or(ReadError::Cancelled))),
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(admission.deadline())) => return Err(ApiError::Timeout),
             chunk = stream.next() => chunk,
         };
@@ -254,7 +265,17 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
         input.body.extend_from_slice(&chunk);
     }
     let response = admission.invoke_wire(input).await?;
+    response.disclosure.check()?;
     let gzip = response.gzip;
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        response.disclosure.check().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "invocation no longer valid",
+            )
+        })?;
+        Ok::<_, std::io::Error>(response.body)
+    }));
     let mut response = (
         [
             (header::CONTENT_TYPE, response.content_type),
@@ -263,7 +284,7 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
                 response.version,
             ),
         ],
-        response.body,
+        body,
     )
         .into_response();
     response.headers_mut().insert(

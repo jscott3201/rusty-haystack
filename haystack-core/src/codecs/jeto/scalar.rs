@@ -311,6 +311,20 @@ pub(super) fn string<E>(
                 .map_err(|_| invalid("invalid DateTime"))?;
             Kind::DateTime(HDateTime::new(value, zone.unwrap_or("UTC")))
         }
+        Some(Class::Enum(keys)) => {
+            if keys.binary_search_by(|key| key.as_str().cmp(text)).is_err() {
+                return Err(invalid("unknown enum key"));
+            }
+            Kind::Nominal(
+                NominalScalar::new(
+                    expected_name.ok_or(Error::UnknownSpec)?,
+                    context.catalog(),
+                    context.revision(),
+                    text,
+                )
+                .map_err(|_| invalid("invalid nominal identity"))?,
+            )
+        }
         Some(Class::Nominal(pattern)) => {
             if !pattern
                 .is_match(text)

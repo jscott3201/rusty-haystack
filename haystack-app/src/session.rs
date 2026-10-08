@@ -2,7 +2,10 @@
 //! authenticated handle; request bodies cannot construct or recover one by ID.
 use crate::{Principal, ReadError, SubscriptionResync};
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -16,6 +19,7 @@ struct SessionInner {
     principal: Principal,
     expires: Option<Instant>,
     revoked: CancellationToken,
+    closed: AtomicBool,
     scoped: bool,
 }
 impl std::fmt::Debug for SubscriptionSession {
@@ -71,6 +75,7 @@ impl SubscriptionSession {
                 principal,
                 expires,
                 revoked: CancellationToken::new(),
+                closed: AtomicBool::new(false),
                 scoped,
             }),
         })
@@ -85,7 +90,25 @@ impl SubscriptionSession {
         self.inner.expires
     }
     pub fn close(&self) {
+        if !self.inner.closed.swap(true, Ordering::AcqRel) {
+            self.inner.revoked.cancel();
+        }
+    }
+    /// The successful caller marks only its already-prepared acknowledgment
+    /// before waking revocation waiters. Another closer can never grant it.
+    pub(crate) fn close_for_ack(&self, acknowledgment: &AtomicBool) -> bool {
+        if !self.is_active()
+            || self
+                .inner
+                .closed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        acknowledgment.store(true, Ordering::Release);
         self.inner.revoked.cancel();
+        true
     }
     pub fn is_active(&self) -> bool {
         self.reason().is_none()
@@ -109,7 +132,7 @@ impl SubscriptionSession {
         &self.inner.principal == principal
     }
     pub(crate) fn reason(&self) -> Option<SubscriptionResync> {
-        if self.inner.revoked.is_cancelled() {
+        if self.inner.closed.load(Ordering::Acquire) {
             Some(SubscriptionResync::Revoked)
         } else if self
             .inner

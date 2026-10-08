@@ -418,7 +418,19 @@ async fn scoped_capabilities_disable_every_bypass_before_decode_or_provider_invo
     assert_eq!(
         names,
         [
-            "about", "close", "defs", "formats", "libs", "nav", "ops", "read", "readById", "spec",
+            "about",
+            "close",
+            "defs",
+            "filetypes",
+            "formats",
+            "libs",
+            "nav",
+            "ops",
+            "read",
+            "readAll",
+            "readById",
+            "readByIds",
+            "spec",
             "specs"
         ]
     );

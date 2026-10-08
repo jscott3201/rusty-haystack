@@ -35,6 +35,13 @@ pub struct FunctionDescriptor<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Handler {
     ReadById,
+    ReadByIds,
+    Read,
+    ReadAll,
+    About,
+    Close,
+    Libs,
+    Filetypes,
     Ops,
 }
 pub(crate) struct Entry {
@@ -84,6 +91,13 @@ impl Registry {
             &[
                 ("sys.api::readById", Handler::ReadById),
                 ("sys.api::ops", Handler::Ops),
+                ("sys.api::readByIds", Handler::ReadByIds),
+                ("sys.api::read", Handler::Read),
+                ("sys.api::readAll", Handler::ReadAll),
+                ("sys.api::about", Handler::About),
+                ("sys.api::close", Handler::Close),
+                ("sys.api::libs", Handler::Libs),
+                ("sys.api::filetypes", Handler::Filetypes),
             ],
         )
     }
@@ -237,6 +251,31 @@ impl Registry {
     }
 }
 fn validate_binding(declaration: &AdmittedSpec, handler: Handler) -> Result<(), ReadError> {
+    // Handler contracts are checked independently of provenance admission.
+    let shape = |expected: &[(&str, &str, bool, bool, Option<&str>)]| {
+        declaration.spec.slots.len() == expected.len()
+            && expected.iter().all(|(name, ty, maybe, default_true, of)| {
+                declaration
+                    .spec
+                    .slots
+                    .iter()
+                    .find(|s| s.name == *name)
+                    .is_some_and(|slot| {
+                        slot.type_ref.as_deref() == Some(*ty)
+                            && slot.is_maybe() == *maybe
+                            && if *default_true {
+                                slot.default == Some(Kind::Bool(true))
+                            } else {
+                                slot.default.is_none()
+                            }
+                            && match (of, slot.meta.get("of")) {
+                                (Some(of), Some(Kind::Ref(found))) => found.val == *of,
+                                (None, None) => true,
+                                _ => false,
+                            }
+                    })
+            })
+    };
     let slots = &declaration.spec.slots;
     let valid = declaration.member_of.as_deref() == Some("sys::Funcs")
         && declaration.spec.base.as_deref() == Some("sys::Func")
@@ -262,6 +301,58 @@ fn validate_binding(declaration: &AdmittedSpec, handler: Handler) -> Result<(), 
                         }
                         _ => false,
                     })
+            }
+            Handler::ReadByIds => {
+                declaration.spec.qname == "sys.api::readByIds"
+                    && shape(&[
+                        ("ids", "sys::List", false, false, Some("sys::Ref")),
+                        ("checked", "sys::Bool", false, true, None),
+                        ("returns", "sys::Grid", false, false, None),
+                    ])
+            }
+            Handler::Read => {
+                declaration.spec.qname == "sys.api::read"
+                    && shape(&[
+                        ("filter", "sys::Filter", false, false, None),
+                        ("checked", "sys::Bool", false, true, None),
+                        ("returns", "sys::Dict", true, false, None),
+                    ])
+            }
+            Handler::ReadAll => {
+                declaration.spec.qname == "sys.api::readAll"
+                    && shape(&[
+                        ("filter", "sys::Filter", false, false, None),
+                        ("opts", "sys::Dict", true, false, None),
+                        ("returns", "sys::Grid", false, false, None),
+                    ])
+            }
+            Handler::About => {
+                declaration.spec.qname == "sys.api::about"
+                    && shape(&[("returns", "sys.api::AboutInfo", false, false, None)])
+            }
+            Handler::Close => {
+                declaration.spec.qname == "sys.api::close"
+                    && shape(&[("returns", "sys::None", false, false, None)])
+            }
+            Handler::Libs => {
+                declaration.spec.qname == "sys.api::libs"
+                    && shape(&[(
+                        "returns",
+                        "sys::Grid",
+                        false,
+                        false,
+                        Some("sys.api::LibInfo"),
+                    )])
+            }
+            Handler::Filetypes => {
+                declaration.spec.qname == "sys.api::filetypes"
+                    && shape(&[(
+                        "returns",
+                        "sys::Grid",
+                        false,
+                        false,
+                        Some("sys.api::FiletypeInfo"),
+                    )])
             }
             Handler::Ops => {
                 slots.len() == 1
@@ -488,7 +579,7 @@ mod tests {
             .ops(
                 &AllowAll,
                 &mut budget(ReadLimits {
-                    max_retained_bytes: 16_384,
+                    max_retained_bytes: 65_536,
                     ..ReadLimits::default()
                 }),
             )
@@ -510,7 +601,7 @@ mod tests {
                 .ops(
                     &AllowAll,
                     &mut budget(ReadLimits {
-                        max_retained_bytes: 16_384,
+                        max_retained_bytes: 65_536,
                         ..ReadLimits::default()
                     })
                 )

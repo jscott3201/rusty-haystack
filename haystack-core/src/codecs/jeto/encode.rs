@@ -165,7 +165,9 @@ impl<M: Meter> Encoder<'_, M> {
         let class = expected
             .map(|name| resolve(self.context, name, self.meter))
             .transpose()?;
-        if matches!(value, Kind::Str(_)) && matches!(class, Some(Class::Nominal(_))) {
+        if matches!(value, Kind::Str(_))
+            && matches!(class, Some(Class::Nominal(_) | Class::Enum(_)))
+        {
             return self.unsupported(Reason::ContextChangesIdentity);
         }
         let source = scalar::source_bytes(value);
@@ -180,15 +182,24 @@ impl<M: Meter> Encoder<'_, M> {
         if let Kind::Nominal(n) = value {
             charge(
                 self.meter,
-                Charge::Work(n.text().len().saturating_mul(8).saturating_add(1)),
+                Charge::Work(
+                    n.text()
+                        .len()
+                        .saturating_mul(8)
+                        .saturating_add(self.context.enum_work(n.text().len()))
+                        .saturating_add(1),
+                ),
             )?;
-            let Some(Class::Nominal(pattern)) = self.context.lookup(n.spec()) else {
-                return self.unsupported(Reason::CatalogMismatch);
+            let valid = match self.context.lookup(n.spec()) {
+                Some(Class::Nominal(pattern)) => pattern
+                    .is_match(n.text())
+                    .map_err(|_| invalid("nominal matcher failed"))?,
+                Some(Class::Enum(keys)) => keys
+                    .binary_search_by(|key| key.as_str().cmp(n.text()))
+                    .is_ok(),
+                _ => return self.unsupported(Reason::CatalogMismatch),
             };
-            if !pattern
-                .is_match(n.text())
-                .map_err(|_| invalid("nominal matcher failed"))?
-            {
+            if !valid {
                 return self.unsupported(Reason::InvalidScalar);
             }
         }

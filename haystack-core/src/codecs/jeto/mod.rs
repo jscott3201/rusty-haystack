@@ -164,11 +164,16 @@ fn text_charge<M: Meter>(
     context: &Context,
     meter: &mut M,
 ) -> Result<(), Error<M::Error>> {
-    // Immutable DFA membership and primitive scalar parsing perform linear
-    // scans. Matcher tables were bounded and admitted with the context.
+    // DFA parsing is linear; finite enums use bounded binary searches.
+    // Matcher tables were bounded and admitted with the context.
     charge(
         meter,
-        Charge::Work(text.len().saturating_mul(8).saturating_add(1)),
+        Charge::Work(
+            text.len()
+                .saturating_mul(8)
+                .saturating_add(context.enum_work(text.len()))
+                .saturating_add(1),
+        ),
     )?;
     charge(
         meter,
