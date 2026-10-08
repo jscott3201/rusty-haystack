@@ -676,6 +676,11 @@ fn traverse_refs<'a>(
 fn kind_type_name(val: &Kind) -> &'static str {
     match val {
         Kind::Null => "Null",
+        Kind::None => "None",
+        Kind::Int(_) => "Int",
+        Kind::Float(_) => "Float",
+        Kind::Buf(_) => "Buf",
+        Kind::Nominal(_) => "Nominal",
         Kind::Marker => "Marker",
         Kind::NA => "NA",
         Kind::Remove => "Remove",

@@ -15,7 +15,7 @@ use crate::ontology::PyDefNamespace;
 /// Convert a HierarchyNode tree to a nested Python dict.
 fn hierarchy_node_to_py(py: Python<'_>, node: &HierarchyNode) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-    let entity = PyHDict::from_core(&node.entity)
+    let entity = PyHDict::from_core(&node.entity)?
         .into_pyobject(py)?
         .into_any()
         .unbind();
@@ -91,7 +91,10 @@ impl PyGraphDiff {
     fn old(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.old {
             Some(d) => Ok(Some(
-                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+                PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
             )),
             None => Ok(None),
         }
@@ -104,7 +107,10 @@ impl PyGraphDiff {
     fn new_value(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.new {
             Some(d) => Ok(Some(
-                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+                PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
             )),
             None => Ok(None),
         }
@@ -115,7 +121,10 @@ impl PyGraphDiff {
     fn changed_tags(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.changed_tags {
             Some(d) => Ok(Some(
-                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+                PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
             )),
             None => Ok(None),
         }
@@ -126,7 +135,10 @@ impl PyGraphDiff {
     fn previous_tags(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         match &self.previous_tags {
             Some(d) => Ok(Some(
-                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+                PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
             )),
             None => Ok(None),
         }
@@ -143,8 +155,15 @@ impl PyGraphDiff {
 }
 
 impl PyGraphDiff {
-    fn from_core(d: &GraphDiff) -> Self {
-        Self {
+    fn from_core(d: &GraphDiff) -> PyResult<Self> {
+        for dict in [&d.old, &d.new, &d.changed_tags, &d.previous_tags]
+            .into_iter()
+            .flatten()
+        {
+            haystack_core::kinds::projection::ensure_h4_dict(dict)
+                .map_err(crate::convert::unsupported_value)?;
+        }
+        Ok(Self {
             version: d.version,
             timestamp: d.timestamp,
             op: PyDiffOp::from_core(&d.op),
@@ -153,7 +172,7 @@ impl PyGraphDiff {
             new: d.new.clone(),
             changed_tags: d.changed_tags.clone(),
             previous_tags: d.previous_tags.clone(),
-        }
+        })
     }
 }
 
@@ -255,7 +274,7 @@ impl PyEntityGraph {
         self.check_live()?;
         match self.inner.get(ref_val) {
             Some(entity) => Ok(Some(
-                PyHDict::from_core(entity)
+                PyHDict::from_core(entity)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind(),
@@ -275,11 +294,15 @@ impl PyEntityGraph {
     /// Remove an entity by ref value. Returns the removed entity as HDict.
     fn remove(&mut self, py: Python<'_>, ref_val: &str) -> PyResult<Py<PyAny>> {
         self.check_live()?;
+        if let Some(entity) = self.inner.get(ref_val) {
+            haystack_core::kinds::projection::ensure_h4_dict(entity)
+                .map_err(crate::convert::unsupported_value)?;
+        }
         let entity = self
             .inner
             .remove(ref_val)
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))?;
-        Ok(PyHDict::from_core(&entity)
+        Ok(PyHDict::from_core(&entity)?
             .into_pyobject(py)?
             .into_any()
             .unbind())
@@ -293,7 +316,7 @@ impl PyEntityGraph {
             .inner
             .read(filter_expr, limit)
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Return all entities as a list of HDict.
@@ -302,7 +325,12 @@ impl PyEntityGraph {
         self.inner
             .all()
             .into_iter()
-            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
+            .map(|d| {
+                Ok(PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
             .collect()
     }
 
@@ -329,13 +357,15 @@ impl PyEntityGraph {
         self.check_live()?;
         self.inner
             .changes_since(version)
-            .map(|refs| refs.iter().map(|d| PyGraphDiff::from_core(d)).collect())
             .map_err(|gap| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "changelog gap: requested version {}, floor is {}",
                     gap.subscriber_version, gap.floor_version
                 ))
-            })
+            })?
+            .iter()
+            .map(|d| PyGraphDiff::from_core(d))
+            .collect()
     }
 
     /// Enable a B-tree value index on a tag for faster range queries.
@@ -367,7 +397,7 @@ impl PyEntityGraph {
             .inner
             .to_grid(filter_expr)
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     fn __len__(&self) -> PyResult<usize> {
@@ -415,7 +445,12 @@ impl PyEntityGraph {
         self.inner
             .ref_chain(ref_val, &tags)
             .into_iter()
-            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
+            .map(|d| {
+                Ok(PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
             .collect()
     }
 
@@ -424,7 +459,10 @@ impl PyEntityGraph {
         self.check_live()?;
         match self.inner.site_for(ref_val) {
             Some(d) => Ok(Some(
-                PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind(),
+                PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
             )),
             None => Ok(None),
         }
@@ -436,7 +474,12 @@ impl PyEntityGraph {
         self.inner
             .children(ref_val)
             .into_iter()
-            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
+            .map(|d| {
+                Ok(PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
             .collect()
     }
 
@@ -453,7 +496,12 @@ impl PyEntityGraph {
             .equip_points(equip_ref, filter)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_iter()
-            .map(|d| Ok(PyHDict::from_core(d).into_pyobject(py)?.into_any().unbind()))
+            .map(|d| {
+                Ok(PyHDict::from_core(d)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
             .collect()
     }
 
@@ -548,7 +596,7 @@ impl PySharedGraph {
     fn get(&self, py: Python<'_>, ref_val: &str) -> PyResult<Option<Py<PyAny>>> {
         match self.inner.get(ref_val) {
             Some(entity) => Ok(Some(
-                PyHDict::from_core(&entity)
+                PyHDict::from_core(&entity)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind(),
@@ -566,11 +614,18 @@ impl PySharedGraph {
 
     /// Remove an entity by ref value. Returns the removed HDict.
     fn remove(&self, py: Python<'_>, ref_val: &str) -> PyResult<Py<PyAny>> {
-        let entity = self
-            .inner
-            .remove(ref_val)
-            .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))?;
-        Ok(PyHDict::from_core(&entity)
+        // Validate and remove under one write lock, so an unsupported value
+        // cannot be deleted and only then fail conversion to Python.
+        let entity = self.inner.write(|graph| {
+            if let Some(entity) = graph.get(ref_val) {
+                haystack_core::kinds::projection::ensure_h4_dict(entity)
+                    .map_err(crate::convert::unsupported_value)?;
+            }
+            graph
+                .remove(ref_val)
+                .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))
+        })?;
+        Ok(PyHDict::from_core(&entity)?
             .into_pyobject(py)?
             .into_any()
             .unbind())
@@ -584,7 +639,7 @@ impl PySharedGraph {
         let grid = py
             .detach(move || inner.read_filter(&filter, limit))
             .map_err(|e| PyErr::new::<exceptions::GraphError, _>(e.to_string()))?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Return all entities as a list of HDict.
@@ -594,7 +649,7 @@ impl PySharedGraph {
         entities
             .into_iter()
             .map(|d| {
-                Ok(PyHDict::from_core(&d)
+                Ok(PyHDict::from_core(&d)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind())
@@ -639,13 +694,15 @@ impl PySharedGraph {
     fn changes_since(&self, version: u64) -> PyResult<Vec<PyGraphDiff>> {
         self.inner
             .changes_since(version)
-            .map(|refs| refs.iter().map(PyGraphDiff::from_core).collect())
             .map_err(|gap| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "changelog gap: requested version {}, floor is {}",
                     gap.subscriber_version, gap.floor_version
                 ))
-            })
+            })?
+            .iter()
+            .map(PyGraphDiff::from_core)
+            .collect()
     }
 
     /// Validate all entities against the attached namespace. Returns issue strings.
@@ -685,7 +742,7 @@ impl PySharedGraph {
             .ref_chain(ref_val, &tags)
             .into_iter()
             .map(|d| {
-                Ok(PyHDict::from_core(&d)
+                Ok(PyHDict::from_core(&d)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind())
@@ -697,7 +754,7 @@ impl PySharedGraph {
     fn site_for(&self, py: Python<'_>, ref_val: &str) -> PyResult<Option<Py<PyAny>>> {
         match self.inner.site_for(ref_val) {
             Some(d) => Ok(Some(
-                PyHDict::from_core(&d)
+                PyHDict::from_core(&d)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind(),
@@ -712,7 +769,7 @@ impl PySharedGraph {
             .children(ref_val)
             .into_iter()
             .map(|d| {
-                Ok(PyHDict::from_core(&d)
+                Ok(PyHDict::from_core(&d)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind())
@@ -733,7 +790,7 @@ impl PySharedGraph {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
             .into_iter()
             .map(|d| {
-                Ok(PyHDict::from_core(&d)
+                Ok(PyHDict::from_core(&d)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind())
@@ -760,5 +817,45 @@ impl PySharedGraph {
     /// Classify an entity by its most specific type tag.
     fn classify(&self, ref_val: &str) -> Option<String> {
         self.inner.classify(ref_val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use haystack_core::data::HDict;
+    use haystack_core::kinds::{HRef, Kind};
+
+    #[test]
+    fn typed_graph_reads_and_removal_fail_without_mutation_at_python_boundary() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut entity = HDict::new();
+            entity.set("id", Kind::Ref(HRef::from_val("typed")));
+            entity.set("nested", Kind::List(vec![Kind::Int(i64::MAX)]));
+            let mut owned = PyEntityGraph::new();
+            owned.inner.add(entity.clone()).unwrap();
+            let version = owned.inner.version();
+            let is_type_error =
+                |error: PyErr| assert!(error.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+            is_type_error(owned.get(py, "typed").err().unwrap());
+            is_type_error(owned.read("nested", 0).err().unwrap());
+            is_type_error(owned.all(py).err().unwrap());
+            is_type_error(owned.changes_since(0).err().unwrap());
+            is_type_error(owned.remove(py, "typed").err().unwrap());
+            assert_eq!(owned.inner.get("typed"), Some(&entity));
+            assert_eq!(owned.inner.version(), version);
+
+            let shared = PySharedGraph {
+                inner: SharedGraph::new(owned.inner),
+            };
+            is_type_error(shared.get(py, "typed").err().unwrap());
+            is_type_error(shared.read(py, "nested", 0).err().unwrap());
+            is_type_error(shared.all(py).err().unwrap());
+            is_type_error(shared.changes_since(0).err().unwrap());
+            is_type_error(shared.remove(py, "typed").err().unwrap());
+            assert_eq!(shared.inner.get("typed"), Some(entity));
+            assert_eq!(shared.inner.read(EntityGraph::version), version);
+        });
     }
 }

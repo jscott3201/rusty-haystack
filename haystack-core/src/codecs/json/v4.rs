@@ -48,7 +48,11 @@ impl Codec for Json4Codec {
 
 /// Encode a Kind value to a serde_json Value.
 pub fn encode_kind(val: &Kind) -> Result<Value, CodecError> {
+    crate::kinds::projection::ensure_h4(val)?;
     match val {
+        Kind::Int(_) | Kind::Float(_) | Kind::None | Kind::Buf(_) | Kind::Nominal(_) => {
+            Err(CodecError::UnsupportedKind)
+        }
         Kind::Null => Ok(Value::Null),
         Kind::Bool(b) => Ok(Value::Bool(*b)),
         Kind::Marker => Ok(kind_obj("marker", |_| {})),
@@ -160,6 +164,7 @@ fn encode_dict(d: &HDict) -> Result<Value, CodecError> {
 
 /// Encode an HGrid as a JSON object (with `_kind: "grid"`).
 fn encode_grid_value(grid: &HGrid) -> Result<Map<String, Value>, CodecError> {
+    crate::kinds::projection::ensure_h4_grid(grid)?;
     let mut m = Map::new();
     m.insert("_kind".into(), Value::String("grid".into()));
 

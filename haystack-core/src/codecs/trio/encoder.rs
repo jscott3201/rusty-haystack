@@ -13,6 +13,7 @@ use crate::kinds::Kind;
 /// - Multi-line strings (containing \n): `name:` then each line indented with 2 spaces
 /// - All other values: `name: ` + zinc-encoded scalar
 pub fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
+    crate::kinds::projection::ensure_h4_grid(grid)?;
     let mut parts: Vec<String> = Vec::new();
 
     for row in &grid.rows {

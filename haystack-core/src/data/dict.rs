@@ -132,6 +132,18 @@ impl PartialEq for HDict {
     }
 }
 
+impl Eq for HDict {}
+
+impl std::hash::Hash for HDict {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for (name, value) in self.sorted_tags() {
+            name.hash(state);
+            value.hash(state);
+        }
+    }
+}
+
 impl fmt::Display for HDict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "HDict({{")?;

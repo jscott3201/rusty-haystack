@@ -127,8 +127,11 @@ fn resolve_path<'a>(path: &Path, entity: &'a HDict, ctx: Ctx<'a>) -> Option<&'a 
 /// Compare two Kind values using the given comparison operator.
 fn compare(actual: &Kind, op: &CmpOp, expected: &Kind) -> bool {
     match op {
-        CmpOp::Eq => actual == expected,
-        CmpOp::Ne => actual != expected,
+        CmpOp::Eq => match (actual, expected) {
+            (Kind::Float(a), Kind::Float(b)) => a.value() == b.value(),
+            _ => actual == expected,
+        },
+        CmpOp::Ne => !compare(actual, &CmpOp::Eq, expected),
         CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => ordered_cmp(actual, op, expected),
     }
 }
@@ -140,6 +143,8 @@ fn ordered_cmp(actual: &Kind, op: &CmpOp, expected: &Kind) -> bool {
 
     let ordering = match (actual, expected) {
         (Kind::Number(a), Kind::Number(b)) => a.partial_cmp(b),
+        (Kind::Int(a), Kind::Int(b)) => a.partial_cmp(b),
+        (Kind::Float(a), Kind::Float(b)) => a.value().partial_cmp(&b.value()),
         (Kind::Str(a), Kind::Str(b)) => a.partial_cmp(b),
         (Kind::Date(a), Kind::Date(b)) => a.partial_cmp(b),
         (Kind::Time(a), Kind::Time(b)) => a.partial_cmp(b),

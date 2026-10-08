@@ -35,7 +35,7 @@ pub fn decode_grid(codec_name: &str, data: &str) -> PyResult<PyHGrid> {
     let grid = codec
         .decode_grid(data)
         .map_err(|e| PyErr::new::<exceptions::CodecError, _>(e.to_string()))?;
-    Ok(PyHGrid::from_core(&grid))
+    PyHGrid::from_core(&grid)
 }
 
 /// Encode a scalar value to a string using the specified codec.
