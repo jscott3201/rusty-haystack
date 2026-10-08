@@ -38,6 +38,7 @@ pub struct ReadService {
     inner: Arc<Inner>,
 }
 struct Inner {
+    typed_profile: haystack_core::xeto::read_by_id::ReadByIdProfile,
     lifecycle: Option<Arc<Lifecycle>>,
     graph: SharedGraph,
     dataset: [u8; 16],
@@ -105,6 +106,8 @@ impl ReadService {
         limits.validate()?;
         Ok(Self {
             inner: Arc::new(Inner {
+                typed_profile: haystack_core::xeto::read_by_id::ReadByIdProfile::load_http_pinned()
+                    .map_err(|_| ReadError::InvalidLimits)?,
                 lifecycle: None,
                 graph,
                 dataset: rand::random(),
@@ -280,6 +283,33 @@ impl Drop for ReadAdmission {
     }
 }
 impl ReadAdmission {
+    /// Reserve raw bytes and transport copy/storage overhead before allocation.
+    /// Calls accumulate across URI, headers, principal and streamed body frames.
+    pub fn reserve_wire_input(&mut self, bytes: usize) -> Result<(), ReadError> {
+        let budget = self.budget_mut();
+        budget.charge(BudgetKind::Input, bytes)?;
+        budget.charge(BudgetKind::Work, bytes.saturating_mul(4).saturating_add(1))?;
+        budget.charge(
+            BudgetKind::Retained,
+            bytes.saturating_mul(4).saturating_add(256),
+        )
+    }
+    /// Trusted transport authentication binds identity without replacing the
+    /// original permit, deadline, cancellation or cumulative budget.
+    pub fn bind_wire_principal(&mut self, principal: Principal) -> Result<(), ReadError> {
+        self.reserve_wire_input(principal.bytes())?;
+        self.principal = Some(principal);
+        Ok(())
+    }
+    pub async fn read_by_id_wire(
+        self,
+        input: crate::TypedReadInput,
+    ) -> Result<crate::TypedReadResponse, crate::ApiError> {
+        let inner = self.inner.clone();
+        self.run_task(move |principal, budget| Ok(inner.execute_typed(principal, input, budget)))
+            .await
+            .map_err(crate::ApiError::from)?
+    }
     pub fn deadline(&self) -> Instant {
         self.budget.as_ref().expect("live admission").deadline
     }
@@ -433,6 +463,71 @@ fn spawn_worker<T: Send + 'static>(
 }
 
 impl Inner {
+    fn execute_typed(
+        &self,
+        principal: Principal,
+        input: crate::TypedReadInput,
+        budget: &mut Budget,
+    ) -> Result<crate::TypedReadResponse, crate::ApiError> {
+        use crate::{ApiError, typed_read};
+        if principal.bytes() > budget.limits.max_input_bytes {
+            return Err(ApiError::InvalidArgs);
+        }
+        budget.check()?;
+        let request = typed_read::decode(&input, budget)?;
+        let policy = self.policy.snapshot(&principal)?;
+        budget.check()?;
+        if !policy.operation(ReadOperation::Read) {
+            return Err(ApiError::Permission);
+        }
+        // Fitting clones only the declared two small arguments. Reserve before
+        // the native binder constructs its immutable values and origin table.
+        budget.charge(
+            BudgetKind::Retained,
+            input
+                .body
+                .len()
+                .saturating_add(input.query.len())
+                .saturating_mul(4)
+                .saturating_add(4096),
+        )?;
+        let args = self
+            .typed_profile
+            .fit_arguments("sys.api::readById", &request.args)
+            .map_err(|_| ApiError::InvalidArgs)?;
+        let checked = matches!(args.values().get("checked"), Some(Kind::Bool(true)));
+        let value = match args.values().get("id") {
+            Some(Kind::Null) if checked => return typed_read::missing(&request, budget),
+            Some(Kind::Null) => Kind::Null,
+            Some(Kind::Ref(id)) => loop {
+                let wait = budget.wait_quantum()?;
+                if let Some(result) = self.graph.read_for(wait, |graph| {
+                    budget.charge(BudgetKind::Candidates, 1)?;
+                    let mut view = View {
+                        graph,
+                        policy: policy.as_ref(),
+                        budget,
+                    };
+                    view.entity(&id.val)
+                }) {
+                    match result? {
+                        Some(row) => {
+                            break Kind::Dict(Box::new(
+                                Arc::try_unwrap(row).map_err(|_| ApiError::Internal)?,
+                            ));
+                        }
+                        None if checked => return typed_read::missing(&request, budget),
+                        None => break Kind::Null,
+                    }
+                }
+            },
+            _ => return Err(ApiError::Internal),
+        };
+        self.typed_profile
+            .fit_result("sys.api::readById", &value)
+            .map_err(|_| ApiError::Internal)?;
+        typed_read::encode(value, &request, budget)
+    }
     fn execute(
         &self,
         principal: Principal,

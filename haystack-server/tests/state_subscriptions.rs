@@ -408,7 +408,9 @@ async fn unsupported_output_codec_is_rejected_before_creating_a_scoped_watch() {
         haystack_core::codecs::codec_for("text/zinc").unwrap(),
     )
     .unwrap();
-    let response = reqwest::Client::new()
+    let response = haystack_client::ClientConfig::default()
+        .build_reqwest_client()
+        .unwrap()
         .post(format!("{}/watchSub", running.url))
         .header("Authorization", "BEARER authToken=session-a")
         .header("Content-Type", "text/zinc")
