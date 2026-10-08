@@ -1,63 +1,34 @@
-//! WebSocket handler and watch subscription manager.
-//!
-//! This module provides two major components:
-//!
-//! 1. **`WatchManager`** — a thread-safe subscription registry that manages
-//!    watch lifecycles (subscribe, poll, unsubscribe, add/remove IDs).
-//!
-//! 2. **`ws_handler`** — an Axum WebSocket upgrade endpoint (`GET /api/ws`)
-//!    that handles Haystack watch operations over JSON messages.
-
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
-
-use axum::Extension;
-use axum::extract::State;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
-use parking_lot::RwLock;
-use serde_json::{Map, Value};
-use uuid::Uuid;
-
-use haystack_core::codecs::json::v3 as json_v3;
-use haystack_core::data::HDict;
-use haystack_core::graph::SharedGraph;
-
-use crate::auth::AuthUser;
+//! Bounded WebSocket attachments to the application subscription owner.
+//! Queues contain commands, never previously authorized payloads. The writer
+//! executes each command with fresh admission and current policy before emission.
 use crate::state::SharedState;
-
-// ---------------------------------------------------------------------------
-// Tuning constants
-// ---------------------------------------------------------------------------
-
-const MAX_WATCHES: usize = 100;
-const MAX_ENTITY_IDS_PER_WATCH: usize = 1_000;
-/// Maximum total entity IDs a single user can watch across all watches.
-const MAX_TOTAL_WATCHED_IDS: usize = 5_000;
-/// Maximum watches a single user can hold at once.
-const MAX_WATCHES_PER_USER: usize = 20;
-
-/// Maximum entries in the per-connection encode cache.
-const MAX_ENCODE_CACHE_ENTRIES: usize = 50_000;
-
-/// Server-initiated ping interval for liveness detection.
-const PING_INTERVAL: Duration = Duration::from_secs(30);
-
-/// If no pong is received within this duration after a ping, the connection
-/// is considered dead and will be closed.
-const PONG_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// mpsc channel capacity for outbound messages.
-const CHANNEL_CAPACITY: usize = 64;
-
-/// Limit both individual frames and complete reassembled messages.
+use axum::{
+    Extension,
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use futures_util::{FutureExt, SinkExt, StreamExt};
+use haystack_app::{
+    CancellationToken, LegacySubscriptionRequest, ReadAdmission, ReadContext, ReadError,
+    StateSubscriptionService, SubscriptionSession, WorkGuard,
+};
+use haystack_core::{
+    codecs::{json::v3 as json_v3, subscription as wire},
+    data::HDict,
+    kinds::Kind,
+};
+use serde_json::{Map, Value};
+use std::time::{Duration, Instant};
+const MAX_ENTITY_IDS_PER_WATCH: usize = 1000;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const CHANNEL_CAPACITY: usize = 8;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-
-// ---------------------------------------------------------------------------
-// WebSocket message types
-// ---------------------------------------------------------------------------
-
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 /// Incoming JSON message from a WebSocket client.
 #[derive(serde::Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -124,25 +95,6 @@ fn encode_entity(entity: &HDict) -> Value {
     Value::Object(m)
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket op dispatch
-// ---------------------------------------------------------------------------
-
-/// Handle a parsed `WsRequest` by dispatching to the appropriate watch op.
-fn handle_ws_request(req: &WsRequest, username: &str, state: &SharedState) -> String {
-    let resp = if !valid_arguments(req) {
-        WsResponse::error(Some(req.req_id.clone()), "unsupported watch arguments")
-    } else {
-        match req.op.as_str() {
-            "watchSub" => handle_watch_sub(req, username, state),
-            "watchPoll" => handle_watch_poll(req, username, state),
-            "watchUnsub" => handle_watch_unsub(req, username, state),
-            _ => WsResponse::error(Some(req.req_id.clone()), "unsupported WebSocket operation"),
-        }
-    };
-    serde_json::to_string(&resp).expect("watch response contains only JSON values")
-}
-
 fn valid_arguments(req: &WsRequest) -> bool {
     let valid_ids = req.ids.as_ref().is_none_or(|ids| {
         ids.len() <= MAX_ENTITY_IDS_PER_WATCH
@@ -166,502 +118,381 @@ fn valid_arguments(req: &WsRequest) -> bool {
         }
 }
 
-fn handle_watch_sub(req: &WsRequest, username: &str, state: &SharedState) -> WsResponse {
-    let ids = match &req.ids {
-        Some(ids) if !ids.is_empty() => ids.clone(),
-        _ => {
-            return WsResponse::error(
-                Some(req.req_id.clone()),
-                "watchSub requires non-empty 'ids' array",
-            );
-        }
-    };
-
-    // Strip leading '@' from ref strings if present.
-    let ids: Vec<String> = ids
-        .into_iter()
-        .map(|id| id.strip_prefix('@').unwrap_or(&id).to_string())
-        .collect();
-
-    let graph_version = state.graph.version();
-    let watch_id = match state
-        .watches
-        .subscribe(username, ids.clone(), graph_version)
-    {
-        Ok(wid) => wid,
-        Err(e) => return WsResponse::error(Some(req.req_id.clone()), e),
-    };
-
-    let rows: Vec<Value> = ids
-        .iter()
-        .filter_map(|id| state.graph.get(id).map(|e| encode_entity(&e)))
-        .collect();
-
-    WsResponse::ok(Some(req.req_id.clone()), rows, Some(watch_id))
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedFrame {
+    profile: String,
+    #[serde(rename = "reqId")]
+    req_id: String,
+    payload: String,
 }
-
-fn handle_watch_poll(req: &WsRequest, username: &str, state: &SharedState) -> WsResponse {
-    let watch_id = match &req.watch_id {
-        Some(wid) => wid.clone(),
-        None => {
-            return WsResponse::error(Some(req.req_id.clone()), "watchPoll requires 'watchId'");
-        }
-    };
-
-    match state.watches.poll(&watch_id, username, &state.graph) {
-        Some(changed) => {
-            let rows: Vec<Value> = changed.iter().map(encode_entity).collect();
-            WsResponse::ok(Some(req.req_id.clone()), rows, Some(watch_id))
-        }
-        None => WsResponse::error(Some(req.req_id.clone()), "watch not found"),
+impl ScopedFrame {
+    fn valid(&self) -> bool {
+        self.profile == wire::PROFILE
+            && self
+                .req_id
+                .parse::<u64>()
+                .is_ok_and(|id| id != 0 && id.to_string() == self.req_id)
+            && self.payload.len() <= wire::MAX_PAYLOAD_BYTES
+    }
+}
+enum Command {
+    Scoped(ScopedFrame),
+    Legacy(WsRequest),
+    Push,
+    Control(Message),
+}
+struct Attachment {
+    service: StateSubscriptionService,
+    connection: [u8; 16],
+}
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        self.service.detach_legacy_connection(self.connection);
     }
 }
 
-fn handle_watch_unsub(req: &WsRequest, username: &str, state: &SharedState) -> WsResponse {
-    let watch_id = match &req.watch_id {
-        Some(wid) => wid.clone(),
-        None => {
-            return WsResponse::error(Some(req.req_id.clone()), "watchUnsub requires 'watchId'");
-        }
-    };
-
-    if let Some(ids) = &req.ids
-        && !ids.is_empty()
-    {
-        let clean: Vec<String> = ids
-            .iter()
-            .map(|id| id.strip_prefix('@').unwrap_or(id).to_string())
-            .collect();
-        if !state.watches.remove_ids(&watch_id, username, &clean) {
-            return WsResponse::error(Some(req.req_id.clone()), "watch not found");
-        }
-        return WsResponse::ok(Some(req.req_id.clone()), vec![], Some(watch_id));
-    }
-
-    if !state.watches.unsubscribe(&watch_id, username) {
-        return WsResponse::error(Some(req.req_id.clone()), "watch not found");
-    }
-    WsResponse::ok(Some(req.req_id.clone()), vec![], None)
-}
-
-/// A single watch subscription.
-struct Watch {
-    /// Entity IDs being watched.
-    entity_ids: HashSet<String>,
-    /// Graph version at last poll.
-    last_version: u64,
-    /// Username of the watch owner.
-    owner: String,
-}
-
-/// Manages watch subscriptions for change polling.
-pub struct WatchManager {
-    watches: RwLock<HashMap<String, Watch>>,
-    /// Cached entity encodings keyed by (ref_val, version) for watch poll.
-    encode_cache: RwLock<HashMap<(String, u64), Value>>,
-    /// Graph version at which the encode cache was last validated.
-    cache_version: RwLock<u64>,
-}
-
-impl WatchManager {
-    /// Create a new empty WatchManager.
-    pub fn new() -> Self {
-        Self {
-            watches: RwLock::new(HashMap::new()),
-            encode_cache: RwLock::new(HashMap::new()),
-            cache_version: RwLock::new(0),
-        }
-    }
-
-    /// Subscribe to changes on a set of entity IDs.
-    pub fn subscribe(
-        &self,
-        username: &str,
-        ids: Vec<String>,
-        graph_version: u64,
-    ) -> Result<String, String> {
-        let mut watches = self.watches.write();
-        if watches.len() >= MAX_WATCHES {
-            return Err("maximum number of watches reached".to_string());
-        }
-        let user_count = watches.values().filter(|w| w.owner == username).count();
-        if user_count >= MAX_WATCHES_PER_USER {
-            return Err(format!(
-                "user '{}' has reached the maximum of {} watches",
-                username, MAX_WATCHES_PER_USER
-            ));
-        }
-        if ids.len() > MAX_ENTITY_IDS_PER_WATCH {
-            return Err(format!(
-                "too many entity IDs (max {})",
-                MAX_ENTITY_IDS_PER_WATCH
-            ));
-        }
-        let user_total: usize = watches
-            .values()
-            .filter(|w| w.owner == username)
-            .map(|w| w.entity_ids.len())
-            .sum();
-        if user_total + ids.len() > MAX_TOTAL_WATCHED_IDS {
-            return Err(format!(
-                "user '{}' would exceed the maximum of {} total watched IDs",
-                username, MAX_TOTAL_WATCHED_IDS
-            ));
-        }
-        let watch_id = Uuid::new_v4().to_string();
-        let watch = Watch {
-            entity_ids: ids.into_iter().collect(),
-            last_version: graph_version,
-            owner: username.to_string(),
-        };
-        watches.insert(watch_id.clone(), watch);
-        Ok(watch_id)
-    }
-
-    /// Poll for changes since the last poll.
-    pub fn poll(&self, watch_id: &str, username: &str, graph: &SharedGraph) -> Option<Vec<HDict>> {
-        let (entity_ids, last_version) = {
-            let mut watches = self.watches.write();
-            let watch = watches.get_mut(watch_id)?;
-            if watch.owner != username {
-                return None;
-            }
-
-            let current_version = graph.version();
-            if current_version == watch.last_version {
-                return Some(Vec::new());
-            }
-
-            let ids = watch.entity_ids.clone();
-            let last = watch.last_version;
-            watch.last_version = current_version;
-            (ids, last)
-        };
-
-        let changes = match graph.changes_since(last_version) {
-            Ok(c) => c,
-            Err(_gap) => {
-                return Some(entity_ids.iter().filter_map(|id| graph.get(id)).collect());
-            }
-        };
-        let changed_refs: HashSet<&str> = changes.iter().map(|d| d.ref_val.as_str()).collect();
-
-        Some(
-            entity_ids
-                .iter()
-                .filter(|id| changed_refs.contains(id.as_str()))
-                .filter_map(|id| graph.get(id))
-                .collect(),
-        )
-    }
-
-    /// Unsubscribe a watch by ID.
-    pub fn unsubscribe(&self, watch_id: &str, username: &str) -> bool {
-        let mut watches = self.watches.write();
-        match watches.get(watch_id) {
-            Some(watch) if watch.owner == username => {
-                watches.remove(watch_id);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Add entity IDs to an existing watch.
-    pub fn add_ids(&self, watch_id: &str, username: &str, ids: Vec<String>) -> bool {
-        let mut watches = self.watches.write();
-
-        let (owner_ok, per_watch_ok, user_total) = match watches.get(watch_id) {
-            Some(watch) => (
-                watch.owner == username,
-                watch.entity_ids.len() + ids.len() <= MAX_ENTITY_IDS_PER_WATCH,
-                watches
-                    .values()
-                    .filter(|w| w.owner == username)
-                    .map(|w| w.entity_ids.len())
-                    .sum::<usize>(),
-            ),
-            None => return false,
-        };
-
-        if !owner_ok || !per_watch_ok {
-            return false;
-        }
-        if user_total + ids.len() > MAX_TOTAL_WATCHED_IDS {
-            return false;
-        }
-
-        if let Some(watch) = watches.get_mut(watch_id) {
-            watch.entity_ids.extend(ids);
-        }
-        true
-    }
-
-    /// Remove specific entity IDs from an existing watch.
-    pub fn remove_ids(&self, watch_id: &str, username: &str, ids: &[String]) -> bool {
-        let mut watches = self.watches.write();
-        if let Some(watch) = watches.get_mut(watch_id) {
-            if watch.owner != username {
-                return false;
-            }
-            for id in ids {
-                watch.entity_ids.remove(id);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Remove all watches owned by a given user.
-    pub fn remove_by_owner(&self, owner: &str) {
-        let mut watches = self.watches.write();
-        watches.retain(|_, w| w.owner != owner);
-    }
-
-    /// Return the list of entity IDs for a given watch.
-    pub fn get_ids(&self, watch_id: &str) -> Option<Vec<String>> {
-        let watches = self.watches.read();
-        watches
-            .get(watch_id)
-            .map(|w| w.entity_ids.iter().cloned().collect())
-    }
-
-    /// Return the number of active watches.
-    pub fn len(&self) -> usize {
-        self.watches.read().len()
-    }
-
-    /// Return whether there are no active watches.
-    pub fn is_empty(&self) -> bool {
-        self.watches.read().is_empty()
-    }
-
-    /// Encode an entity using the cache.
-    pub fn encode_cached(&self, ref_val: &str, graph_version: u64, entity: &HDict) -> Value {
-        {
-            let mut cv = self.cache_version.write();
-            if graph_version > *cv {
-                self.encode_cache.write().clear();
-                *cv = graph_version;
-            }
-        }
-
-        let key = (ref_val.to_string(), graph_version);
-        if let Some(cached) = self.encode_cache.read().get(&key) {
-            return cached.clone();
-        }
-
-        let encoded = encode_entity(entity);
-        let mut cache = self.encode_cache.write();
-        cache.insert(key, encoded.clone());
-        if cache.len() > MAX_ENCODE_CACHE_ENTRIES {
-            let to_remove = cache.len() / 4;
-            let keys: Vec<_> = cache.keys().take(to_remove).cloned().collect();
-            for k in keys {
-                cache.remove(&k);
-            }
-        }
-        encoded
-    }
-
-    /// Get the IDs of all entities watched by any watch.
-    pub fn all_watched_ids(&self) -> HashSet<String> {
-        let watches = self.watches.read();
-        watches
-            .values()
-            .flat_map(|w| w.entity_ids.iter().cloned())
-            .collect()
-    }
-
-    /// Find watches that contain any of the given changed ref_vals.
-    pub fn watches_affected_by(
-        &self,
-        changed_refs: &HashSet<&str>,
-    ) -> Vec<(String, String, Vec<String>)> {
-        let watches = self.watches.read();
-        let mut affected = Vec::new();
-        for (wid, watch) in watches.iter() {
-            let matched: Vec<String> = watch
-                .entity_ids
-                .iter()
-                .filter(|id| changed_refs.contains(id.as_str()))
-                .cloned()
-                .collect();
-            if !matched.is_empty() {
-                affected.push((wid.clone(), watch.owner.clone(), matched));
-            }
-        }
-        affected
-    }
-}
-
-impl Default for WatchManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket handler
-// ---------------------------------------------------------------------------
-
-/// WebSocket upgrade handler for `/api/ws`.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
-    auth: Option<Extension<AuthUser>>,
-    admission: Option<Extension<std::sync::Arc<haystack_app::WorkGuard>>>,
+    headers: HeaderMap,
+    session: Option<Extension<SubscriptionSession>>,
+    admission: Option<Extension<std::sync::Arc<WorkGuard>>>,
 ) -> Response {
-    let username = auth
-        .map(|Extension(u)| u.username)
-        .unwrap_or_else(|| "anonymous".into());
-    let guard = admission.map(|Extension(guard)| guard.child());
-    ws.max_message_size(MAX_MESSAGE_SIZE)
-        .max_frame_size(MAX_MESSAGE_SIZE)
-        .max_write_buffer_size(MAX_MESSAGE_SIZE * 2)
-        .on_upgrade(move |socket| handle_socket(socket, username, state, guard))
+    let Some(service) = state.subscription_service.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let scoped = headers
+        .get("Sec-WebSocket-Protocol")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim() == wire::WS_PROTOCOL)
+        });
+    if !scoped && state.profile == crate::capabilities::ServiceProfile::ScopedReadService {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let session = match session {
+        Some(Extension(session)) => session,
+        None if !scoped => service.anonymous_legacy_session(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let Some(Extension(guard)) = admission else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let closing = state
+        .application
+        .as_ref()
+        .map(|app| app.closing())
+        .unwrap_or_default();
+    let limit = if scoped {
+        wire::MAX_WIRE_BYTES
+    } else {
+        MAX_MESSAGE_SIZE
+    };
+    ws.protocols([wire::WS_PROTOCOL])
+        .max_message_size(limit)
+        .max_frame_size(limit)
+        .max_write_buffer_size(limit * 2)
+        .on_upgrade(move |socket| {
+            handle_socket(socket, service, session, guard.child(), closing, scoped)
+        })
 }
-
-/// Preserve the current username-scoped cleanup policy on every exit, including cancellation.
-struct WatchCleanup {
-    username: String,
-    state: SharedState,
+async fn begin(
+    service: &StateSubscriptionService,
+    session: &SubscriptionSession,
+    guard: &WorkGuard,
+) -> Result<ReadAdmission, ReadError> {
+    service
+        .read_service()
+        .begin_admitted(
+            ReadContext::new(
+                session.principal().clone(),
+                Instant::now() + service.read_service().limits().max_duration,
+                CancellationToken::new(),
+            ),
+            guard.child(),
+        )
+        .await
 }
-impl Drop for WatchCleanup {
-    fn drop(&mut self) {
-        self.state.watches.remove_by_owner(&self.username);
+async fn legacy_response(
+    request: WsRequest,
+    service: &StateSubscriptionService,
+    session: &SubscriptionSession,
+    connection: [u8; 16],
+    guard: &WorkGuard,
+) -> Result<WsResponse, ReadError> {
+    let id = Some(request.req_id.clone());
+    if !valid_arguments(&request) {
+        return Ok(WsResponse::error(id, "unsupported watch arguments"));
+    }
+    let ids = request
+        .ids
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| id.strip_prefix('@').unwrap_or(&id).to_string())
+        .collect();
+    let operation = match request.op.as_str() {
+        "watchSub" => LegacySubscriptionRequest::Subscribe { watch: None, ids },
+        "watchPoll" => LegacySubscriptionRequest::Poll {
+            watch: request.watch_id.expect("validated watch"),
+        },
+        "watchUnsub" => LegacySubscriptionRequest::Unsubscribe {
+            watch: request.watch_id.expect("validated watch"),
+            ids,
+        },
+        _ => return Ok(WsResponse::error(id, "unsupported WebSocket operation")),
+    };
+    let result = async {
+        let admission = begin(service, session, guard).await?;
+        service
+            .legacy_admitted(admission, session.clone(), operation, Some(connection))
+            .await
+    }
+    .await;
+    match result {
+        Ok(grid) => {
+            let watch = match grid.meta.get("watchId") {
+                Some(Kind::Str(watch)) => Some(watch.clone()),
+                _ => None,
+            };
+            Ok(WsResponse::ok(
+                id,
+                grid.rows.iter().map(encode_entity).collect(),
+                watch,
+            ))
+        }
+        Err(error @ ReadError::Budget(_)) => Err(error),
+        Err(_) => Ok(WsResponse::error(id, "watch unavailable or rejected")),
     }
 }
-
-/// Return a terminal close code instead of silently dropping an outbound message.
-fn enqueue(tx: &tokio::sync::mpsc::Sender<Message>, message: Message) -> Result<(), u16> {
-    if matches!(&message, Message::Text(text) if text.len() > MAX_MESSAGE_SIZE) {
-        return Err(1009);
+async fn process(
+    command: Command,
+    service: &StateSubscriptionService,
+    session: &SubscriptionSession,
+    connection: [u8; 16],
+    guard: &WorkGuard,
+) -> Result<Vec<Message>, ReadError> {
+    match command {
+        Command::Control(message) => Ok(vec![message]),
+        Command::Legacy(request) => {
+            let response = legacy_response(request, service, session, connection, guard).await?;
+            Ok(vec![Message::Text(
+                serde_json::to_string(&response)
+                    .expect("JSON response")
+                    .into(),
+            )])
+        }
+        Command::Scoped(frame) => {
+            let admission = begin(service, session, guard).await?;
+            let body = service
+                .payload_admitted(admission, session.clone(), frame.payload.into_bytes())
+                .await?;
+            let payload = String::from_utf8(body).map_err(|_| ReadError::Unavailable)?;
+            let response = ScopedFrame {
+                profile: wire::PROFILE.into(),
+                req_id: frame.req_id,
+                payload,
+            };
+            Ok(vec![Message::Text(
+                serde_json::to_string(&response)
+                    .expect("JSON response")
+                    .into(),
+            )])
+        }
+        Command::Push => {
+            let admission = begin(service, session, guard).await?;
+            let pushes = service
+                .legacy_push_admitted(admission, session.clone(), connection)
+                .await?;
+            Ok(pushes.into_iter().filter(|(_,grid)|!grid.rows.is_empty()).map(|(watch,grid)|Message::Text(serde_json::json!({"type":"push","watchId":watch,"rows":grid.rows.iter().map(encode_entity).collect::<Vec<_>>()} ).to_string().into())).collect())
+        }
     }
-    tx.try_send(message).map_err(|_| 1013)
 }
-
-async fn forward_messages<S>(
+struct WriterContext {
+    service: StateSubscriptionService,
+    session: SubscriptionSession,
+    connection: [u8; 16],
+    guard: WorkGuard,
+    closing: CancellationToken,
+    scoped: bool,
+}
+async fn write_commands<S>(
     mut sender: S,
-    mut rx: tokio::sync::mpsc::Receiver<Message>,
+    mut rx: tokio::sync::mpsc::Receiver<Command>,
     mut stopped: tokio::sync::watch::Receiver<Option<u16>>,
-    write_timeout: Duration,
+    context: WriterContext,
 ) where
     S: futures_util::Sink<Message> + Unpin,
 {
-    use futures_util::SinkExt;
-    loop {
-        tokio::select! {
-            biased;
-            _ = stopped.changed() => {
-                let code = (*stopped.borrow()).unwrap_or(1000);
-                let _ = tokio::time::timeout(write_timeout, sender.send(Message::Close(Some(axum::extract::ws::CloseFrame { code, reason: "connection ended".into() })))).await;
+    let WriterContext {
+        service,
+        session,
+        connection,
+        guard,
+        closing,
+        scoped,
+    } = context;
+    let limit = if scoped {
+        wire::MAX_WIRE_BYTES
+    } else {
+        MAX_MESSAGE_SIZE
+    };
+    'commands: loop {
+        if !session.is_active() || closing.is_cancelled() || stopped.borrow().is_some() {
+            break;
+        }
+        let command = tokio::select! {biased;_=session.closed()=>break,_=closing.cancelled()=>break,_=stopped.changed()=>break,command=rx.recv()=>match command{Some(command)=>command,None=>break}};
+        // Wait for sink capacity before authorizing and serializing a command.
+        // A stalled network must not retain an authorized disclosure for later.
+        let ready = tokio::select! {biased;_=session.closed()=>break,_=closing.cancelled()=>break,_=stopped.changed()=>break,result=tokio::time::timeout(WRITE_TIMEOUT,futures_util::future::poll_fn(|cx|std::pin::Pin::new(&mut sender).poll_ready(cx)))=>result};
+        if !matches!(ready, Ok(Ok(()))) {
+            break;
+        }
+        let result = tokio::select! {biased;_=session.closed()=>break,_=closing.cancelled()=>break,_=stopped.changed()=>break,result=process(command,&service,&session,connection,&guard)=>result};
+        let Ok(messages) = result else { break };
+        for (index, message) in messages.into_iter().enumerate() {
+            if index > 0 {
+                let ready = tokio::select! {biased;_=session.closed()=>break 'commands,_=closing.cancelled()=>break 'commands,_=stopped.changed()=>break 'commands,result=tokio::time::timeout(WRITE_TIMEOUT,futures_util::future::poll_fn(|cx|std::pin::Pin::new(&mut sender).poll_ready(cx)))=>result};
+                if !matches!(ready, Ok(Ok(()))) {
+                    return;
+                }
+            }
+
+            if matches!(&message,Message::Text(text) if text.len()>limit) {
+                let _ = tokio::time::timeout(
+                    WRITE_TIMEOUT,
+                    sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1009,
+                        reason: "message too large".into(),
+                    }))),
+                )
+                .await;
+                return;
+            }
+            if !session.is_active() || closing.is_cancelled() || stopped.borrow().is_some() {
                 break;
             }
-            message = rx.recv() => {
-                let Some(message) = message else { break; };
-                let sending = sender.send(message);
-                tokio::select! {
-                    biased;
-                    _ = stopped.changed() => break,
-                    result = tokio::time::timeout(write_timeout, sending) => if !matches!(result, Ok(Ok(()))) { break; },
-                }
+            if std::pin::Pin::new(&mut sender).start_send(message).is_err() {
+                return;
+            }
+            let sent = tokio::select! {biased;_=session.closed()=>break 'commands,_=closing.cancelled()=>break 'commands,_=stopped.changed()=>break 'commands,result=tokio::time::timeout(WRITE_TIMEOUT,sender.flush())=>result};
+            if !matches!(sent, Ok(Ok(()))) {
+                return;
             }
         }
     }
+    // Closing the application can also drop the authentication manager and
+    // revoke its sessions. Preserve the application shutdown close code even
+    // when that revocation wins a race with the reader's terminal notification.
+    let terminal = if closing.is_cancelled() {
+        Some(1001)
+    } else if !session.is_active() {
+        Some(1008)
+    } else {
+        *stopped.borrow()
+    };
+    if let Some(code) = terminal {
+        // Teardown does not wait for a blocked sink to become writable. A ready
+        // peer receives the terminal frame; a stalled peer loses the transport.
+        if !matches!(
+            futures_util::future::poll_fn(|cx| std::pin::Pin::new(&mut sender).poll_ready(cx))
+                .now_or_never(),
+            Some(Ok(()))
+        ) {
+            return;
+        }
+        if scoped && code == 1013 && session.is_active() && !closing.is_cancelled() {
+            let payload = String::from_utf8(
+                wire::encode(&haystack_app::SubscriptionOutcome::Resync(
+                    haystack_app::SubscriptionResync::Overflow,
+                ))
+                .expect("bounded outcome"),
+            )
+            .expect("UTF8");
+            let frame = ScopedFrame {
+                profile: wire::PROFILE.into(),
+                req_id: "0".into(),
+                payload,
+            };
+            let _ = tokio::time::timeout(
+                WRITE_TIMEOUT,
+                sender.send(Message::Text(
+                    serde_json::to_string(&frame).expect("JSON").into(),
+                )),
+            )
+            .await;
+        }
+        let _ = tokio::time::timeout(
+            WRITE_TIMEOUT,
+            sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code,
+                reason: "connection ended".into(),
+            }))),
+        )
+        .await;
+    }
 }
-
-/// The connection owns its writer. Queue overflow or writer failure is terminal;
-/// no correlated response or push is silently discarded while the socket stays open.
 async fn handle_socket(
     socket: WebSocket,
-    username: String,
-    state: SharedState,
-    guard: Option<haystack_app::WorkGuard>,
+    service: StateSubscriptionService,
+    session: SubscriptionSession,
+    guard: WorkGuard,
+    closing: CancellationToken,
+    scoped: bool,
 ) {
-    use futures_util::StreamExt;
-    use tokio::{
-        sync::{mpsc, watch},
-        task::JoinSet,
+    let connection = rand::random();
+    let _attachment = Attachment {
+        service: service.clone(),
+        connection,
     };
-    let _cleanup = WatchCleanup {
-        username: username.clone(),
-        state: state.clone(),
-    };
-    let (tx, rx) = mpsc::channel::<Message>(CHANNEL_CAPACITY);
-    let (stop, stopped) = watch::channel::<Option<u16>>(None);
+    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+    let (stop, stopped) = tokio::sync::watch::channel(None);
     let (sender, mut receiver) = socket.split();
-    let mut writer = JoinSet::new();
-    let cancellation = guard
-        .as_ref()
-        .map(haystack_app::WorkGuard::cancellation)
-        .unwrap_or_default();
-    let writer_guard = guard.as_ref().map(haystack_app::WorkGuard::child);
-    writer.spawn(async move {
-        let _guard = writer_guard;
-        forward_messages(sender, rx, stopped, WRITE_TIMEOUT).await;
-    });
-    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
-    ping_interval.tick().await;
+    let mut writer = tokio::task::JoinSet::new();
+    writer.spawn(write_commands(
+        sender,
+        rx,
+        stopped,
+        WriterContext {
+            service: service.clone(),
+            session: session.clone(),
+            connection,
+            guard: guard.child(),
+            closing: closing.clone(),
+            scoped,
+        },
+    ));
+    let mut pings = tokio::time::interval(PING_INTERVAL);
+    pings.tick().await;
+    let mut pushes = tokio::time::interval(Duration::from_millis(500));
+    pushes.tick().await;
+    let mut last_push = service.read_service().graph().version();
     let mut pong_deadline = None;
-    let mut last_push_version = state.graph.version();
-    let mut push_interval = tokio::time::interval(Duration::from_millis(500));
-    push_interval.tick().await;
-    let close_code = 'connection: loop {
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => break 1001,
-            _ = writer.join_next() => break 1011,
-            _ = async {
-                match pong_deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending::<()>().await,
-                }
-            } => break 1001,
-            message = receiver.next() => {
-                let Some(Ok(message)) = message else { break 1002; };
-                match message {
-                    Message::Text(text) => {
-                        let Ok(request) = serde_json::from_str::<WsRequest>(&text) else { break 1002; };
-                        if request.req_id.is_empty() || request.req_id.len() > 128 { break 1002; }
-                        let response = handle_ws_request(&request, &username, &state);
-                        if let Err(code) = enqueue(&tx, Message::Text(response.into())) { break code; }
-                    }
-                    Message::Ping(payload) => if let Err(code) = enqueue(&tx, Message::Pong(payload)) { break code; },
-                    Message::Pong(_) => { pong_deadline = None; }
-                    Message::Close(_) => break 1000,
-                    Message::Binary(_) => break 1003,
-                }
-            }
-            _ = ping_interval.tick() => {
-                if let Err(code) = enqueue(&tx, Message::Ping(vec![].into())) { break code; }
-                pong_deadline = Some(tokio::time::Instant::now() + PONG_TIMEOUT);
-            }
-            _ = push_interval.tick() => {
-                let current_version = state.graph.version();
-                if current_version > last_push_version {
-                    let changes = match state.graph.changes_since(last_push_version) {
-                        Ok(changes) => changes,
-                        Err(_) => break 1011,
-                    };
-                    let changed_refs: HashSet<&str> = changes.iter().map(|d| d.ref_val.as_str()).collect();
-                    for (watch_id, owner, changed_ids) in state.watches.watches_affected_by(&changed_refs) {
-                        if owner != username { continue; }
-                        let rows: Vec<Value> = changed_ids.iter().filter_map(|id| {
-                            let entity = state.graph.get(id)?;
-                            Some(state.watches.encode_cached(id, current_version, &entity))
-                        }).collect();
-                        if rows.is_empty() { continue; }
-                        let text = serde_json::json!({"type":"push", "watchId":watch_id, "rows":rows}).to_string();
-                        if let Err(code) = enqueue(&tx, Message::Text(text.into())) { break 'connection code; }
-                    }
-                    last_push_version = current_version;
-                }
-            }
+    let code = loop {
+        tokio::select! {biased;
+            _=closing.cancelled()=>break 1001,
+            _=session.closed()=>break 1008,
+            _=writer.join_next()=>break 1011,
+            _=async{if let Some(deadline)=pong_deadline{tokio::time::sleep_until(deadline).await}else{std::future::pending::<()>().await}}=>break 1001,
+            message=receiver.next()=>{
+                let Some(Ok(message))=message else{break 1002};
+                let command=match message{
+                    Message::Text(text) if scoped=>{let Ok(frame)=serde_json::from_str::<ScopedFrame>(&text) else{break 1002};if !frame.valid(){break 1002}Command::Scoped(frame)},
+                    Message::Text(text)=>{let Ok(request)=serde_json::from_str::<WsRequest>(&text) else{break 1002};if request.req_id.is_empty()||request.req_id.len()>128{break 1002}Command::Legacy(request)},
+                    Message::Ping(payload)=>Command::Control(Message::Pong(payload)),
+                    Message::Pong(_)=>{pong_deadline=None;continue},
+                    Message::Close(_)=>break 1000,
+                    Message::Binary(_)=>break 1003,
+                };
+                if tx.try_send(command).is_err(){break 1013}
+            },
+            _=pings.tick()=>{if tx.try_send(Command::Control(Message::Ping(Vec::new().into()))).is_err(){break 1013}pong_deadline=Some(tokio::time::Instant::now()+PONG_TIMEOUT);},
+            _=pushes.tick(),if !scoped=>{let current=service.read_service().graph().version();if current>last_push{if tx.try_send(Command::Push).is_err(){break 1013}last_push=current;}},
         }
     };
-    let _ = stop.send(Some(close_code));
+    let _ = stop.send(Some(code));
     drop(tx);
     if tokio::time::timeout(WRITE_TIMEOUT, writer.join_next())
         .await
@@ -671,260 +502,9 @@ async fn handle_socket(
         while writer.join_next().await.is_some() {}
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use haystack_core::graph::{EntityGraph, SharedGraph};
-    use haystack_core::kinds::{HRef, Kind};
-
-    #[test]
-    fn outbound_queue_and_message_limits_produce_terminal_codes() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
-        for _ in 0..CHANNEL_CAPACITY {
-            assert_eq!(enqueue(&tx, Message::Text("{}".into())), Ok(()));
-        }
-        assert_eq!(enqueue(&tx, Message::Text("{}".into())), Err(1013));
-        assert_eq!(
-            enqueue(&tx, Message::Text("x".repeat(MAX_MESSAGE_SIZE + 1).into())),
-            Err(1009)
-        );
-    }
-
-    struct BlockedSink {
-        dropped: Option<tokio::sync::oneshot::Sender<()>>,
-    }
-    impl Drop for BlockedSink {
-        fn drop(&mut self) {
-            if let Some(dropped) = self.dropped.take() {
-                let _ = dropped.send(());
-            }
-        }
-    }
-    impl futures_util::Sink<Message> for BlockedSink {
-        type Error = std::convert::Infallible;
-        fn poll_ready(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Pending
-        }
-        fn start_send(self: std::pin::Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
-            Ok(())
-        }
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Pending
-        }
-        fn poll_close(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Pending
-        }
-    }
-    #[tokio::test]
-    async fn blocked_writer_is_bounded_and_owned_by_the_connection() {
-        for abort in [false, true] {
-            let (dropped, observed) = tokio::sync::oneshot::channel();
-            let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
-            let (_stop, stopped) = tokio::sync::watch::channel(None);
-            enqueue(&tx, Message::Text("{}".into())).unwrap();
-            let mut tasks = tokio::task::JoinSet::new();
-            tasks.spawn(forward_messages(
-                BlockedSink {
-                    dropped: Some(dropped),
-                },
-                rx,
-                stopped,
-                Duration::from_millis(10),
-            ));
-            if abort {
-                drop(tasks);
-            } else {
-                tokio::time::timeout(Duration::from_millis(300), tasks.join_next())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap();
-            }
-            tokio::time::timeout(Duration::from_millis(300), observed)
-                .await
-                .unwrap()
-                .unwrap();
-        }
-    }
-
-    fn make_graph_with_entity(id: &str) -> SharedGraph {
-        let graph = SharedGraph::new(EntityGraph::new());
-        let mut entity = HDict::new();
-        entity.set("id", Kind::Ref(HRef::from_val(id)));
-        entity.set("site", Kind::Marker);
-        entity.set("dis", Kind::Str(format!("Site {id}")));
-        graph.add(entity).unwrap();
-        graph
-    }
-
-    #[test]
-    fn subscribe_returns_watch_id() {
-        let wm = WatchManager::new();
-        let watch_id = wm.subscribe("admin", vec!["site-1".into()], 0).unwrap();
-        assert!(!watch_id.is_empty());
-    }
-
-    #[test]
-    fn poll_no_changes() {
-        let graph = make_graph_with_entity("site-1");
-        let wm = WatchManager::new();
-        let version = graph.version();
-        let watch_id = wm
-            .subscribe("admin", vec!["site-1".into()], version)
-            .unwrap();
-
-        let changes = wm.poll(&watch_id, "admin", &graph).unwrap();
-        assert!(changes.is_empty());
-    }
-
-    #[test]
-    fn poll_with_changes() {
-        let graph = make_graph_with_entity("site-1");
-        let wm = WatchManager::new();
-        let version = graph.version();
-        let watch_id = wm
-            .subscribe("admin", vec!["site-1".into()], version)
-            .unwrap();
-
-        let mut changes = HDict::new();
-        changes.set("dis", Kind::Str("Updated".into()));
-        graph.update("site-1", changes).unwrap();
-
-        let result = wm.poll(&watch_id, "admin", &graph).unwrap();
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn poll_unknown_watch() {
-        let graph = make_graph_with_entity("site-1");
-        let wm = WatchManager::new();
-        assert!(wm.poll("unknown", "admin", &graph).is_none());
-    }
-
-    #[test]
-    fn poll_wrong_owner() {
-        let graph = make_graph_with_entity("site-1");
-        let wm = WatchManager::new();
-        let version = graph.version();
-        let watch_id = wm
-            .subscribe("admin", vec!["site-1".into()], version)
-            .unwrap();
-
-        assert!(wm.poll(&watch_id, "other-user", &graph).is_none());
-    }
-
-    #[test]
-    fn unsubscribe_removes_watch() {
-        let wm = WatchManager::new();
-        let watch_id = wm.subscribe("admin", vec!["site-1".into()], 0).unwrap();
-        assert!(wm.unsubscribe(&watch_id, "admin"));
-        assert!(!wm.unsubscribe(&watch_id, "admin"));
-    }
-
-    #[test]
-    fn unsubscribe_wrong_owner() {
-        let wm = WatchManager::new();
-        let watch_id = wm.subscribe("admin", vec!["site-1".into()], 0).unwrap();
-        assert!(!wm.unsubscribe(&watch_id, "other-user"));
-        assert!(wm.unsubscribe(&watch_id, "admin"));
-    }
-
-    #[test]
-    fn remove_ids_selective() {
-        let wm = WatchManager::new();
-        let watch_id = wm
-            .subscribe(
-                "admin",
-                vec!["site-1".into(), "site-2".into(), "site-3".into()],
-                0,
-            )
-            .unwrap();
-
-        assert!(wm.remove_ids(&watch_id, "admin", &["site-2".into()]));
-
-        let remaining = wm.get_ids(&watch_id).unwrap();
-        assert_eq!(remaining.len(), 2);
-        assert!(remaining.contains(&"site-1".to_string()));
-        assert!(remaining.contains(&"site-3".to_string()));
-        assert!(!remaining.contains(&"site-2".to_string()));
-    }
-
-    #[test]
-    fn remove_ids_nonexistent_watch() {
-        let wm = WatchManager::new();
-        assert!(!wm.remove_ids("no-such-watch", "admin", &["site-1".into()]));
-    }
-
-    #[test]
-    fn remove_ids_wrong_owner() {
-        let wm = WatchManager::new();
-        let watch_id = wm
-            .subscribe("admin", vec!["site-1".into(), "site-2".into()], 0)
-            .unwrap();
-
-        assert!(!wm.remove_ids(&watch_id, "other-user", &["site-1".into()]));
-
-        let remaining = wm.get_ids(&watch_id).unwrap();
-        assert_eq!(remaining.len(), 2);
-    }
-
-    #[test]
-    fn remove_ids_leaves_watch_alive() {
-        let wm = WatchManager::new();
-        let watch_id = wm
-            .subscribe("admin", vec!["site-1".into(), "site-2".into()], 0)
-            .unwrap();
-
-        assert!(wm.remove_ids(&watch_id, "admin", &["site-1".into(), "site-2".into()]));
-
-        let remaining = wm.get_ids(&watch_id).unwrap();
-        assert!(remaining.is_empty());
-
-        assert!(wm.unsubscribe(&watch_id, "admin"));
-    }
-
-    #[test]
-    fn unsubscribe_full_removal() {
-        let wm = WatchManager::new();
-        let watch_id = wm
-            .subscribe("admin", vec!["site-1".into(), "site-2".into()], 0)
-            .unwrap();
-
-        assert!(wm.unsubscribe(&watch_id, "admin"));
-        assert!(wm.get_ids(&watch_id).is_none());
-        assert!(!wm.unsubscribe(&watch_id, "admin"));
-    }
-
-    #[test]
-    fn add_ids_ownership_check() {
-        let wm = WatchManager::new();
-        let watch_id = wm.subscribe("admin", vec!["site-1".into()], 0).unwrap();
-
-        assert!(!wm.add_ids(&watch_id, "other-user", vec!["site-2".into()]));
-        assert!(wm.add_ids(&watch_id, "admin", vec!["site-2".into()]));
-
-        let ids = wm.get_ids(&watch_id).unwrap();
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&"site-1".to_string()));
-        assert!(ids.contains(&"site-2".to_string()));
-    }
-
-    #[test]
-    fn get_ids_returns_none_for_unknown_watch() {
-        let wm = WatchManager::new();
-        assert!(wm.get_ids("nonexistent").is_none());
-    }
-
     #[test]
     fn ws_request_deserialization() {
         let json = r#"{
@@ -993,5 +573,334 @@ mod tests {
         assert!(json.get("reqId").is_none());
         assert!(json.get("rows").is_none());
         assert!(json.get("watchId").is_none());
+    }
+    use haystack_app::{
+        AllowAll, ApplicationBuilder, ApplicationOwner, EphemeralMutationStore, PolicySnapshot,
+        Principal, ReadLimits, ReadOperation, ReadPolicy, SubscriptionCreate, SubscriptionLimits,
+        SubscriptionOutcome, SubscriptionRequest,
+    };
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct SinkState {
+        ready: AtomicBool,
+        entered: tokio::sync::Notify,
+        waker: futures_util::task::AtomicWaker,
+        sent: Mutex<Vec<Message>>,
+        emitted: tokio::sync::Notify,
+    }
+    impl SinkState {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                ready: AtomicBool::new(false),
+                entered: tokio::sync::Notify::new(),
+                waker: futures_util::task::AtomicWaker::new(),
+                sent: Mutex::new(Vec::new()),
+                emitted: tokio::sync::Notify::new(),
+            })
+        }
+        fn ready(&self) {
+            self.ready.store(true, Ordering::SeqCst);
+            self.waker.wake();
+        }
+    }
+    struct ControlledSink(Arc<SinkState>);
+    impl futures_util::Sink<Message> for ControlledSink {
+        type Error = std::convert::Infallible;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.0.waker.register(cx.waker());
+            if self.0.ready.load(Ordering::SeqCst) {
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                self.0.entered.notify_one();
+                std::task::Poll::Pending
+            }
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+            self.0.sent.lock().unwrap().push(message);
+            self.0.emitted.notify_one();
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    struct TogglePolicy(Arc<AtomicBool>);
+    struct Snapshot(bool);
+    impl ReadPolicy for TogglePolicy {
+        fn snapshot(&self, _: &Principal) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
+            Ok(Arc::new(Snapshot(self.0.load(Ordering::SeqCst))))
+        }
+    }
+    impl PolicySnapshot for Snapshot {
+        fn scope_key(&self) -> &str {
+            if self.0 { "visible" } else { "revoked" }
+        }
+        fn operation(&self, _: ReadOperation) -> bool {
+            true
+        }
+        fn entity(&self, _: &str) -> bool {
+            self.0
+        }
+        fn tag(&self, _: &str, _: &str) -> bool {
+            self.0
+        }
+        fn reference(&self, _: &str) -> bool {
+            self.0
+        }
+        fn reference_display(&self, _: &str) -> bool {
+            self.0
+        }
+        fn catalog(&self, _: haystack_app::CatalogKind, _: &str) -> bool {
+            self.0
+        }
+        fn nominal_provenance(&self, _: &haystack_core::kinds::NominalScalar) -> bool {
+            self.0
+        }
+    }
+    async fn owner(policy: Arc<dyn ReadPolicy>) -> (ApplicationOwner, StateSubscriptionService) {
+        let graph =
+            haystack_core::graph::SharedGraph::new(haystack_core::graph::EntityGraph::new());
+        let mut row = HDict::new();
+        row.set(
+            "id",
+            Kind::Ref(haystack_core::kinds::HRef::from_val("private-point")),
+        );
+        row.set("secret", Kind::Str("retained-value".into()));
+        graph.add(row).unwrap();
+        let builder =
+            ApplicationBuilder::new(graph.clone(), policy, ReadLimits::default()).unwrap();
+        let service = StateSubscriptionService::new(
+            builder.handle().read_service(),
+            EphemeralMutationStore::new(graph),
+            SubscriptionLimits::default(),
+        )
+        .unwrap();
+        let owner = builder
+            .state_subscriptions(service.clone())
+            .unwrap()
+            .start(&tokio::runtime::Handle::current())
+            .unwrap();
+        owner.ready().await.unwrap();
+        (owner, service)
+    }
+    async fn initial(
+        service: &StateSubscriptionService,
+        session: &SubscriptionSession,
+    ) -> Arc<haystack_app::SubscriptionDelivery> {
+        let request = SubscriptionRequest::Create(SubscriptionCreate {
+            authority: service.authority(),
+            key: "cached".into(),
+            ids: vec!["private-point".into()],
+            lease_ms: 5000,
+        });
+        let outcome = service
+            .execute(
+                ReadContext::with_timeout(session.principal().clone(), Duration::from_secs(2)),
+                session.clone(),
+                request,
+            )
+            .await
+            .unwrap();
+        let SubscriptionOutcome::Delivery(delivery) = outcome else {
+            panic!("initial")
+        };
+        delivery
+    }
+    fn queued(delivery: &haystack_app::SubscriptionDelivery, id: &str) -> Command {
+        Command::Scoped(ScopedFrame {
+            profile: wire::PROFILE.into(),
+            req_id: id.into(),
+            payload: String::from_utf8(
+                wire::encode(&SubscriptionRequest::Poll {
+                    watch: delivery.watch.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap(),
+        })
+    }
+    #[tokio::test]
+    async fn queued_cached_disclosure_reauthorizes_after_waiting_for_sink_capacity() {
+        let visible = Arc::new(AtomicBool::new(true));
+        let (owner, service) = owner(Arc::new(TogglePolicy(visible.clone()))).await;
+        let session = SubscriptionSession::trusted("owner", Duration::from_secs(5)).unwrap();
+        let delivery = initial(&service, &session).await;
+        let sink = SinkState::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+        let (stop, stopped) = tokio::sync::watch::channel(None);
+        let writer = tokio::spawn(write_commands(
+            ControlledSink(sink.clone()),
+            rx,
+            stopped,
+            WriterContext {
+                service: service.clone(),
+                session,
+                connection: [1; 16],
+                guard: owner.handle().admit().unwrap(),
+                closing: owner.handle().closing(),
+                scoped: true,
+            },
+        ));
+        tx.send(queued(&delivery, "1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), sink.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(service.read_service().load().admitted, 0);
+        visible.store(false, Ordering::SeqCst);
+        sink.ready();
+        tokio::time::timeout(Duration::from_secs(1), sink.emitted.notified())
+            .await
+            .unwrap();
+        let Message::Text(text) = sink.sent.lock().unwrap()[0].clone() else {
+            panic!()
+        };
+        assert!(!text.contains("private-point") && !text.contains("retained-value"));
+        let frame: ScopedFrame = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            wire::decode::<SubscriptionOutcome>(frame.payload.as_bytes()).unwrap(),
+            SubscriptionOutcome::Resync(haystack_app::SubscriptionResync::Policy)
+        );
+        stop.send(Some(1000)).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        owner.close().await.unwrap();
+        owner.terminated().await;
+    }
+    #[tokio::test]
+    async fn blocked_queued_writer_observes_revocation_expiry_and_owner_close_independently() {
+        for mode in 0..3 {
+            let (owner, service) = owner(Arc::new(AllowAll)).await;
+            let session = SubscriptionSession::trusted(
+                "owner",
+                if mode == 1 {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(5)
+                },
+            )
+            .unwrap();
+            let delivery = initial(&service, &session).await;
+            let sink = SinkState::new();
+            let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+            let (_stop, stopped) = tokio::sync::watch::channel(None);
+            let writer = tokio::spawn(write_commands(
+                ControlledSink(sink.clone()),
+                rx,
+                stopped,
+                WriterContext {
+                    service: service.clone(),
+                    session: session.clone(),
+                    connection: [2; 16],
+                    guard: owner.handle().admit().unwrap(),
+                    closing: owner.handle().closing(),
+                    scoped: true,
+                },
+            ));
+            tx.send(queued(&delivery, "1")).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), sink.entered.notified())
+                .await
+                .unwrap();
+            if mode == 0 {
+                session.close()
+            } else if mode == 2 {
+                tokio::time::timeout(Duration::from_secs(1), owner.close())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(1), writer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(sink.sent.lock().unwrap().is_empty());
+            assert_eq!(service.read_service().load().admitted, 0);
+            owner.close().await.unwrap();
+            owner.terminated().await;
+            assert_eq!(service.binding_count(), 0);
+        }
+    }
+    #[tokio::test]
+    async fn bounded_queue_overflow_is_explicit_terminal_resync_without_implicit_ack() {
+        let (owner, service) = owner(Arc::new(AllowAll)).await;
+        let session = SubscriptionSession::trusted("owner", Duration::from_secs(5)).unwrap();
+        let delivery = initial(&service, &session).await;
+        let sink = SinkState::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+        let (stop, stopped) = tokio::sync::watch::channel(None);
+        let writer = tokio::spawn(write_commands(
+            ControlledSink(sink.clone()),
+            rx,
+            stopped,
+            WriterContext {
+                service: service.clone(),
+                session: session.clone(),
+                connection: [3; 16],
+                guard: owner.handle().admit().unwrap(),
+                closing: owner.handle().closing(),
+                scoped: true,
+            },
+        ));
+        tx.send(queued(&delivery, "1")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), sink.entered.notified())
+            .await
+            .unwrap();
+        for index in 0..CHANNEL_CAPACITY {
+            tx.try_send(queued(&delivery, &(index + 2).to_string()))
+                .unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(queued(&delivery, "100")),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        stop.send(Some(1013)).unwrap();
+        sink.ready();
+        tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let sent = sink.sent.lock().unwrap();
+            let Message::Text(text) = &sent[0] else {
+                panic!()
+            };
+            let frame: ScopedFrame = serde_json::from_str(text).unwrap();
+            assert_eq!(frame.req_id, "0");
+            assert_eq!(
+                wire::decode::<SubscriptionOutcome>(frame.payload.as_bytes()).unwrap(),
+                SubscriptionOutcome::Resync(haystack_app::SubscriptionResync::Overflow)
+            );
+            assert!(matches!(sent.last(),Some(Message::Close(Some(frame))) if frame.code==1013));
+        }
+        let replay = service
+            .execute(
+                ReadContext::with_timeout(session.principal().clone(), Duration::from_secs(2)),
+                session,
+                SubscriptionRequest::Poll {
+                    watch: delivery.watch.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(replay,SubscriptionOutcome::Delivery(current) if current.token==delivery.token)
+        );
+        owner.close().await.unwrap();
+        owner.terminated().await;
     }
 }

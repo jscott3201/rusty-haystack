@@ -6,6 +6,8 @@ paging, and budget contracts documented in [shared reads](shared-reads.md).
 Both profiles can attach owned listeners to the [application lifecycle](application-lifecycle.md).
 `HaystackServer::start()` provides a legacy convenience owner; await `ready()`
 for the bound address and `close()`/`terminated()` for shutdown completion.
+Explicit application embeddings select a [shared subscription owner](state-subscriptions.md#application-selection)
+to enable watch and WebSocket operations in either profile.
 `POST /api/close` continues to log out the bearer session and does not stop the
 application. New requests after application sealing return 503 when they reach
 an existing router; the owned listener stops accepting connections.
@@ -247,7 +249,9 @@ Validate entities against the ontology.
 
 #### POST `/api/close`
 
-Revokes the current bearer token (logout). Requires read permission.
+Revokes the current bearer token and cancels its shared noncredential session
+(logout). Open scoped subscription sockets observe cancellation directly. Requires
+read permission.
 
 ## WebSocket
 
@@ -255,7 +259,21 @@ Revokes the current bearer token (logout). Requires read permission.
 
 `GET /api/ws` -- upgrades to WebSocket connection. Requires a valid bearer token if auth is enabled.
 
-### Message Format
+### Scoped state subscriptions
+
+Applications selecting `StateSubscriptionService` expose a versioned scoped
+HTTP/WebSocket profile with resumable leases, caller-known creation keys and
+explicit acknowledgements. It shares the application owner with native callers;
+see [Shared state subscriptions](state-subscriptions.md) for selection, session
+ownership, limits, recovery, framing and client attachment. Scoped applications
+require the negotiated `haystack.state-subscription.v1` WebSocket protocol.
+
+### Legacy Message Format
+
+The compatibility profile below uses the same application owner with weaker
+automatic acknowledgement and connection-specific cleanup. Application limits
+apply in addition to this frame grammar. Legacy watches expire at the configured
+maximum lease and require a new subscription afterward.
 
 Messages are uncompressed JSON text. Individual frames and complete reassembled
 messages are each capped at 1 MiB. Binary application messages and compression
@@ -295,15 +313,17 @@ Unsolicited notifications are separate from responses:
 {"type":"push","watchId":"abc-123","rows":[{"id":"r:site-1","dis":"s:Updated Site"}]}
 ```
 
-The outbound queue holds 64 messages. Queue overflow, oversized output, and writer
+The connection queue holds eight commands. Queue overflow, oversized output, and writer
 failure close the connection rather than silently losing a response or push.
 The socket owns its writer task and joins or aborts it on shutdown. The server
 sends a ping every 30 seconds and closes after a separate 10-second pong deadline.
 Clients must re-establish their watches after loss of a connection.
 
-Watch ownership and push routing remain username-scoped. Disconnecting one socket
-removes all watches owned by that username, including watches used by other
-connections or HTTP. This behavior does not provide connection-level isolation.
+Legacy watch access uses coarse principal ownership. Pushes and disconnect cleanup
+are specific to the connection that created the watch; disconnecting one socket
+preserves other connections' and HTTP-created watches for the same username.
+Scoped subscriptions instead require the exact validated session identity and
+remain attached to the application across transport disconnects.
 
 ## SCRAM Authentication
 

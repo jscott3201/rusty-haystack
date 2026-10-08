@@ -38,6 +38,9 @@ capabilities! {
     ("watchSub", "Subscribe to entity changes", false),
     ("watchPoll", "Poll for entity changes", false),
     ("watchUnsub", "Unsubscribe from entity changes", false),
+    ("watchInfo", "Describe scoped state subscription authority", false),
+    ("watchAck", "Acknowledge a prepared state delivery", false),
+    ("watchRenew", "Explicitly renew a state subscription lease", false),
     ("pointWrite", "Write a value to a writable point", false),
     ("hisRead", "Read historical time-series data", false),
     ("hisWrite", "Write historical time-series data", false),
@@ -60,7 +63,19 @@ impl Capability {
         mutations: bool,
         history: bool,
         history_mutations: bool,
+        subscriptions: bool,
     ) -> bool {
+        if matches!(
+            self.name,
+            "ws" | "watchSub"
+                | "watchPoll"
+                | "watchUnsub"
+                | "watchInfo"
+                | "watchAck"
+                | "watchRenew"
+        ) {
+            return subscriptions;
+        }
         if self.name == "hisRead" {
             return history;
         }
@@ -111,6 +126,9 @@ impl Capability {
             "watchSub" => post(ops::watch::handle_sub),
             "watchPoll" => post(ops::watch::handle_poll),
             "watchUnsub" => post(ops::watch::handle_unsub),
+            "watchInfo" => post(ops::watch::handle_info),
+            "watchAck" => post(ops::watch::handle_ack),
+            "watchRenew" => post(ops::watch::handle_renew),
             "pointWrite" => post(ops::point_write::handle),
             "hisRead" => post(ops::his::handle_read),
             "hisWrite" => post(ops::his::handle_write),

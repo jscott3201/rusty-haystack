@@ -7,7 +7,6 @@ use haystack_core::ontology::DefNamespace;
 
 use crate::actions::ActionRegistry;
 use crate::auth::AuthManager;
-use crate::ws::WatchManager;
 use haystack_app::HistoryProvider;
 
 /// Type alias for the shared state used by Axum extractors.
@@ -30,8 +29,8 @@ pub struct AppState {
     pub lib_mutations: parking_lot::Mutex<()>,
     /// SCRAM authentication manager.
     pub auth: AuthManager,
-    /// Watch subscription manager for change polling.
-    pub watches: WatchManager,
+    /// One application owner shared by HTTP and every WebSocket attachment.
+    pub subscription_service: Option<haystack_app::StateSubscriptionService>,
     /// Action dispatch registry for the `invokeAction` op.
     pub actions: ActionRegistry,
     /// Pluggable time-series history store for hisRead/hisWrite.

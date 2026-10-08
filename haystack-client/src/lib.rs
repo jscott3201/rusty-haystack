@@ -39,6 +39,7 @@ pub mod entity;
 pub mod error;
 pub mod history;
 pub mod history_mutation;
+pub mod subscription;
 pub mod tls;
 pub mod transport;
 

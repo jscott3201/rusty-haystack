@@ -19,6 +19,22 @@ pub struct HaystackClient<T: Transport> {
 }
 
 impl HaystackClient<HttpTransport> {
+    /// Attach scoped subscriptions using this HTTP client's existing private
+    /// bearer and exact server authority. No new authentication session is made.
+    /// WebSocket TLS uses system/public roots and does not inherit custom
+    /// reqwest TLS roots, client certificates or insecure verification settings.
+    pub async fn attach_subscription_ws(
+        &self,
+        ws_url: &str,
+    ) -> Result<
+        HaystackClient<crate::transport::subscription_ws::SubscriptionWsTransport>,
+        ClientError,
+    > {
+        Ok(HaystackClient::from_transport(
+            self.transport.attach_subscription_ws(ws_url).await?,
+        ))
+    }
+
     /// Connect to a Haystack server via HTTP, performing SCRAM authentication.
     ///
     /// # Arguments
@@ -104,6 +120,11 @@ impl HaystackClient<HttpTransport> {
     }
 }
 
+impl<T: crate::subscription::SubscriptionTransport> HaystackClient<T> {
+    pub(crate) fn transport_subscription_check(&self) -> Result<(), ClientError> {
+        self.transport.check_subscriptions()
+    }
+}
 impl<T: crate::history_mutation::HistoryMutationTransport> HaystackClient<T> {
     pub(crate) fn transport_history_mutation_check(&self) -> Result<(), ClientError> {
         self.transport.check_history_submission()
@@ -119,7 +140,9 @@ impl HaystackClient<WsTransport> {
     /// Connect to a Haystack server via WebSocket.
     ///
     /// Performs SCRAM authentication over HTTP first to obtain an auth token,
-    /// then establishes a WebSocket connection using that token.
+    /// then establishes a WebSocket connection using that token. This creates a
+    /// new legacy session; use an HTTP client's `attach_subscription_ws` method
+    /// to resume a scoped watch in the same authentication session.
     ///
     /// # Arguments
     /// * `url` - The server API root for HTTP auth (e.g. `http://localhost:8080/api`)

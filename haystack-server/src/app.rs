@@ -19,7 +19,6 @@ use crate::capabilities::{CAPABILITIES, ServiceProfile};
 use crate::cors::CorsPolicy;
 use crate::ops;
 use crate::state::{AppState, SharedState};
-use crate::ws::WatchManager;
 use haystack_app::HisStore;
 
 /// Builder for the Haystack HTTP server.
@@ -81,6 +80,8 @@ impl HaystackServer {
     /// profile. Scoped reads must belong to this same application in either
     /// configuration order; mismatches are rejected before router publication.
     /// Use `with_legacy_unrestricted` explicitly to change that profile.
+    /// Watch endpoints require selecting `state_subscriptions` on the builder
+    /// that owns this handle, including for the legacy profile.
     pub fn with_application(mut self, application: haystack_app::ApplicationHandle) -> Self {
         self.graph = application.read_service().graph();
         self.application = Some(application);
@@ -200,6 +201,15 @@ impl HaystackServer {
             haystack_app::ReadLimits::default(),
         )
         .map_err(std::io::Error::other)?;
+        let subscriptions = haystack_app::StateSubscriptionService::new(
+            builder.handle().read_service(),
+            haystack_app::EphemeralMutationStore::new(self.graph.clone()),
+            haystack_app::SubscriptionLimits::default(),
+        )
+        .map_err(std::io::Error::other)?;
+        let builder = builder
+            .state_subscriptions(subscriptions)
+            .map_err(std::io::Error::other)?;
         let binding = self
             .history_provider
             .take()
@@ -336,7 +346,12 @@ impl HaystackServer {
         let his = history_service.as_ref().map(|service| service.provider());
 
         let mutation_service = self.application.as_ref().and_then(|a| a.mutation_service());
+        let subscription_service = self
+            .application
+            .as_ref()
+            .and_then(|app| app.subscription_service());
         let state: SharedState = Arc::new(AppState {
+            subscription_service,
             mutation_service,
             history_service,
             history_mutation_service,
@@ -346,7 +361,6 @@ impl HaystackServer {
             profile,
             lib_mutations: parking_lot::Mutex::new(()),
             auth: self.auth_manager,
-            watches: WatchManager::new(),
             actions: self.actions,
             his,
             started_at: std::time::Instant::now(),
@@ -359,6 +373,7 @@ impl HaystackServer {
                 state.mutation_service.is_some(),
                 state.history_service.is_some(),
                 state.history_mutation_service.is_some(),
+                state.subscription_service.is_some(),
             )
         }) {
             core_router = core_router.route(capability.path, capability.router(profile));
@@ -584,8 +599,8 @@ async fn auth_middleware(
     match auth_header {
         Some(header) => match parse_auth_header(&header) {
             Ok(AuthHeader::Bearer { auth_token }) => {
-                match state.auth.validate_token(&auth_token) {
-                    Some(auth_user) => {
+                match state.auth.validate_session(&auth_token) {
+                    Some((auth_user, session)) => {
                         // Check permission for the requested path
                         if let Some(required) = required_permission(&path)
                             && !AuthManager::check_permission(&auth_user, required)
@@ -599,6 +614,7 @@ async fn auth_middleware(
 
                         // Inject AuthUser into request extensions
                         req.extensions_mut().insert(auth_user);
+                        req.extensions_mut().insert(session);
                         next.run(req).await
                     }
                     None => crate::error::HaystackError::new(

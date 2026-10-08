@@ -158,6 +158,7 @@ impl ApplicationBuilder {
                     mutations: Arc::new(Mutex::new(None)),
                     history: Arc::new(Mutex::new(None)),
                     history_mutations: Arc::new(Mutex::new(None)),
+                    subscriptions: Arc::new(Mutex::new(None)),
                 },
                 resources: vec![],
                 history_resource: None,
@@ -180,9 +181,41 @@ impl ApplicationBuilder {
         if !service.read_service().same_service(&app.reads) {
             return Err(ReadError::Forbidden);
         }
+        if app
+            .subscriptions
+            .lock()
+            .as_ref()
+            .is_some_and(|subscriptions| !subscriptions.entity_store().same_store(&service.store()))
+        {
+            return Err(ReadError::Forbidden);
+        }
         let mut selected = app.mutations.lock();
         if selected.is_some() {
             return Err(ReadError::InvalidQuery("mutation service already selected"));
+        }
+        *selected = Some(service);
+        drop(selected);
+        Ok(self)
+    }
+    /// Select one shared subscription owner without granting mutation capability.
+    /// Existing and later mutation selection must retain its exact entity store.
+    pub fn state_subscriptions(
+        self,
+        service: crate::StateSubscriptionService,
+    ) -> Result<Self, ReadError> {
+        let app = &self.parts.as_ref().expect("unconsumed builder").application;
+        if !service.read_service().same_service(&app.reads)
+            || app
+                .mutations
+                .lock()
+                .as_ref()
+                .is_some_and(|mutations| !mutations.store().same_store(&service.entity_store()))
+        {
+            return Err(ReadError::Forbidden);
+        }
+        let mut selected = app.subscriptions.lock();
+        if selected.is_some() {
+            return Err(ReadError::InvalidQuery("subscriptions already selected"));
         }
         *selected = Some(service);
         drop(selected);
@@ -266,6 +299,11 @@ impl ApplicationBuilder {
             ));
         }
         let mut parts = self.parts.take().expect("unconsumed builder");
+        if let Some(subscriptions) = parts.application.subscription_service() {
+            parts
+                .resources
+                .insert(0, Box::new(subscriptions.resource()));
+        }
         if let Some(history) = parts.history_resource.take() {
             parts.resources.insert(0, history);
         }
@@ -325,8 +363,12 @@ pub struct ApplicationHandle {
     mutations: Arc<Mutex<Option<MutationService>>>,
     history: Arc<Mutex<Option<HistoryService>>>,
     history_mutations: Arc<Mutex<Option<crate::HistoryMutationService>>>,
+    subscriptions: Arc<Mutex<Option<crate::StateSubscriptionService>>>,
 }
 impl ApplicationHandle {
+    pub fn subscription_service(&self) -> Option<crate::StateSubscriptionService> {
+        self.subscriptions.lock().clone()
+    }
     pub fn history_mutation_service(&self) -> Option<crate::HistoryMutationService> {
         self.history_mutations.lock().clone()
     }

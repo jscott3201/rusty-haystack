@@ -161,6 +161,57 @@ impl HttpTransport {
         }
     }
 
+    pub(crate) fn check_subscription_policy(&self) -> Result<(), ClientError> {
+        crate::config::validate_http_url(&self.base_url)?;
+        if !self.entity_submission_safe
+            || !matches!(self.auth, AuthCredential::Bearer(_))
+            || !matches!(
+                self.format.as_str(),
+                "text/zinc" | "application/json" | "application/json;v=3"
+            )
+        {
+            return Err(ClientError::Connection("scoped subscriptions require a first-party bearer transport and supported H4 codec".into()));
+        }
+        Ok(())
+    }
+    pub(crate) async fn attach_subscription_ws(
+        &self,
+        input: &str,
+    ) -> Result<super::subscription_ws::SubscriptionWsTransport, ClientError> {
+        self.check_subscription_policy()?;
+        let base = crate::config::validate_http_url(&self.base_url)?;
+        let socket = url::Url::parse(input)
+            .map_err(|_| ClientError::Connection("invalid subscription WebSocket URL".into()))?;
+        let scheme = if base.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        };
+        let has_userinfo = input.split_once("://").is_some_and(|(_, rest)| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+        });
+        if has_userinfo
+            || socket.scheme() != scheme
+            || socket.host_str() != base.host_str()
+            || socket.port_or_known_default() != base.port_or_known_default()
+            || socket.path() != format!("{}/ws", base.path().trim_end_matches('/'))
+            || !socket.username().is_empty()
+            || socket.password().is_some()
+            || socket.query().is_some()
+            || socket.fragment().is_some()
+        {
+            return Err(ClientError::Connection(
+                "subscription WebSocket must use the same HTTP server authority and API path"
+                    .into(),
+            ));
+        }
+        let AuthCredential::Bearer(token) = &self.auth else {
+            return Err(ClientError::Connection("bearer session required".into()));
+        };
+        super::subscription_ws::SubscriptionWsTransport::attach(socket.as_str(), token).await
+    }
     fn apply_auth(
         &self,
         builder: reqwest::RequestBuilder,
@@ -194,6 +245,19 @@ impl Transport for HttpTransport {
         }
         let url = format!("{}/{}", self.base_url, op);
 
+        let subscription =
+            if op.starts_with("watch") && req.cols.iter().any(|col| col.name == "payload") {
+                self.check_subscription_policy()?;
+                let request: haystack_core::codecs::subscription::SubscriptionRequest =
+                    haystack_core::codecs::subscription::from_grid(req)
+                        .map_err(|_| ClientError::Codec("invalid subscription request".into()))?;
+                if request.operation() != op {
+                    return Err(ClientError::Codec("subscription operation mismatch".into()));
+                }
+                Some(request)
+            } else {
+                None
+            };
         let history_request = if op == "hisRead" && req.meta.has("history") {
             self.check_history_read_policy()?;
             if !matches!(
@@ -241,7 +305,10 @@ impl Transport for HttpTransport {
             let codec = codec_for(&self.format).ok_or_else(|| {
                 ClientError::Codec(format!("unsupported format: {}", self.format))
             })?;
-            let body_bytes = if let Some(request) = &history_write {
+            let body_bytes = if let Some(request) = &subscription {
+                haystack_core::codecs::subscription::encode_grid(request, codec)
+                    .map_err(|_| ClientError::Codec("invalid subscription request".into()))?
+            } else if let Some(request) = &history_write {
                 haystack_core::codecs::history_mutation::encode_request(request, codec)
                     .map_err(|error| ClientError::Codec(error.to_string()))?
             } else if let Some(identity) = &history_lookup {
@@ -276,6 +343,43 @@ impl Transport for HttpTransport {
         }
         let codec = codec_for(&self.format)
             .ok_or_else(|| ClientError::Codec(format!("unsupported format: {}", self.format)))?;
+        if let Some(request) = subscription {
+            use haystack_core::codecs::subscription as wire;
+            let response_type = response
+                .headers()
+                .get("Content-Type")
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| ClientError::Codec("missing subscription response format".into()))?;
+            if codec_for(response_type).map(|actual| actual.mime_type()) != Some(codec.mime_type())
+            {
+                return Err(ClientError::Codec(
+                    "unexpected subscription response format".into(),
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > wire::MAX_WIRE_BYTES as u64)
+            {
+                return Err(ClientError::Codec(
+                    "subscription response exceeds byte limit".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(crate::error::http_error)? {
+                if chunk.len() > wire::MAX_WIRE_BYTES.saturating_sub(bytes.len()) {
+                    return Err(ClientError::Codec(
+                        "subscription response exceeds byte limit".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let outcome: wire::SubscriptionOutcome = wire::decode_grid(&bytes, codec)
+                .map_err(|_| ClientError::Codec("invalid subscription response".into()))?;
+            wire::validate_for_request(&outcome, &request)
+                .map_err(|_| ClientError::Codec("subscription response mismatch".into()))?;
+            return wire::to_grid(&outcome)
+                .map_err(|_| ClientError::Codec("invalid subscription response".into()));
+        }
         if let Some(request) = history_request {
             use haystack_core::codecs::history;
             let response_type = response
@@ -494,5 +598,41 @@ mod tests {
         let t =
             HttpTransport::with_basic("https://station.test/api/", "u", "p", client(), "text/zinc");
         assert_eq!(t.base_url, "https://station.test/api");
+    }
+    #[tokio::test]
+    async fn scoped_attachment_rejects_other_authorities_and_basic_before_dial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let transport =
+            HttpTransport::new(&format!("http://{address}/api"), "fixture-token".into());
+        for url in [
+            format!("ws://localhost:{}/api/ws", address.port()),
+            format!("wss://{address}/api/ws"),
+            format!("ws://{address}/other/ws"),
+            format!("ws://@{address}/api/ws"),
+            format!("ws://{address}/api/ws?session=x"),
+            format!("ws://{address}/api/ws#fragment"),
+        ] {
+            assert!(transport.attach_subscription_ws(&url).await.is_err());
+        }
+        let basic = HttpTransport::with_basic(
+            &format!("http://{address}/api"),
+            "user",
+            "password",
+            client(),
+            "text/zinc",
+        )
+        .with_entity_submission_policy();
+        assert!(
+            basic
+                .attach_subscription_ws(&format!("ws://{address}/api/ws"))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

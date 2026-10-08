@@ -333,6 +333,13 @@ async fn legacy_websocket_connection_and_writer_finish_before_provider_close() {
     };
     let graph = graph();
     let application = builder(&graph);
+    let subscriptions = StateSubscriptionService::new(
+        application.handle().read_service(),
+        EphemeralMutationStore::new(graph.clone()),
+        SubscriptionLimits::default(),
+    )
+    .unwrap();
+    let application = application.state_subscriptions(subscriptions).unwrap();
     let handle = application.handle();
     let provider = Provider::new(Init::Ready);
     let auth = AuthManager::empty();
@@ -379,8 +386,10 @@ async fn legacy_websocket_connection_and_writer_finish_before_provider_close() {
         tokio::time::timeout(Duration::from_secs(2), ws.next())
     );
     closed.unwrap();
+    let frame = frame.unwrap().unwrap().unwrap();
     assert!(
-        matches!(frame.unwrap().unwrap().unwrap(),Message::Close(Some(frame)) if frame.code==CloseCode::Away)
+        matches!(&frame,Message::Close(Some(frame)) if frame.code==CloseCode::Away),
+        "unexpected shutdown frame: {frame:?}"
     );
     assert!(owner.terminated().await.close.is_ok());
     assert_eq!(handle.outstanding_tasks(), 0);

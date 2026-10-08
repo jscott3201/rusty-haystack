@@ -309,5 +309,56 @@ async fn first_party_repeated_prefix_selective_unsubscribe_normalizes_once() {
         remaining.rows[0].get("id"),
         Some(&Kind::Ref(HRef::from_val("point-1")))
     );
+    // A selective removal of the final ID keeps the legacy watch alive. An
+    // empty ID list, in contrast, explicitly closes it.
+    client.watch_unsub(watch, &["point-1"]).await.unwrap();
+    assert!(client.watch_poll(watch).await.unwrap().rows.is_empty());
+    client.watch_unsub(watch, &[]).await.unwrap();
+    assert!(client.watch_poll(watch).await.is_err());
     client.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_disconnect_preserves_other_connection_and_http_watches() {
+    let graph = SharedGraph::new(EntityGraph::new());
+    let mut row = HDict::new();
+    row.set("id", Kind::Ref(HRef::from_val("shared-point")));
+    graph.add(row).unwrap();
+    let server = Server::start(graph);
+    let first = HaystackClient::connect_ws(&server.url, &server.ws_url, "user", "pencil")
+        .await
+        .unwrap();
+    let second = HaystackClient::connect_ws(&server.url, &server.ws_url, "user", "pencil")
+        .await
+        .unwrap();
+    let http = HaystackClient::connect(&server.url, "user", "pencil")
+        .await
+        .unwrap();
+    let id = |grid: &haystack_core::data::HGrid| match grid.meta.get("watchId") {
+        Some(Kind::Str(id)) => id.clone(),
+        _ => panic!("missing watchId"),
+    };
+    let first_watch = id(&first.watch_sub(&["shared-point"], None).await.unwrap());
+    let second_watch = id(&second.watch_sub(&["shared-point"], None).await.unwrap());
+    let http_watch = id(&http.watch_sub(&["shared-point"], None).await.unwrap());
+    first.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while http.watch_poll(&first_watch).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let second_result = second.watch_poll(&second_watch).await;
+    let http_result = http.watch_poll(&http_watch).await;
+    second.close().await.unwrap();
+    http.close().await.unwrap();
+    assert!(
+        second_result.is_ok(),
+        "another connection's watch was removed: {second_result:?}"
+    );
+    assert!(
+        http_result.is_ok(),
+        "HTTP watch was removed: {http_result:?}"
+    );
 }
