@@ -44,7 +44,7 @@ pub(crate) fn decode(
     budget.check()?;
     let first = grid.rows.first();
     let query = match operation {
-        ReadOperation::Changes | ReadOperation::History => {
+        ReadOperation::Changes | ReadOperation::History | ReadOperation::Subscriptions => {
             return Err(ReadError::InvalidQuery(
                 "changes requires entity-v1 payload",
             ));

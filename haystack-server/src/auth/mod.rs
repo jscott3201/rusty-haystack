@@ -62,8 +62,13 @@ enum Phase {
 #[derive(Default)]
 struct State {
     handshakes: HashMap<String, (Phase, Instant)>,
-    tokens: HashMap<String, (AuthUser, Instant)>,
+    tokens: HashMap<String, TokenRecord>,
 }
+struct TokenRecord {
+    user: AuthUser,
+    session: haystack_app::SubscriptionSession,
+}
+
 /// One lock makes sweep, admission, transition and final consumption atomic.
 /// Unknown identities use cheap secret-derived decoys and can never receive a bearer.
 pub struct AuthManager {
@@ -75,6 +80,9 @@ pub struct AuthManager {
 }
 impl Drop for AuthManager {
     fn drop(&mut self) {
+        for record in self.state.get_mut().tokens.values() {
+            record.session.close();
+        }
         self.server_secret.zeroize();
     }
 }
@@ -138,9 +146,17 @@ impl AuthManager {
         state.handshakes.retain(|_, (_, created)| {
             now.saturating_duration_since(*created) < self.limits.handshake_ttl
         });
-        state
-            .tokens
-            .retain(|_, (_, created)| now.saturating_duration_since(*created) < self.token_ttl);
+        state.tokens.retain(|_, record| {
+            let active = record.session.is_active()
+                && record
+                    .session
+                    .expires_at()
+                    .is_some_and(|expires| now < expires);
+            if !active {
+                record.session.close();
+            }
+            active
+        });
     }
     /// Admit HELLO without PBKDF2 or a client-first transcript.
     pub fn handle_hello(&self, username: &str) -> Result<String, AuthFailure> {
@@ -237,7 +253,8 @@ impl AuthManager {
                     username: handshake.username.clone(),
                     permissions: record.permissions.clone(),
                 };
-                state.tokens.insert(token.clone(), (user, now));
+                let record = self.issue_session(user, now)?;
+                state.tokens.insert(token.clone(), record);
                 let final_data = OUTER.encode(format!("v={}", BASE64.encode(signature)));
                 Ok(ScramResponse::Authenticated(auth::format_auth_info(
                     &token,
@@ -261,18 +278,50 @@ impl AuthManager {
         let mut state = self.state.lock();
         let now = clock();
         self.sweep(&mut state, now);
-        state.tokens.get(token).map(|(user, _)| user.clone())
+        state.tokens.get(token).map(|record| record.user.clone())
+    }
+    /// Authentication adapters inject both values from this single locked lookup.
+    pub fn validate_session(
+        &self,
+        token: &str,
+    ) -> Option<(AuthUser, haystack_app::SubscriptionSession)> {
+        let mut state = self.state.lock();
+        self.sweep(&mut state, Instant::now());
+        state
+            .tokens
+            .get(token)
+            .map(|record| (record.user.clone(), record.session.clone()))
+    }
+    fn issue_session(&self, user: AuthUser, now: Instant) -> Result<TokenRecord, AuthFailure> {
+        let expires = now
+            .checked_add(self.token_ttl)
+            .filter(|expires| *expires > now)
+            .ok_or(AuthFailure::Rejected)?;
+        let principal =
+            haystack_app::Principal::authenticated(user.username.clone(), user.permissions.clone());
+        let session = haystack_app::SubscriptionSession::authenticated(principal, expires)
+            .map_err(|_| AuthFailure::Rejected)?;
+        Ok(TokenRecord { user, session })
     }
     pub fn revoke_token(&self, token: &str) -> bool {
-        self.state.lock().tokens.remove(token).is_some()
+        let mut state = self.state.lock();
+        if let Some(record) = state.tokens.get(token) {
+            record.session.close();
+        }
+        state.tokens.remove(token).is_some()
     }
     #[doc(hidden)]
     pub fn inject_token(&self, token: String, user: AuthUser) {
         let mut state = self.state.lock();
         let now = Instant::now();
         self.sweep(&mut state, now);
-        if state.tokens.len() < self.limits.max_tokens {
-            state.tokens.insert(token, (user, now));
+        if (state.tokens.contains_key(&token) || state.tokens.len() < self.limits.max_tokens)
+            && let Ok(record) = self.issue_session(user, now)
+        {
+            if let Some(previous) = state.tokens.get(&token) {
+                previous.session.close();
+            }
+            state.tokens.insert(token, record);
         }
     }
     pub fn check_permission(user: &AuthUser, required: &str) -> bool {
@@ -537,7 +586,7 @@ mod tests {
         );
         std::thread::scope(|scope| {
             let guard = mgr.state.lock();
-            let expires = guard.tokens["waiting-token"].1 + ttl;
+            let expires = guard.tokens["waiting-token"].session.expires_at().unwrap();
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let mgr = &mgr;
             let worker = scope.spawn(move || {
@@ -575,5 +624,28 @@ mod tests {
         assert!(mgr.validate_token("token").is_some());
         assert!(mgr.revoke_token("token"));
         assert!(!mgr.revoke_token("token"));
+    }
+    #[test]
+    fn injected_replacement_and_logout_cancel_the_shared_noncredential_session() {
+        let manager = manager().with_limits(AuthLimits {
+            max_tokens: 1,
+            ..AuthLimits::default()
+        });
+        let user = AuthUser {
+            username: "user".into(),
+            permissions: vec!["read".into()],
+        };
+        manager.inject_token("token".into(), user.clone());
+        let (_, first) = manager.validate_session("token").unwrap();
+        let expiry = first.expires_at();
+        let (_, same) = manager.validate_session("token").unwrap();
+        assert_eq!(same.expires_at(), expiry);
+        manager.inject_token("token".into(), user);
+        assert!(!first.is_active() && !same.is_active());
+        let (_, second) = manager.validate_session("token").unwrap();
+        assert!(second.is_active());
+        assert!(manager.revoke_token("token"));
+        assert!(!second.is_active());
+        assert!(manager.validate_session("token").is_none());
     }
 }

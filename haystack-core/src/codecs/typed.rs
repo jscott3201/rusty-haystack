@@ -411,7 +411,10 @@ fn from_wire(value: WireValue) -> Result<Kind, TypedPayloadError> {
 
 // Parse directly with a bounded visitor, before serde_json::Value can collapse
 // duplicate object fields or allocate an unbounded recursive document.
-fn bounded_json(bytes: &[u8], limits: PayloadLimits) -> Result<Value, TypedPayloadError> {
+pub(crate) fn bounded_json(
+    bytes: &[u8],
+    limits: PayloadLimits,
+) -> Result<Value, TypedPayloadError> {
     if limits.max_bytes == 0 || limits.max_nodes == 0 || !(1..=64).contains(&limits.max_depth) {
         return Err(TypedPayloadError::InvalidLimits);
     }

@@ -76,6 +76,7 @@ pub enum ReadOperation {
     Spec,
     Changes,
     History,
+    Subscriptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

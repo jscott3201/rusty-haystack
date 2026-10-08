@@ -148,6 +148,10 @@ impl EphemeralMutationStore {
     pub fn dataset(&self) -> [u8; 16] {
         self.inner.dataset
     }
+    /// Exact retained entity authority, not merely another store on the same graph.
+    pub fn same_store(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     pub fn receipt_count(&self) -> usize {
         self.inner.receipts.lock().entries.len()
     }

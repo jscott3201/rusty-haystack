@@ -29,6 +29,7 @@ pub mod history;
 pub mod history_mutation;
 pub mod json;
 pub mod shared;
+pub mod subscription;
 pub mod trio;
 pub mod typed;
 pub mod zinc;

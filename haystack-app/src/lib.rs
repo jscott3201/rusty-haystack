@@ -7,6 +7,10 @@
 //! drop their owned runtime outside async. [`ReadService::new`] is an unmanaged
 //! compatibility API. Pure `EntityGraph` remains a trusted in-process API.
 mod budget;
+mod session;
+mod subscription;
+pub use session::SubscriptionSession;
+pub use subscription::*;
 mod history;
 mod history_admission;
 mod history_mutation;

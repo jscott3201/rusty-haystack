@@ -25,6 +25,7 @@ pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Res
                 state.mutation_service.is_some(),
                 state.history_service.is_some(),
                 state.history_mutation_service.is_some(),
+                state.subscription_service.is_some(),
             )
         });
 

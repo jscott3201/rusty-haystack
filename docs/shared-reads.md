@@ -56,12 +56,17 @@ selects the restricted capability set:
 | `defs`, `libs`, `specs`, `spec` | Bounded authorized catalog reads |
 | `about`, `ops`, `formats`, `close` | Static capability/authentication information and logout |
 
-`export`, `ws`, every watch operation, `hisRead`, `hisWrite`, `pointWrite`,
-`invokeAction`, `import`, `loadLib`, `unloadLib`, `exportLib`, and `validate` have no
-routes in the scoped profile. Explicitly selecting a `MutationService` adds
-`entityBatch`, `entityReceipt` and versioned `changes`; see [entity mutation and
-feed contracts](entity-mutations.md). A single capability registry drives routing and
-`ops`. Unavailable routes return 404 before body decoding or provider callbacks.
+`export`, `pointWrite`, `invokeAction`, `import`, `loadLib`, `unloadLib`,
+`exportLib`, and `validate` have no routes in the scoped profile. Other
+capabilities are explicit application selections: `MutationService` adds
+`entityBatch`, `entityReceipt` and versioned `changes`; a selected history
+provider enables `hisRead`, and `HistoryMutationService` adds `hisWrite` and
+`hisReceipt`. `StateSubscriptionService` adds the scoped HTTP/watch operations
+and negotiated WebSocket profile without enabling entity writes. See the
+[entity mutation](entity-mutations.md), [history read](history-reads.md),
+[history mutation](history-mutations.md), and [state subscription](state-subscriptions.md)
+contracts. One capability registry drives routing and `ops`. Unavailable routes
+return 404 before body decoding or provider callbacks.
 
 Custom routers receive privileged application state. Both `with_router` and
 `with_authenticated_router` therefore cause scoped startup to fail before binding
