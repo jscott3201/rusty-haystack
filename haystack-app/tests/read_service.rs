@@ -1177,7 +1177,13 @@ async fn catalog_regex_parser_allocation_is_reserved_before_compilation() {
             graph,
             ReadLimits {
                 max_regex_bytes: 4096,
-                max_retained_bytes: 128 * 1024,
+                // The successful control includes the unconditional compiler
+                // allowance; the large source still uses the original limit.
+                max_retained_bytes: if expected.is_none() {
+                    2 * 1024 * 1024
+                } else {
+                    128 * 1024
+                },
                 ..ReadLimits::default()
             },
         );
@@ -1192,6 +1198,51 @@ async fn catalog_regex_parser_allocation_is_reserved_before_compilation() {
             None => assert_eq!(result.unwrap().row_count, 1),
         }
     }
+}
+
+async fn assert_regex_compiler_scratch_budget(pattern: &str, text: &str) {
+    for (limits, expected) in [
+        (
+            ReadLimits {
+                max_regex_bytes: 4096,
+                max_retained_bytes: 128 * 1024,
+                ..ReadLimits::default()
+            },
+            Some(ReadError::Budget(BudgetKind::Retained)),
+        ),
+        (ReadLimits::default(), None),
+    ] {
+        let mut namespace = DefNamespace::new();
+        let mut spec = Spec::new("demo::Pattern", "demo", "Pattern");
+        spec.slots
+            .push(slot("text", false, false, &[("pattern", pattern)]));
+        namespace.register_spec(spec);
+        let graph = SharedGraph::new(EntityGraph::with_namespace(namespace));
+        let mut record = row("a");
+        record.set("text", Kind::Str(text.into()));
+        graph.add(record).unwrap();
+        let result = service(graph, limits)
+            .read(
+                context(),
+                request(ReadQuery::Filter("demo::Pattern".into())),
+            )
+            .await;
+        match expected {
+            Some(expected) => assert_eq!(result.unwrap_err(), expected, "{pattern}"),
+            None => assert_eq!(result.unwrap().row_count, 1, "{pattern}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn regex_dot_reserves_unicode_compiler_scratch_before_compilation() {
+    assert_regex_compiler_scratch_budget(".", "工").await;
+}
+
+#[tokio::test]
+async fn regex_folded_literal_reserves_unicode_compiler_scratch_before_compilation() {
+    // Kelvin sign joins the ASCII k/K simple-fold class without '[' or '\'.
+    assert_regex_compiler_scratch_budget("(?i)k", "K").await;
 }
 
 #[test]

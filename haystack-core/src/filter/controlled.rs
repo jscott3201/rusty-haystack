@@ -337,7 +337,7 @@ fn constraints<E: QueryEnvironment>(
                     .saturating_add(1)
                     .saturating_mul(text.len().saturating_add(1)),
             )?;
-            reserve_regex_parser(pattern, env)?;
+            reserve_regex_construction(pattern, env)?;
             // Reserve both the compiled representation and its search cache.
             env.retain(env.regex_size_limit().saturating_mul(2))?;
             let regex = regex::RegexBuilder::new(pattern)
@@ -354,9 +354,10 @@ fn constraints<E: QueryEnvironment>(
     Ok(true)
 }
 /// regex 1.13.1 enforces size_limit only after regex-syntax 0.8.11 has
-/// allocated its AST and HIR. Reserve those stages before even constructing
-/// RegexBuilder (which copies the source). Count potential class sites without
-/// interpreting regex syntax: escaped/bracketed literals deliberately overcount.
+/// allocated its AST/HIR, and regex-automata 0.4.18 has separate compiler
+/// scratch. Reserve all three before constructing RegexBuilder (which copies
+/// the source). Count potential class sites without interpreting regex syntax:
+/// escaped/bracketed literals deliberately overcount.
 ///
 /// The locked parser uses boxed AST nodes, Vec stacks and boxed HIR properties;
 /// 1 KiB per source byte covers those and their growth/copies. Unicode is larger:
@@ -365,7 +366,20 @@ fn constraints<E: QueryEnvironment>(
 /// 128 KiB at that combined bound. Reserve 512 KiB at each escape or '[' for
 /// translation, folding, set-operation scratch and copies. Revisit these
 /// conservative constants when the locked regex/Unicode tables change.
-fn reserve_regex_parser<E: QueryEnvironment>(pattern: &str, env: &mut E) -> Result<(), E::Error> {
+///
+/// Compiler scratch is unconditional: `.` and Unicode-folded literals also
+/// reach Utf8Compiler, without an explicit class site. Its forward map has
+/// 10,000 slots; reverse compilation uses a 1,000-slot suffix map instead
+/// (`shrink(false)`). Allow 1 MiB for those tables, a second reverse-prefix
+/// attempt, and the four-byte UTF-8 frontier/one-state overshoot. Cached
+/// transition keys duplicate successfully added NFA states; additionally
+/// reserve sixteen NFA limits for their spare capacity and the intermediate
+/// state vectors/remapping scratch across the three compiler attempts. These
+/// are separate from the final compiled/search-cache reservation at the caller.
+fn reserve_regex_construction<E: QueryEnvironment>(
+    pattern: &str,
+    env: &mut E,
+) -> Result<(), E::Error> {
     if pattern.len() > env.regex_source_limit() {
         return Err(env.regex_limit_error());
     }
@@ -374,10 +388,11 @@ fn reserve_regex_parser<E: QueryEnvironment>(pattern: &str, env: &mut E) -> Resu
         .bytes()
         .filter(|byte| matches!(byte, b'\\' | b'['))
         .count();
-    let bytes = 16_384usize
+    let parser = 16_384usize
         .saturating_add(pattern.len().saturating_mul(1024))
         .saturating_add(classes.saturating_mul(512 * 1024));
-    env.retain(bytes)
+    let compiler = (1024 * 1024usize).saturating_add(env.regex_size_limit().saturating_mul(16));
+    env.retain(parser.saturating_add(compiler))
 }
 
 fn text_meta<'a>(slot: &'a Slot, key: &str) -> Option<&'a str> {

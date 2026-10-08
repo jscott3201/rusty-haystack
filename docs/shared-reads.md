@@ -146,10 +146,18 @@ before the compiled-size limit is enforced. Before constructing the builder,
 the service reserves 16 KiB plus 1 KiB per source byte and 512 KiB per potential
 Unicode/class expansion site (every backslash or opening bracket, deliberately
 including escaped literals). These allowances cover boxed nodes, parser stacks,
-HIR properties and the locked Unicode tables' range/folding scratch. Compiled
-and cache bounds are also reserved. A retained-memory error can therefore occur
+HIR properties and the locked Unicode tables' range/folding scratch. Separately,
+regex-automata 0.4.18 compiler scratch is reserved for every pattern: 1 MiB for
+its fixed UTF-8 tables/frontier plus sixteen times the compiled-size limit for
+cached transition keys and intermediate state/remapping storage. This covers
+implicit Unicode classes such as `.` and case-folded literals, too; even an
+ASCII pattern requires the conservative unconditional allowance. The locked
+meta engine uses forward compilation, reverse compilation with shrinking
+disabled, and a possible reverse-prefix attempt. Compiled and search-cache
+bounds remain separately reserved. A retained-memory error can therefore occur
 below the source-byte ceiling. Raising only the source ceiling cannot bypass the
-allocation budget; the reservations require review when regex dependencies change.
+allocation budget; the reservations require review when regex dependencies or
+compiler configuration change.
 
 The HTTP adapter acquires one logical permit before collecting the body. The same
 permit moves into decoding/evaluation. The absolute deadline includes body
