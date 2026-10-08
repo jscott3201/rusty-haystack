@@ -511,14 +511,16 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
     auth: Option<Extension<AuthUser>>,
+    admission: Option<Extension<std::sync::Arc<haystack_app::WorkGuard>>>,
 ) -> Response {
     let username = auth
         .map(|Extension(u)| u.username)
         .unwrap_or_else(|| "anonymous".into());
+    let guard = admission.map(|Extension(guard)| guard.child());
     ws.max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
         .max_write_buffer_size(MAX_MESSAGE_SIZE * 2)
-        .on_upgrade(move |socket| handle_socket(socket, username, state))
+        .on_upgrade(move |socket| handle_socket(socket, username, state, guard))
 }
 
 /// Preserve the current username-scoped cleanup policy on every exit, including cancellation.
@@ -572,7 +574,12 @@ async fn forward_messages<S>(
 
 /// The connection owns its writer. Queue overflow or writer failure is terminal;
 /// no correlated response or push is silently discarded while the socket stays open.
-async fn handle_socket(socket: WebSocket, username: String, state: SharedState) {
+async fn handle_socket(
+    socket: WebSocket,
+    username: String,
+    state: SharedState,
+    guard: Option<haystack_app::WorkGuard>,
+) {
     use futures_util::StreamExt;
     use tokio::{
         sync::{mpsc, watch},
@@ -586,7 +593,15 @@ async fn handle_socket(socket: WebSocket, username: String, state: SharedState) 
     let (stop, stopped) = watch::channel::<Option<u16>>(None);
     let (sender, mut receiver) = socket.split();
     let mut writer = JoinSet::new();
-    writer.spawn(forward_messages(sender, rx, stopped, WRITE_TIMEOUT));
+    let cancellation = guard
+        .as_ref()
+        .map(haystack_app::WorkGuard::cancellation)
+        .unwrap_or_default();
+    let writer_guard = guard.as_ref().map(haystack_app::WorkGuard::child);
+    writer.spawn(async move {
+        let _guard = writer_guard;
+        forward_messages(sender, rx, stopped, WRITE_TIMEOUT).await;
+    });
     let mut ping_interval = tokio::time::interval(PING_INTERVAL);
     ping_interval.tick().await;
     let mut pong_deadline = None;
@@ -595,6 +610,8 @@ async fn handle_socket(socket: WebSocket, username: String, state: SharedState) 
     push_interval.tick().await;
     let close_code = 'connection: loop {
         tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break 1001,
             _ = writer.join_next() => break 1011,
             _ = async {
                 match pong_deadline {

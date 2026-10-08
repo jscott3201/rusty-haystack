@@ -51,13 +51,17 @@ async fn handle(
         .get::<AuthUser>()
         .map(|user| Principal::authenticated(user.username.clone(), user.permissions.clone()))
         .unwrap_or(Principal::Anonymous);
-    let admission = service
-        .begin(ReadContext::new(
-            principal,
-            started + service.limits().max_duration,
-            CancellationToken::new(),
-        ))
-        .await?;
+    let context = ReadContext::new(
+        principal,
+        started + service.limits().max_duration,
+        CancellationToken::new(),
+    );
+    let guard = request
+        .extensions()
+        .get::<std::sync::Arc<haystack_app::WorkGuard>>()
+        .ok_or(ReadError::Closed)?
+        .child();
+    let admission = service.begin_admitted(context, guard).await?;
     let (parts, body) = request.into_parts();
     let content_type = parts
         .headers
@@ -78,10 +82,9 @@ async fn handle(
     if output == H4Codec::Trio {
         return Err(ReadError::InvalidQuery("codec cannot carry page metadata"));
     }
-    let cancellation = admission.cancellation();
     let bytes = tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Err(ReadError::Cancelled),
+        _ = admission.cancelled() => return Err(ReadError::Cancelled),
         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(admission.deadline())) => return Err(ReadError::Deadline),
         result = to_bytes(body, service.limits().max_input_bytes) => result.map_err(|_| ReadError::Budget(BudgetKind::Input))?,
     };
@@ -107,6 +110,7 @@ fn codec(mime: &str) -> H4Codec {
 }
 fn http_error(error: ReadError) -> HaystackError {
     let status = match error {
+        ReadError::NotReady | ReadError::Closed => StatusCode::SERVICE_UNAVAILABLE,
         ReadError::InvalidQuery(_) => StatusCode::BAD_REQUEST,
         ReadError::Unavailable => StatusCode::NOT_FOUND,
         ReadError::Forbidden => StatusCode::FORBIDDEN,

@@ -7,14 +7,25 @@ service. `EntityGraph` remains an unrestricted in-process data structure.
 
 ## Embedding and HTTP setup
 
-Create a service with a graph, an explicit `ReadPolicy`, and finite `ReadLimits`.
+Create an `ApplicationBuilder` with a graph, an explicit `ReadPolicy`, and finite
+`ReadLimits`. Its early handle supplies the exact managed service to every adapter.
 The policy receives `Principal::Anonymous`, `Authenticated { subject, permissions }`,
 or `TrustedEmbedding { subject }`. Trusted embedding is an explicit identity;
 the supplied policy still decides what it can read. `AllowAll` is an explicit
 unrestricted policy for trusted compatibility applications.
 
 ```rust,ignore
-let reads = ReadService::new(graph.clone(), policy, ReadLimits::default())?;
+let application = ApplicationBuilder::new(graph.clone(), policy, ReadLimits::default())?;
+let handle = application.handle();
+let reads = handle.read_service();
+let listener = HaystackServer::new(graph)
+    .with_scoped_reads(handle)
+    .with_auth(auth_manager)
+    .port(0)
+    .into_listener();
+let owner = application.owned_resource(listener)
+    .start(&tokio::runtime::Handle::current())?;
+let address = owner.ready().await?.listeners[0].address;
 let page = reads.read(
     ReadContext::with_timeout(
         Principal::TrustedEmbedding { subject: "local-operator".into() },
@@ -23,10 +34,9 @@ let page = reads.read(
     ReadRequest::new(ReadQuery::Filter("site".into()), OutputProfile::Typed),
 ).await?;
 
-HaystackServer::new(graph)
-    .with_scoped_reads(reads)
-    .with_auth(auth_manager)
-    .run().await?;
+let closed = owner.close().await;
+owner.terminated().await; // also await this after a close timeout
+closed?;
 ```
 
 The HTTP adapter passes the authenticated username and effective coarse
@@ -169,13 +179,17 @@ releases its capture. Tokio may leave an aborted closure queued behind unrelated
 blocking work, so the caller does not await that closure on its stop path.
 Cancellation of running code is cooperative between bounded operations, not an
 unsafe thread interruption. Ordinary completion is joined. The service borrows
-the caller's Tokio runtime, which owns outstanding work after caller departure;
-application-wide admission sealing and completion tracking belong to the later
-lifecycle boundary. The service owns no listener/runtime shutdown, and dropping
-a service clone does not stop other users.
+the caller's Tokio runtime. Managed services register before body collection or
+queueing and the application retains ownership until actual worker exit. Its
+close protocol seals new admission, drains admitted work, then requests stop;
+see [application lifecycle](application-lifecycle.md). A retained managed service
+returns `Closed` after shutdown. `ReadService::new` remains a separate unmanaged
+compatibility constructor whose outstanding workers belong to the caller's
+runtime. Dropping a service clone does not stop other users.
 
 Transport-independent errors include invalid query, unavailable/forbidden,
 stale cursor, capacity, cancellation/deadline, budget, and strict projection.
 HTTP maps them respectively to 400, 404/403, 409, 429, 408, 413 for input or 422
 for other budgets, and 422. Error grids contain generic diagnostics and no denied
-identifier or display text. Invalid startup limits are configuration errors.
+identifier or display text. Managed `NotReady` and `Closed` errors map to HTTP 503.
+Invalid startup limits are configuration errors.

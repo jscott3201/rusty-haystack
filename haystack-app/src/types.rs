@@ -175,6 +175,10 @@ pub enum BudgetKind {
 }
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReadError {
+    #[error("application is not ready")]
+    NotReady,
+    #[error("application is closed to new work")]
+    Closed,
     #[error("invalid query: {0}")]
     InvalidQuery(&'static str),
     #[error("resource unavailable")]
