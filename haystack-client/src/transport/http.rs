@@ -25,6 +25,7 @@ pub struct HttpTransport {
     base_url: String,
     auth: AuthCredential,
     format: String,
+    entity_submission_safe: bool,
 }
 
 impl HttpTransport {
@@ -38,6 +39,7 @@ impl HttpTransport {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: AuthCredential::Bearer(zeroize::Zeroizing::new(auth_token)),
             format: format.to_string(),
+            entity_submission_safe: false,
         }
     }
 
@@ -78,6 +80,7 @@ impl HttpTransport {
                 password: zeroize::Zeroizing::new(password.to_string()),
             },
             format: format.to_string(),
+            entity_submission_safe: false,
         }
     }
 
@@ -95,6 +98,7 @@ impl HttpTransport {
                 .expect("default HTTP client configuration"),
             "text/zinc",
         )
+        .with_entity_submission_policy()
     }
 
     /// Create a new HTTP transport with a specific wire format.
@@ -111,6 +115,34 @@ impl HttpTransport {
                 .expect("default HTTP client configuration"),
             format,
         )
+        .with_entity_submission_policy()
+    }
+
+    /// Construct a bearer transport with the first-party no-retry/no-redirect
+    /// client configuration, including custom TLS and timeout settings.
+    pub fn with_bearer_config(
+        base_url: &str,
+        auth_token: String,
+        config: &crate::ClientConfig,
+    ) -> Result<Self, ClientError> {
+        Ok(Self::with_bearer(
+            base_url,
+            auth_token,
+            config.build_reqwest_client()?,
+            &config.wire_format,
+        )
+        .with_entity_submission_policy())
+    }
+    pub(crate) fn with_entity_submission_policy(mut self) -> Self {
+        self.entity_submission_safe = true;
+        self
+    }
+    pub(crate) fn check_entity_submission_policy(&self) -> Result<(), ClientError> {
+        if self.entity_submission_safe {
+            Ok(())
+        } else {
+            Err(ClientError::Connection("entity submission requires a first-party no-retry/no-redirect client; use connect_with_config or HttpTransport::with_bearer_config".into()))
+        }
     }
 
     fn apply_auth(
@@ -141,9 +173,14 @@ impl Transport for HttpTransport {
                 "invalid HTTP operation name".into(),
             ));
         }
+        if op == "entityBatch" {
+            self.check_entity_submission_policy()?;
+        }
         let url = format!("{}/{}", self.base_url, op);
 
-        let response = if GET_OPS.contains(&op) {
+        let entity_extension = matches!(op, "entityBatch" | "entityReceipt")
+            || (op == "changes" && req.cols.len() == 1 && req.cols[0].name == "payload");
+        let mut response = if GET_OPS.contains(&op) {
             self.apply_auth(self.client.get(&url))?
                 .header("Accept", &self.format)
                 .send()
@@ -178,9 +215,37 @@ impl Transport for HttpTransport {
         if !status.is_success() {
             return Err(ClientError::ServerError(format!("HTTP {status}")));
         }
-        let resp_body = response.text().await.map_err(crate::error::http_error)?;
         let codec = codec_for(&self.format)
             .ok_or_else(|| ClientError::Codec(format!("unsupported format: {}", self.format)))?;
+        if entity_extension {
+            use haystack_core::codecs::entity;
+            if response
+                .content_length()
+                .is_some_and(|n| n > entity::MAX_GRID_BYTES as u64)
+            {
+                return Err(ClientError::Codec(
+                    "entity response exceeds byte limit".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(crate::error::http_error)? {
+                if chunk.len() > entity::MAX_GRID_BYTES.saturating_sub(bytes.len()) {
+                    return Err(ClientError::Codec(
+                        "entity response exceeds byte limit".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            return if op == "changes" {
+                entity::decode_grid::<entity::ChangesPage>(&bytes, codec)
+                    .and_then(|page| entity::to_grid(&page))
+            } else {
+                entity::decode_grid::<entity::MutationOutcome>(&bytes, codec)
+                    .and_then(|outcome| entity::to_grid(&outcome))
+            }
+            .map_err(|_| ClientError::Codec("invalid entity response envelope".into()));
+        }
+        let resp_body = response.text().await.map_err(crate::error::http_error)?;
         let grid = codec
             .decode_grid(&resp_body)
             .map_err(|_| ClientError::Codec("invalid HTTP response grid".into()))?;

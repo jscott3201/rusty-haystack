@@ -49,9 +49,17 @@ capabilities! {
     ("unloadLib", "Unload a library", false),
     ("exportLib", "Export a library", false),
     ("changes", "Read entity changes", false),
+    ("entityBatch", "Apply an authorized atomic entity batch (entity-v1)", false),
+    ("entityReceipt", "Reconcile an entity operation (entity-v1)", false),
 }
 impl Capability {
-    pub fn enabled(&self, profile: ServiceProfile) -> bool {
+    pub fn enabled(&self, profile: ServiceProfile, mutations: bool) -> bool {
+        if matches!(self.name, "entityBatch" | "entityReceipt") {
+            return profile == ServiceProfile::ScopedReadService && mutations;
+        }
+        if self.name == "changes" && profile == ServiceProfile::ScopedReadService {
+            return mutations;
+        }
         profile == ServiceProfile::LegacyUnrestricted || self.scoped
     }
     pub fn router(&self, profile: ServiceProfile) -> MethodRouter<SharedState> {
@@ -60,6 +68,9 @@ impl Capability {
             "about" => get(ops::about::handle),
             "ops" => get(ops::ops_handler::handle),
             "formats" => get(ops::formats::handle),
+            "entityBatch" => post(ops::entity::batch),
+            "entityReceipt" => post(ops::entity::receipt),
+            "changes" if scoped => post(ops::entity::changes),
             "read" if scoped => post(ops::shared_read::read),
             "nav" if scoped => post(ops::shared_read::nav),
             "defs" if scoped => post(ops::shared_read::definitions),

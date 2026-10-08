@@ -122,7 +122,7 @@ pub enum ClientError {
 }
 ```
 
-All operations return `Result<HGrid, ClientError>`. HTTP 401/403 responses become
+Generic grid operations return `Result<HGrid, ClientError>`. HTTP 401/403 responses become
 `AuthFailed`; other unsuccessful statuses and grids with an `err` marker become
 `ServerError`. HTTP error diagnostics omit response bodies, error-grid `dis` text,
 decoder input and URLs so peer-controlled text cannot echo credentials. HTTP
@@ -319,3 +319,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `tokio-tungstenite` | WebSocket client (rustls-tls) |
 | `tokio` | Async runtime |
 | `thiserror` | Error derive |
+
+## Entity mutation extension
+
+The typed `submit_entities`, `reconcile_entity` and `entity_changes` methods share
+core entity-v1 DTOs with embedding and HTTP. They preserve rich values through a
+typed-v1 STR envelope and unsigned revisions through decimal strings. A possible
+submission followed by a transport/body/invalid-ack failure returns `Unknown`
+with the original operation identity. Reconcile explicitly; no mutation POST is
+automatically retried. Use first-party HTTP constructors with known no-retry and
+no-redirect policies. Caller-supplied reqwest clients cannot qualify submission;
+`HttpTransport::with_bearer_config` supports custom first-party configuration.
+WebSocket has no entity mutation extension. See [entity contracts](entity-mutations.md).

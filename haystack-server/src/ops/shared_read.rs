@@ -100,7 +100,7 @@ async fn handle(
         ReadOutput::Typed(_) => Err(ReadError::Projection),
     }
 }
-fn codec(mime: &str) -> H4Codec {
+pub(super) fn codec(mime: &str) -> H4Codec {
     match mime {
         "application/json" => H4Codec::Json,
         "application/json;v=3" => H4Codec::JsonV3,
@@ -108,7 +108,7 @@ fn codec(mime: &str) -> H4Codec {
         _ => H4Codec::Zinc,
     }
 }
-fn http_error(error: ReadError) -> HaystackError {
+pub(super) fn http_error(error: ReadError) -> HaystackError {
     let status = match error {
         ReadError::NotReady | ReadError::Closed => StatusCode::SERVICE_UNAVAILABLE,
         ReadError::InvalidQuery(_) => StatusCode::BAD_REQUEST,
@@ -118,7 +118,9 @@ fn http_error(error: ReadError) -> HaystackError {
         ReadError::Capacity => StatusCode::TOO_MANY_REQUESTS,
         ReadError::Cancelled | ReadError::Deadline => StatusCode::REQUEST_TIMEOUT,
         ReadError::Budget(BudgetKind::Input) => StatusCode::PAYLOAD_TOO_LARGE,
-        ReadError::Budget(_) | ReadError::Projection => StatusCode::UNPROCESSABLE_ENTITY,
+        ReadError::Budget(_) | ReadError::Projection | ReadError::UnitTooLarge => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         ReadError::InvalidLimits => StatusCode::INTERNAL_SERVER_ERROR,
     };
     HaystackError::new(error.to_string(), status)

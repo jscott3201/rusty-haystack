@@ -25,3 +25,5 @@ pub mod read;
 pub mod watch;
 
 pub(crate) mod shared_read;
+
+pub(crate) mod entity;

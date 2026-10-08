@@ -253,6 +253,87 @@ impl Default for ValueIndex {
     }
 }
 
+pub(crate) struct PreparedValues {
+    entries: BTreeMap<(String, OrderableKind), Vec<usize>>,
+}
+impl ValueIndex {
+    pub(crate) fn prepare_changes(
+        &self,
+        changes: &[super::entity_graph::IndexChange<'_>],
+        budget: &mut super::size::ValueBudget,
+    ) -> Result<PreparedValues, ()> {
+        let mut entries = BTreeMap::new();
+        for change in changes {
+            for (row, add) in [(change.before, false), (change.after, true)] {
+                if let Some(row) = row {
+                    for (field, value) in row.iter() {
+                        budget.charge(field.len().saturating_add(1), 0)?;
+                        let Some(tree) = self.indexes.get(field) else {
+                            continue;
+                        };
+                        // Charge string-key allocation before converting the borrowed value.
+                        let key_bytes = match value {
+                            Kind::Str(text) => text.len(),
+                            _ => 8,
+                        };
+                        budget.charge(
+                            1,
+                            field
+                                .len()
+                                .saturating_add(key_bytes)
+                                .saturating_mul(2)
+                                .saturating_add(256),
+                        )?;
+                        let Some(key) = OrderableKind::from_kind(value) else {
+                            continue;
+                        };
+                        let comparisons = tree.len().checked_ilog2().unwrap_or(0) as usize + 1;
+                        budget.charge(
+                            key_bytes
+                                .saturating_add(field.len())
+                                .saturating_mul(comparisons)
+                                .saturating_mul(4),
+                            0,
+                        )?;
+                        let slot = (field.to_string(), key);
+                        if !entries.contains_key(&slot) {
+                            let current = tree.get(&slot.1);
+                            let len = current.map_or(0, Vec::len);
+                            budget.charge(
+                                len,
+                                len.saturating_mul(std::mem::size_of::<usize>())
+                                    .saturating_add(64),
+                            )?;
+                            entries.insert(slot.clone(), current.cloned().unwrap_or_default());
+                        }
+                        let ids = entries.get_mut(&slot).expect("prepared value bucket");
+                        if add {
+                            ids.push(change.id);
+                        } else {
+                            budget.charge(ids.len(), 0)?;
+                            ids.retain(|id| *id != change.id);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(PreparedValues { entries })
+    }
+    pub(crate) fn apply_prepared(&mut self, prepared: PreparedValues) {
+        for ((field, key), ids) in prepared.entries {
+            let tree = self
+                .indexes
+                .get_mut(&field)
+                .expect("validated index generation");
+            if ids.is_empty() {
+                tree.remove(&key);
+            } else {
+                tree.insert(key, ids);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

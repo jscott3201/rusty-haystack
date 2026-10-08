@@ -143,6 +143,11 @@ struct WireColumn {
 /// Lists, grid columns and rows retain their original order. All float fields
 /// use exactly 16 lowercase hexadecimal digits, including Number and Coord.
 pub fn encode(value: &Kind) -> Result<Vec<u8>, TypedPayloadError> {
+    // Bound input traversal and source-sized allocations before building the
+    // owned wire tree. Final serialized document bounds remain authoritative.
+    crate::graph::size::ValueBudget::new(4_000_000, 32 * 1024 * 1024, 64)
+        .value(value, 0)
+        .map_err(|_| invalid("typed encoding input exceeds limits"))?;
     let wire = Envelope {
         version: 1,
         value: to_wire(value, 0)?,

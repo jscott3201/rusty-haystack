@@ -35,6 +35,7 @@
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod entity;
 pub mod error;
 pub mod tls;
 pub mod transport;

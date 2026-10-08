@@ -26,10 +26,17 @@ pub mod bitmap;
 pub mod changelog;
 pub mod entity_graph;
 pub mod shared;
+pub(crate) mod size;
 pub mod subscriber;
 pub mod value_index;
 
-pub use changelog::{ChangelogGap, DEFAULT_CHANGELOG_CAPACITY, DiffOp, GraphDiff};
-pub use entity_graph::{EntityGraph, GraphError, HierarchyNode};
+pub use changelog::{
+    ChangeCursorError, ChangeUnit, ChangeUnits, ChangelogGap, CommitSpan, DEFAULT_CHANGELOG_BYTES,
+    DEFAULT_CHANGELOG_CAPACITY, DiffOp, GraphDiff, GraphState, GraphWake,
+};
+pub use entity_graph::{
+    BatchError, BatchLimits, EntityGraph, EntityOperation, GraphError, HierarchyNode,
+    PreparedBatch, PreparedChange,
+};
 pub use shared::SharedGraph;
 pub use subscriber::GraphSubscriber;

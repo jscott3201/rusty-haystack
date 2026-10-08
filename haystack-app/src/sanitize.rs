@@ -23,26 +23,7 @@ impl View<'_> {
         let Some(raw) = self.graph.get(id) else {
             return Ok(None);
         };
-        self.budget.charge(BudgetKind::Retained, 128)?;
-        let mut out = HDict::new();
-        for (tag, value) in raw.iter() {
-            self.budget
-                .charge(BudgetKind::Work, tag.len().saturating_add(1))?;
-            if !self.policy.tag(id, tag) {
-                continue;
-            }
-            let own_id = tag == "id" && matches!(value, Kind::Ref(r) if r.val == id);
-            // Check all nested refs even when a nested tag will itself be hidden.
-            // Any denied nested identity removes this entire top-level tag.
-            if !visible(value, own_id, self.policy, self.budget, 1)? {
-                continue;
-            }
-            let name = self.budget.copy_string(tag)?;
-            self.budget.charge(BudgetKind::Retained, 512)?;
-            let value = copy_value(value, id, self.policy, self.budget, 1)?;
-            out.set(name, value);
-        }
-        Ok(Some(Arc::new(out)))
+        record(id, raw, self.policy, self.budget).map(|row| row.map(Arc::new))
     }
     pub fn incoming(
         &mut self,
@@ -69,6 +50,38 @@ impl View<'_> {
         }
         Ok(result)
     }
+}
+/// Apply the same current entity/tag/reference/nominal visibility to retained
+/// preimages as to live records. Missing live rows do not bypass current policy.
+pub(crate) fn record(
+    id: &str,
+    raw: &HDict,
+    policy: &dyn PolicySnapshot,
+    budget: &mut Budget,
+) -> Result<Option<HDict>, ReadError> {
+    budget.check()?;
+    if !policy.entity(id) {
+        return Ok(None);
+    }
+    budget.charge(BudgetKind::Retained, 128)?;
+    let mut out = HDict::new();
+    for (tag, value) in raw.iter() {
+        budget.charge(BudgetKind::Work, tag.len().saturating_add(1))?;
+        if !policy.tag(id, tag) {
+            continue;
+        }
+        let own_id = tag == "id" && matches!(value, Kind::Ref(r) if r.val == id);
+        // Check all nested refs even when a nested tag will itself be hidden.
+        // Any denied nested identity removes this entire top-level tag.
+        if !visible(value, own_id, policy, budget, 1)? {
+            continue;
+        }
+        let name = budget.copy_string(tag)?;
+        budget.charge(BudgetKind::Retained, 512)?;
+        let value = copy_value(value, id, policy, budget, 1)?;
+        out.set(name, value);
+    }
+    Ok(Some(out))
 }
 impl QueryEnvironment for View<'_> {
     type Error = ReadError;

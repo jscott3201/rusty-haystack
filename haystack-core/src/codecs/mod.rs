@@ -24,6 +24,7 @@
 //! used by multiple codec implementations.
 
 pub mod csv;
+pub mod entity;
 pub mod json;
 pub mod shared;
 pub mod trio;

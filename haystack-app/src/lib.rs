@@ -7,6 +7,14 @@
 //! drop their owned runtime outside async. [`ReadService::new`] is an unmanaged
 //! compatibility API. Pure `EntityGraph` remains a trusted in-process API.
 mod budget;
+mod entity_wire;
+mod feed;
+mod mutation;
+pub use entity_wire::EntityWireOperation;
+pub use mutation::{
+    AllowAllMutations, EphemeralMutationStore, EphemeralProvider, MutationLimits, MutationPolicy,
+    MutationProvider, MutationService, PreparedMutation,
+};
 mod lifecycle;
 mod output;
 mod policy;
