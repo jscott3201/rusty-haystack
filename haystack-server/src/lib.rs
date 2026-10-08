@@ -39,6 +39,7 @@ pub mod error;
 pub mod ops;
 mod owned_io;
 pub mod state;
+mod typed_read;
 pub mod ws;
 
 pub use app::{HaystackServer, HttpListener};

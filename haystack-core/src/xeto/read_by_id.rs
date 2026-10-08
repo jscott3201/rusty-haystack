@@ -21,6 +21,36 @@ use super::spec::{Slot, Spec, spec_from_def};
 /// The compatibility pin; updating it requires a reviewed profile update.
 pub const READ_BY_ID_UPSTREAM_COMMIT: &str = "873b922451d3ef4c0c9c08ef3daa542f352d69f3";
 const PROFILE: &str = "pinned-xeto-readById";
+const HTTP_PROFILE: &str = "pinned-xeto-readById-http";
+const HTTP_TYPES: &[&str] = &["Number", "Int", "List"];
+const HTTP_ERRORS: &[&str] = &[
+    "ApiErr",
+    "AuthErr",
+    "InternalErr",
+    "InvalidArgsErr",
+    "InvalidPathErr",
+    "NotAcceptableErr",
+    "NotImplementedErr",
+    "PermissionErr",
+    "TimeoutErr",
+    "UnavailableErr",
+    "UnknownEntityErr",
+    "UnknownFuncErr",
+    "UnsupportedMediaTypeErr",
+    "UnsupportedVersionErr",
+];
+const HTTP_META: &[&str] = &["of", "unitless"];
+const HTTP_MANIFEST: &str = include_str!("../../xeto-profiles/read-by-id/http-manifest.json");
+const HTTP_RAW: &[(&str, &str)] = &[
+    (
+        "src/xeto/sys.api/errs.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/sys.api/errs.xeto"),
+    ),
+    (
+        "src/xeto/sys.api/types.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/sys.api/types.xeto"),
+    ),
+];
 const FUNCTION: &str = "sys.api::readById";
 const TYPES: &[&str] = &[
     "Obj",
@@ -213,6 +243,78 @@ impl ReadByIdProfile {
         Self::admit(provenance, sources)
     }
 
+    /// Admit the reachable HTTP error closure in addition to the unchanged
+    /// native signature. This remains an explicit subset of both libraries.
+    pub fn load_http_pinned() -> Result<Self, ProfileError> {
+        let provenance = serde_json::from_str(HTTP_MANIFEST)
+            .map_err(|e| source_error("http-manifest.json", e.to_string()))?;
+        let raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+        let sources = extract_sources(&provenance, &raw)?;
+        Self::admit(provenance, sources)
+    }
+
+    /// Fit a terminal error's declared fields, including inherited ApiErr fields.
+    /// `spec` is structural wire information and is supplied as the qname.
+    pub fn fit_api_error(&self, qname: &str, fields: &HDict) -> Result<(), ProfileError> {
+        let concrete = self
+            .specs
+            .get(qname)
+            .filter(|s| s.spec.lib == "sys.api" && HTTP_ERRORS.contains(&s.spec.name.as_str()))
+            .ok_or_else(|| source_error(HTTP_PROFILE, "unadmitted error type"))?;
+        let mut slots = BTreeMap::new();
+        let mut entry = Some(concrete);
+        while let Some(current) = entry {
+            for slot in &current.spec.slots {
+                slots.entry(slot.name.as_str()).or_insert(slot);
+            }
+            entry = current
+                .spec
+                .base
+                .as_ref()
+                .and_then(|name| self.specs.get(name));
+        }
+        for name in fields.tag_names() {
+            if !slots.contains_key(name) {
+                return Err(fit_error(
+                    concrete,
+                    name,
+                    "declared field",
+                    "unknown error field",
+                ));
+            }
+        }
+        for (name, slot) in slots {
+            match fields.get(name) {
+                None if slot.is_maybe() => {}
+                None => {
+                    return Err(fit_error(
+                        concrete,
+                        name,
+                        slot_type(slot),
+                        "missing error field",
+                    ));
+                }
+                Some(value) => {
+                    self.fit_slot(concrete, slot, value)?;
+                    if let (Some(Kind::Ref(of)), Kind::List(values)) = (slot.meta.get("of"), value)
+                    {
+                        for item in values {
+                            if !self.fits_type(&of.val, item) {
+                                return Err(fit_error(
+                                    concrete,
+                                    name,
+                                    &of.val,
+                                    "invalid list item",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn provenance(&self) -> &ProfileProvenance {
         &self.provenance
     }
@@ -364,6 +466,17 @@ impl ReadByIdProfile {
             let Some(declaration) = self.specs.get(name) else {
                 return false;
             };
+            match (name, value) {
+                ("sys::Int", Kind::Int(_)) | ("sys::Number", Kind::Number(_)) => return true,
+                ("sys::Int" | "sys::Number", _) => return false,
+                ("sys::List", Kind::List(_)) => return true,
+                ("sys::List", _) => return false,
+                ("sys.api::ApiVersion", Kind::Str(text)) => {
+                    return !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+                }
+                ("sys.api::ApiVersion", _) => return false,
+                _ => {}
+            }
             let scalar_text = match (name, value) {
                 ("sys::Bool", Kind::Bool(b)) => Some(if *b { "true" } else { "false" }),
                 ("sys::Ref", Kind::Ref(r)) => Some(r.val.as_str()),
@@ -393,6 +506,7 @@ impl ReadByIdProfile {
         provenance: ProfileProvenance,
         sources: Vec<ExtractedSource>,
     ) -> Result<Self, ProfileError> {
+        let http = provenance.profile == HTTP_PROFILE;
         let parsed = sources
             .iter()
             .map(|s| s.parse().map(|ast| (s, ast)))
@@ -428,7 +542,8 @@ impl ReadByIdProfile {
                     for def in ast.specs {
                         if identity.library != "sys"
                             || def.is_augmentation
-                            || !TYPES.contains(&def.name.as_str())
+                            || !(TYPES.contains(&def.name.as_str())
+                                || http && HTTP_TYPES.contains(&def.name.as_str()))
                         {
                             return Err(resolve_error(
                                 identity,
@@ -442,6 +557,32 @@ impl ReadByIdProfile {
                             &mut specs,
                             AdmittedSpec {
                                 spec,
+                                source: identity.clone(),
+                                member_of: None,
+                            },
+                        )?;
+                    }
+                }
+                "errors" | "api-types" if http => {
+                    reject_pragma(identity, &ast)?;
+                    for def in ast.specs {
+                        if identity.library != "sys.api"
+                            || def.is_augmentation
+                            || !(identity.role == "errors"
+                                && HTTP_ERRORS.contains(&def.name.as_str())
+                                || identity.role == "api-types" && def.name == "ApiVersion")
+                        {
+                            return Err(resolve_error(
+                                identity,
+                                &def.name,
+                                "unadmitted HTTP declaration",
+                            ));
+                        }
+                        validate_slot_syntax(&def.slots, identity, &def.name)?;
+                        insert_spec(
+                            &mut specs,
+                            AdmittedSpec {
+                                spec: spec_from_def(&def, &identity.library),
                                 source: identity.clone(),
                                 member_of: None,
                             },
@@ -473,7 +614,8 @@ impl ReadByIdProfile {
                         ));
                     }
                     for field in &def.slots {
-                        if !META.contains(&field.name.as_str())
+                        if !(META.contains(&field.name.as_str())
+                            || http && HTTP_META.contains(&field.name.as_str()))
                             || !field.children.is_empty()
                             || field.is_global
                             || field.is_query
@@ -658,7 +800,41 @@ impl ReadByIdProfile {
                 "+Funcs",
             )?;
         }
-        validate_closure(&specs, &metadata)?;
+        if http {
+            for entry in specs.values_mut() {
+                resolve_of(
+                    &mut entry.spec.meta,
+                    &entry.spec.lib,
+                    &pragmas,
+                    &names,
+                    &entry.source,
+                    &entry.spec.qname,
+                    false,
+                )?;
+                resolve_slot_of(
+                    &mut entry.spec.slots,
+                    &entry.spec.lib,
+                    &pragmas,
+                    &names,
+                    &entry.source,
+                    &entry.spec.qname,
+                )?;
+            }
+            for field in metadata.values_mut() {
+                // The selected metadata schema is a bootstrap schema, never a
+                // claim to have admitted complete sys::Spec.
+                resolve_of(
+                    &mut field.slot.meta,
+                    "sys",
+                    &pragmas,
+                    &names,
+                    &field.source,
+                    &field.slot.name,
+                    field.slot.name == "of",
+                )?;
+            }
+        }
+        validate_closure(&specs, &metadata, http)?;
         validate_cycles(&specs)?;
         // Decode declarations only after names and the complete base graph resolve.
         let type_graph = specs.clone();
@@ -807,7 +983,7 @@ fn extract_sources(
     raw: &[(&str, &str)],
 ) -> Result<Vec<ExtractedSource>, ProfileError> {
     if provenance.commit != READ_BY_ID_UPSTREAM_COMMIT
-        || provenance.profile != PROFILE
+        || !matches!(provenance.profile.as_str(), PROFILE | HTTP_PROFILE)
         || provenance.repository != "https://github.com/Project-Haystack/xeto"
         || provenance.complete_libraries
     {
@@ -1107,9 +1283,59 @@ fn resolve_slots(
     }
     Ok(())
 }
+fn resolve_of(
+    meta: &mut HashMap<String, Kind>,
+    library: &str,
+    pragmas: &Pragmas,
+    names: &BTreeSet<String>,
+    source: &ProfileSource,
+    declaration: &str,
+    schema: bool,
+) -> Result<(), ProfileError> {
+    if let Some(value) = meta.get("of") {
+        let Kind::Str(name) = value else {
+            return Err(resolve_error(
+                source,
+                declaration,
+                "of requires a type reference",
+            ));
+        };
+        let qname = if schema && name == "Spec" {
+            "sys::Spec".into()
+        } else {
+            resolve_name(name, library, pragmas, names, source, declaration)?
+        };
+        meta.insert("of".into(), Kind::Ref(HRef::from_val(qname)));
+    }
+    Ok(())
+}
+fn resolve_slot_of(
+    slots: &mut [Slot],
+    library: &str,
+    pragmas: &Pragmas,
+    names: &BTreeSet<String>,
+    source: &ProfileSource,
+    parent: &str,
+) -> Result<(), ProfileError> {
+    for slot in slots {
+        let qname = format!("{parent}.{}", slot.name);
+        resolve_of(
+            &mut slot.meta,
+            library,
+            pragmas,
+            names,
+            source,
+            &qname,
+            false,
+        )?;
+        resolve_slot_of(&mut slot.children, library, pragmas, names, source, &qname)?;
+    }
+    Ok(())
+}
 fn validate_closure(
     specs: &BTreeMap<String, AdmittedSpec>,
     metadata: &BTreeMap<String, AdmittedMetadata>,
+    http: bool,
 ) -> Result<(), ProfileError> {
     for name in TYPES {
         if !specs.contains_key(&format!("sys::{name}")) {
@@ -1127,10 +1353,31 @@ fn validate_closure(
             ));
         }
     }
+    if http {
+        for name in HTTP_TYPES {
+            if !specs.contains_key(&format!("sys::{name}")) {
+                return Err(source_error(HTTP_PROFILE, "missing HTTP carrier"));
+            }
+        }
+        for name in HTTP_ERRORS.iter().chain([&"ApiVersion"]) {
+            if !specs.contains_key(&format!("sys.api::{name}")) {
+                return Err(source_error(HTTP_PROFILE, "missing HTTP declaration"));
+            }
+        }
+        for name in HTTP_META {
+            if !metadata.contains_key(*name) {
+                return Err(source_error(HTTP_PROFILE, "missing HTTP metadata"));
+            }
+        }
+    }
     for entry in specs.values() {
         let allowed: &[&str] = match entry.spec.qname.as_str() {
             "sys::Func" => &["returns"],
             FUNCTION => &["id", "checked", "returns"],
+            "sys.api::ApiErr" if http => &["status", "dis", "errTrace"],
+            "sys.api::UnknownEntityErr" if http => &["id"],
+            "sys.api::UnknownFuncErr" if http => &["funcName"],
+            "sys.api::UnsupportedVersionErr" if http => &["allow"],
             _ => &[],
         };
         for slot in &entry.spec.slots {
@@ -1210,6 +1457,7 @@ fn validate_meta(
             "sys::Marker" => matches!(value, Kind::Marker),
             "sys::Str" => matches!(value, Kind::Str(_)),
             "sys::Obj" => true,
+            "sys::Ref" => matches!(value, Kind::Ref(_)),
             _ => false,
         };
         if !valid {
@@ -1251,6 +1499,13 @@ fn decode_default(
                 "false" => Some(Kind::Bool(false)),
                 _ => return Err(resolve_error(source, declaration, "malformed Bool default")),
             },
+            "sys::Int" => Some(Kind::Int(text.parse().map_err(|_| {
+                resolve_error(source, declaration, "malformed Int default")
+            })?)),
+            "sys::Number" => Some(Kind::Number(crate::kinds::Number::unitless(
+                text.parse()
+                    .map_err(|_| resolve_error(source, declaration, "malformed Number default"))?,
+            ))),
             "sys::Str" => Some(Kind::Str(text.clone())),
             "sys::Ref" => Some(Kind::Ref(HRef::from_val(text))),
             "sys::Marker" if text == "✓" => Some(Kind::Marker),

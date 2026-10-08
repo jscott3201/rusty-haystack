@@ -8,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 /// Clones share cumulative counters and the original work lease.
 #[derive(Clone)]
 pub(crate) struct Budget {
+    #[cfg(test)]
+    pub typed_encode_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     pub limits: Arc<ReadLimits>,
     pub deadline: Instant,
     pub cancel: CancellationToken,
@@ -18,6 +20,7 @@ pub(crate) struct Budget {
 }
 #[derive(Default)]
 struct Usage {
+    input: usize,
     work: usize,
     retained: usize,
     values: usize,
@@ -29,6 +32,8 @@ struct Usage {
 impl Budget {
     pub fn new(limits: Arc<ReadLimits>, deadline: Instant, cancel: CancellationToken) -> Self {
         Self {
+            #[cfg(test)]
+            typed_encode_hook: None,
             limits,
             deadline,
             cancel,
@@ -82,6 +87,7 @@ impl Budget {
         self.check()?;
         let mut usage = self.usage.lock();
         let (used, limit) = match kind {
+            BudgetKind::Input => (&mut usage.input, self.limits.max_input_bytes),
             BudgetKind::Work => (&mut usage.work, self.limits.max_work),
             BudgetKind::Retained => (&mut usage.retained, self.limits.max_retained_bytes),
             BudgetKind::Values => (&mut usage.values, self.limits.max_value_nodes),

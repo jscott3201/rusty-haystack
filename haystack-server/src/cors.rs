@@ -87,8 +87,8 @@ fn usable(origin: &str) -> Option<HeaderValue> {
 /// The allowance is deliberately narrower than the request: `GET` and `POST`
 /// are the only verbs the API answers (see the route table in
 /// `HaystackServer::build_router`), and `Authorization`
-/// and `Content-Type` the only request headers it reads — the first carries
-/// SCRAM, Basic or Bearer credentials, the second drives codec negotiation.
+/// and `Content-Type` carry authentication and codec selection; `Xeto-Version`
+/// selects the typed read protocol and is exposed on responses.
 /// Adding a route that needs more than this means revisiting here, which is
 /// the point: mirroring the request instead would leave the origin list as the
 /// only thing enforcing anything.
@@ -105,7 +105,12 @@ fn build_allow_layer(allowed: Vec<HeaderValue>) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(allowed)
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static("xeto-version"),
+        ])
+        .expose_headers([header::HeaderName::from_static("xeto-version")])
         .max_age(Duration::from_secs(600))
 }
 

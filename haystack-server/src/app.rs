@@ -366,7 +366,7 @@ impl HaystackServer {
             started_at: std::time::Instant::now(),
         });
 
-        let mut core_router = Router::new();
+        let mut core_router = Router::new().layer(middleware::from_fn(crate::typed_read::fallback));
         for capability in CAPABILITIES.iter().filter(|capability| {
             capability.enabled(
                 profile,
@@ -379,22 +379,35 @@ impl HaystackServer {
             core_router = core_router.route(capability.path, capability.router(profile));
         }
 
-        // Merge the authenticated custom router before applying the auth layer,
-        // so its routes are also protected by the built-in auth middleware.
-        if let Some(auth_router) = self.authenticated_router {
-            core_router = core_router.merge(auth_router);
-        }
-
-        let mut app = core_router
-            .route_layer(middleware::from_fn_with_state(
+        core_router = core_router
+            .route(
+                "/api/sys.api::readById",
+                axum::routing::any(crate::typed_read::handle),
+            )
+            .layer(middleware::from_fn_with_state(
                 state.clone(),
-                auth_middleware,
+                builtin_auth_middleware,
             ))
+            .layer(middleware::from_fn(crate::typed_read::version_header));
+
+        // Custom fallbacks own unmatched paths, including /api paths. Apply
+        // ordinary authentication without typed dispatch or version rewriting.
+        // Axum chooses the right-hand default fallback, but preserves an
+        // explicit custom fallback from either side.
+        if let Some(auth_router) = self.authenticated_router {
+            core_router = auth_router
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    auth_middleware,
+                ))
+                .merge(core_router);
+        }
+        let mut app = core_router
             .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
             .with_state(state.clone());
 
         if let Some(custom) = self.custom_router {
-            app = app.merge(custom.with_state(state.clone()));
+            app = custom.with_state(state.clone()).merge(app);
         }
 
         // Outermost, and after the custom-router merge so those routes are
@@ -517,12 +530,16 @@ async fn lifecycle_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    let typed = crate::typed_read::selected(&request);
     let Some(application) = &state.application else {
         return next.run(request).await;
     };
     let guard = match application.admit() {
         Ok(guard) => Arc::new(guard),
         Err(error) => {
+            if typed {
+                return crate::typed_read::error(haystack_app::ApiError::Unavailable);
+            }
             return crate::error::HaystackError::new(
                 error.to_string(),
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -534,7 +551,7 @@ async fn lifecycle_middleware(
     request.extensions_mut().insert(guard.clone());
     tokio::select! {
         biased;
-        _ = cancellation.cancelled() => crate::error::HaystackError::new("application stopping", StatusCode::SERVICE_UNAVAILABLE).into_response(),
+        _ = cancellation.cancelled() => if typed { crate::typed_read::error(haystack_app::ApiError::Unavailable) } else { crate::error::HaystackError::new("application stopping", StatusCode::SERVICE_UNAVAILABLE).into_response() },
         response = next.run(request) => response,
     }
 }
@@ -558,6 +575,21 @@ fn required_permission(path: &str) -> Option<&'static str> {
     Some("read")
 }
 
+// The built-in default fallback participates in typed dispatch. Custom
+// authenticated routers use only auth_middleware and retain their own fallback.
+async fn builtin_auth_middleware(
+    State(state): State<SharedState>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Response {
+    req.extensions_mut()
+        .insert(ops::shared_read::ReadStarted(std::time::Instant::now()));
+    if crate::typed_read::selected(&req) {
+        return crate::typed_read::handle(State(state), req).await;
+    }
+    auth_middleware(State(state), req, next).await
+}
+
 /// Authentication middleware for Axum.
 ///
 /// - GET /api/about: pass through (about handles auth itself for SCRAM)
@@ -569,8 +601,6 @@ async fn auth_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    req.extensions_mut()
-        .insert(ops::shared_read::ReadStarted(std::time::Instant::now()));
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
@@ -896,3 +926,7 @@ mod tests {
 #[cfg(test)]
 #[path = "scoped_body_tests.rs"]
 mod scoped_body_tests;
+
+#[cfg(test)]
+#[path = "typed_body_tests.rs"]
+mod typed_body_tests;

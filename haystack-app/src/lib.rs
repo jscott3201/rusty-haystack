@@ -41,7 +41,9 @@ mod output;
 mod policy;
 mod sanitize;
 mod service;
+mod typed_read;
 mod types;
+pub use typed_read::{ApiError, TypedReadInput, TypedReadResponse};
 mod wire;
 
 pub use haystack_core::filter::CatalogKind;

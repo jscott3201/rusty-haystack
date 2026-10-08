@@ -327,3 +327,70 @@ fn parser_preserves_augmentation_qualified_member_refs_and_type_defaults() {
     let spec = haystack_core::xeto::spec::spec_from_def(&scalar.specs[0], "sys");
     assert_eq!(spec.meta.get("val"), Some(&Kind::Str("false".into())));
 }
+
+#[test]
+fn pinned_http_closure_is_reachable_and_error_fields_fit_their_declared_types() {
+    let profile = ReadByIdProfile::load_http_pinned().unwrap();
+    assert_eq!(profile.provenance().profile, "pinned-xeto-readById-http");
+    assert_eq!(profile.provenance().commit, READ_BY_ID_UPSTREAM_COMMIT);
+    for name in [
+        "sys::Number",
+        "sys::Int",
+        "sys::List",
+        "sys.api::ApiVersion",
+        "sys.api::ApiErr",
+        "sys.api::UnknownFuncErr",
+        "sys.api::UnsupportedVersionErr",
+    ] {
+        assert!(profile.declaration(name).is_some(), "{name}");
+    }
+    for name in [
+        "sys.api::RateLimitErr",
+        "sys.api::UnknownProjErr",
+        "sys.api::AmbiguousFuncErr",
+        "sys.api::MethodNotAllowedErr",
+        "sys::Spec",
+    ] {
+        assert!(profile.declaration(name).is_none(), "{name}");
+    }
+    let version = profile
+        .declaration("sys.api::UnsupportedVersionErr")
+        .unwrap();
+    assert_eq!(version.spec.slots[0].type_ref.as_deref(), Some("sys::List"));
+    assert_eq!(
+        version.spec.slots[0].meta.get("of"),
+        Some(&Kind::Ref(HRef::from_val("sys.api::ApiVersion")))
+    );
+    let mut error = HDict::new();
+    error.set("status", Kind::Int(400));
+    error.set("dis", Kind::Str("Unsupported version".into()));
+    error.set(
+        "allow",
+        Kind::List(vec![Kind::Str("4".into()), Kind::Str("5".into())]),
+    );
+    profile
+        .fit_api_error("sys.api::UnsupportedVersionErr", &error)
+        .unwrap();
+    error.set("allow", Kind::List(vec![Kind::Str("five".into())]));
+    assert!(
+        profile
+            .fit_api_error("sys.api::UnsupportedVersionErr", &error)
+            .is_err()
+    );
+    error.remove_tag("allow");
+    assert!(
+        profile
+            .fit_api_error("sys.api::UnsupportedVersionErr", &error)
+            .is_err()
+    );
+    error.set(
+        "status",
+        Kind::Number(haystack_core::kinds::Number::unitless(400.0)),
+    );
+    assert!(profile.fit_api_error("sys.api::ApiErr", &error).is_err());
+    assert!(
+        profile
+            .fit_api_error("sys.api::RateLimitErr", &error)
+            .is_err()
+    );
+}
