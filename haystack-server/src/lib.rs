@@ -39,6 +39,7 @@ pub mod error;
 pub mod his_provider;
 pub mod his_store;
 pub mod ops;
+mod owned_io;
 pub mod state;
 pub mod ws;
 

@@ -465,6 +465,7 @@ impl haystack_app::ApplicationResource for HttpListener {
                 if application.ready().await.is_err() {
                     return Ok(());
                 }
+                let listener = crate::owned_io::OwnedListener::new(listener, application);
                 axum::serve(listener, router)
                     .with_graceful_shutdown(closing.cancelled_owned())
                     .await

@@ -87,7 +87,13 @@ registration, not permission for unrelated new work.
 
 The closing token stops owned listeners accepting connections. After the drain
 allowance, the cancellation token asks admitted reads, bodies, legacy WebSocket
-connections and their tracked writers to stop. Queued and running blocking read
+connections and their tracked writers to stop. Owned accepted TCP connections
+also retain a registration through actual I/O destruction, beyond middleware's
+response return. Stop wakes pending transport reads and writes, so a peer that
+stops consuming a response cannot hold provider cleanup open. An immediately
+writable final response or WebSocket close frame may finish; blocked transport
+I/O is cancelled. Axum's connection completion wait remains in place.
+Queued and running blocking read
 workers retain their registration and capacity permit until actual task
 completion or destruction, even after their caller has received a cancellation
 error or dropped its future. Running blocking code cooperates between bounded

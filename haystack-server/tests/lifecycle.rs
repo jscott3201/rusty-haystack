@@ -477,3 +477,92 @@ fn mismatched_lifecycle_attachment_is_rejected_in_both_configuration_orders() {
         assert!(graph.read(|graph| graph.namespace_arc().is_none()));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_export_peer_does_not_hold_owned_connections_or_provider_open() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Exceed the platform's ordinary send buffer and explicitly constrain the
+    // peer's receive window. Reading only the headers then stalls Hyper's flush.
+    const PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+    let graph = graph();
+    let mut row = HDict::new();
+    row.set("payload", Kind::Str("x".repeat(PAYLOAD_BYTES)));
+    graph.update("a", row).unwrap();
+    let provider = Provider::new(Init::Ready);
+    let application = builder(&graph).shutdown_policy(ShutdownPolicy {
+        drain_timeout: Duration::from_millis(200),
+        stop_timeout: Duration::from_secs(2),
+    });
+    let server = HaystackServer::new(graph)
+        .with_history_provider(Box::new(OwnedProvider(provider.clone())))
+        .port(0);
+    let owner = application
+        .owned_resource(server.into_listener())
+        .start(&tokio::runtime::Handle::current())
+        .unwrap();
+    let address = owner.ready().await.unwrap().listeners[0].address;
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(1024).unwrap();
+    assert!(socket.recv_buffer_size().unwrap() <= 64 * 1024);
+    let mut peer = socket.connect(address).await.unwrap();
+    peer.write_all(b"POST /api/export HTTP/1.1\r\nHost: localhost\r\nAccept: text/zinc\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .unwrap();
+    let headers = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            assert!(headers.len() < 4096, "bounded response headers");
+            headers.push(peer.read_u8().await.unwrap());
+        }
+        String::from_utf8(headers).unwrap()
+    })
+    .await
+    .expect("export response started");
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    let length = headers
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().unwrap())
+        })
+        .expect("export has a known response length");
+    assert!(length > PAYLOAD_BYTES);
+    let close = owner.close();
+    tokio::pin!(close);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut close)
+            .await
+            .is_err(),
+        "a blocked response must retain owned work during graceful drain"
+    );
+    assert_eq!(provider.closed.load(Ordering::SeqCst), 0);
+    assert!(owner.handle().outstanding_tasks() > 0);
+    let outcome = tokio::time::timeout(Duration::from_secs(4), &mut close).await;
+    let termination = tokio::time::timeout(Duration::from_millis(500), owner.terminated()).await;
+    // Capture every receipt while the peer remains open and does not read its
+    // response body. Release it only now, also making RED cleanup bounded.
+    let closed_before_peer_drop = provider.closed.load(Ordering::SeqCst);
+    let outstanding_before_peer_drop = owner.handle().outstanding_tasks();
+    drop(peer);
+    tokio::time::timeout(Duration::from_secs(2), owner.terminated())
+        .await
+        .expect("test cleanup after releasing the peer");
+    assert!(
+        matches!(
+            outcome,
+            Ok(Ok(CloseReport {
+                drain_expired: true
+            }))
+        ),
+        "owned connection I/O did not stop: {outcome:?}"
+    );
+    assert!(
+        termination.is_ok(),
+        "termination required the peer to disconnect"
+    );
+    assert_eq!(closed_before_peer_drop, 1);
+    assert_eq!(outstanding_before_peer_drop, 0);
+    assert_eq!(provider.held.load(Ordering::SeqCst), 0);
+    assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
+}
