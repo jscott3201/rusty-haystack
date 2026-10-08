@@ -67,7 +67,7 @@ pub use units::{
 
 mod tz;
 #[cfg(feature = "chrono-tz")]
-pub use tz::resolve_local_offset;
+pub use tz::{offset_at, resolve_local_offset};
 pub use tz::{tz_for, tz_map};
 
 pub mod projection;

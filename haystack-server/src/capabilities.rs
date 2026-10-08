@@ -53,7 +53,13 @@ capabilities! {
     ("entityReceipt", "Reconcile an entity operation (entity-v1)", false),
 }
 impl Capability {
-    pub fn enabled(&self, profile: ServiceProfile, mutations: bool) -> bool {
+    pub fn enabled(&self, profile: ServiceProfile, mutations: bool, history: bool) -> bool {
+        if self.name == "hisRead" {
+            return history;
+        }
+        if self.name == "hisWrite" {
+            return history && profile == ServiceProfile::LegacyUnrestricted;
+        }
         if matches!(self.name, "entityBatch" | "entityReceipt") {
             return profile == ServiceProfile::ScopedReadService && mutations;
         }
@@ -71,6 +77,7 @@ impl Capability {
             "entityBatch" => post(ops::entity::batch),
             "entityReceipt" => post(ops::entity::receipt),
             "changes" if scoped => post(ops::entity::changes),
+            "hisRead" if scoped => post(ops::his::handle_scoped_read),
             "read" if scoped => post(ops::shared_read::read),
             "nav" if scoped => post(ops::shared_read::nav),
             "defs" if scoped => post(ops::shared_read::definitions),

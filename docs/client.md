@@ -331,3 +331,14 @@ automatically retried. Use first-party HTTP constructors with known no-retry and
 no-redirect policies. Caller-supplied reqwest clients cannot qualify submission;
 `HttpTransport::with_bearer_config` supports custom first-party configuration.
 WebSocket has no entity mutation extension. See [entity contracts](entity-mutations.md).
+
+## Bounded history extension
+
+`his_read_scoped(&HistoryReadRequest)` selects the bounded-history-v1 profile
+on a `HistoryTransport`. It returns typed schema, independent graph/history
+observations, retained coverage, and explicit Complete/Limited/Interrupted/Failed
+alongside any partial rows. The helper rejects missing, foreign or contradictory
+terminal metadata and does not retry. First-party HTTP constructors collect one
+bounded response in Zinc or JSON v3/v4. No remote pull protocol is implied.
+The existing `his_read` remains an explicit legacy grid call; Python and CLI
+helpers do not silently opt into partial results. See [history reads](history-reads.md).

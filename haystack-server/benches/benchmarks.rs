@@ -50,6 +50,8 @@ fn build_test_graph(n: usize) -> SharedGraph {
             )),
         );
         d.set("kind", Kind::Str("Number".into()));
+        d.set("tz", Kind::Str("UTC".into()));
+        d.set("unit", Kind::Str("°F".into()));
         graph.add(d).unwrap();
     }
 

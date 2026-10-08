@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 haystack-core.workspace = true
+haystack-app.workspace = true
 haystack-client.workspace = true
 haystack-server.workspace = true
 pyo3 = { workspace = true, features = ["extension-module"] }

@@ -1,135 +1,119 @@
-//! The `hisRead` and `hisWrite` ops — historical time-series data.
+//! Bounded shared history reads and explicit legacy native history writes.
+use super::shared_read::{ReadStarted, http_error};
+use crate::{auth::AuthUser, content, error::HaystackError, state::SharedState};
+use axum::{
+    body::{Body, to_bytes},
+    extract::State,
+    http::{HeaderMap, Request},
+    response::{IntoResponse, Response},
+};
+use haystack_app::{
+    BudgetKind, CancellationToken, H4Codec, HisItem, Principal, ReadContext, ReadError,
+};
+use haystack_core::{codecs::history, data::HGrid, kinds::Kind};
+use std::time::Instant;
 
-use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
-
-use haystack_core::data::{HCol, HDict, HGrid};
-use haystack_core::kinds::{HDateTime, HRef, Kind};
-
-use crate::content;
-use crate::error::HaystackError;
-use crate::his_store::HisItem;
-use crate::state::SharedState;
-
-// ---------------------------------------------------------------------------
-// hisRead
-// ---------------------------------------------------------------------------
-
-/// POST /api/hisRead
+pub async fn handle_scoped_read(
+    State(state): State<SharedState>,
+    request: Request<Body>,
+) -> Result<Response, HaystackError> {
+    read(state, request, true).await.map_err(http_error)
+}
 pub async fn handle_read(
     State(state): State<SharedState>,
-    headers: HeaderMap,
-    body: String,
+    request: Request<Body>,
 ) -> Result<Response, HaystackError> {
-    let content_type = headers
-        .get("Content-Type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let accept = headers
-        .get("Accept")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let request_grid = content::decode_request_grid(&body, content_type)
-        .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
-
-    let row = request_grid
-        .row(0)
-        .ok_or_else(|| HaystackError::bad_request("hisRead request has no rows"))?;
-
-    let id = match row.get("id") {
-        Some(Kind::Ref(r)) => r.val.clone(),
-        _ => {
-            return Err(HaystackError::bad_request(
-                "hisRead: missing or invalid 'id' Ref",
-            ));
-        }
-    };
-
-    let range_str = match row.get("range") {
-        Some(Kind::Str(s)) => s.as_str(),
-        _ => {
-            return Err(HaystackError::bad_request(
-                "hisRead: missing or invalid 'range' Str",
-            ));
-        }
-    };
-
-    // Parse range into (start, end) pair.
-    let (start, end) = parse_range(range_str)
-        .map_err(|e| HaystackError::bad_request(format!("hisRead: bad range: {e}")))?;
-
-    // Query the store.
-    let items = state.his.his_read(&id, Some(start), Some(end)).await;
-
-    // Build response grid.
-    let cols = vec![HCol::new("ts"), HCol::new("val")];
-    let rows: Vec<HDict> = items
-        .into_iter()
-        .map(|item| {
-            let mut d = HDict::new();
-            d.set("ts", Kind::DateTime(HDateTime::new(item.ts, "UTC")));
-            d.set("val", item.val);
-            d
-        })
-        .collect();
-
-    let mut meta = HDict::new();
-    meta.set("id", Kind::Ref(HRef::from_val(&id)));
-    let grid = HGrid::from_parts(meta, cols, rows);
-
-    log::info!("hisRead: returning {} rows for point {}", grid.len(), id);
-    let (encoded, ct) = content::encode_response_grid(&grid, accept)
-        .map_err(|e| HaystackError::internal(format!("encoding error: {e}")))?;
-
-    Ok(([(axum::http::header::CONTENT_TYPE, ct)], encoded).into_response())
+    read(state, request, false).await.map_err(http_error)
 }
-
-/// Parse a range string into a (start, end) pair of `DateTime<FixedOffset>`.
-fn parse_range(range: &str) -> Result<(DateTime<FixedOffset>, DateTime<FixedOffset>), String> {
-    let range = range.trim();
-
-    match range {
-        "today" => {
-            let today = Utc::now().date_naive();
-            Ok(date_range(today, today))
-        }
-        "yesterday" => {
-            let yesterday = Utc::now().date_naive() - chrono::Duration::days(1);
-            Ok(date_range(yesterday, yesterday))
-        }
-        _ => {
-            if range.contains(',') {
-                let parts: Vec<&str> = range.splitn(2, ',').collect();
-                let start_date = parse_date(parts[0].trim())?;
-                let end_date = parse_date(parts[1].trim())?;
-                Ok(date_range(start_date, end_date))
-            } else {
-                let date = parse_date(range)?;
-                Ok(date_range(date, date))
+fn history_codec(header: &str) -> Result<H4Codec, ReadError> {
+    let mut fields = header.split(';');
+    let mime = fields.next().unwrap_or("").trim();
+    let mut version = None;
+    for field in fields {
+        match field.trim() {
+            "v=3" if version.is_none() => version = Some(3),
+            "v=4" if version.is_none() => version = Some(4),
+            "charset=utf-8" | "charset=UTF-8" => {}
+            _ => {
+                return Err(ReadError::InvalidQuery(
+                    "unsupported history format parameter",
+                ));
             }
         }
     }
+    match (mime, version) {
+        ("" | "text/zinc" | "*/*", None) => Ok(H4Codec::Zinc),
+        ("application/json", Some(3)) => Ok(H4Codec::JsonV3),
+        ("application/json", None | Some(4)) => Ok(H4Codec::Json),
+        _ => Err(ReadError::InvalidQuery(
+            "history requires Zinc or JSON v3/v4",
+        )),
+    }
 }
-
-fn parse_date(s: &str) -> Result<NaiveDate, String> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| format!("invalid date '{s}': {e}"))
-}
-
-fn date_range(
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-) -> (DateTime<FixedOffset>, DateTime<FixedOffset>) {
-    let utc = FixedOffset::east_opt(0).unwrap();
-    let start = utc
-        .from_local_datetime(&start_date.and_time(NaiveTime::MIN))
-        .unwrap();
-    let end = utc
-        .from_local_datetime(&end_date.and_hms_opt(23, 59, 59).unwrap())
-        .unwrap();
-    (start, end)
+async fn read(
+    state: SharedState,
+    request: Request<Body>,
+    scoped: bool,
+) -> Result<Response, ReadError> {
+    let service = state
+        .history_service
+        .as_ref()
+        .ok_or(ReadError::Unavailable)?;
+    let reads = service.read_service();
+    let started = request
+        .extensions()
+        .get::<ReadStarted>()
+        .map(|value| value.0)
+        .unwrap_or_else(Instant::now);
+    let principal = request
+        .extensions()
+        .get::<AuthUser>()
+        .map(|user| Principal::authenticated(user.username.clone(), user.permissions.clone()))
+        .unwrap_or(Principal::Anonymous);
+    let context = ReadContext::new(
+        principal,
+        started + reads.limits().max_duration,
+        CancellationToken::new(),
+    );
+    let guard = request
+        .extensions()
+        .get::<std::sync::Arc<haystack_app::WorkGuard>>()
+        .ok_or(ReadError::Closed)?
+        .child();
+    let admission = reads.begin_admitted(context, guard).await?;
+    let (parts, body) = request.into_parts();
+    let input = parts
+        .headers
+        .get("Content-Type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let output = parts
+        .headers
+        .get("Accept")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if input.len().saturating_add(output.len()) > reads.limits().max_input_bytes {
+        return Err(ReadError::Budget(BudgetKind::Input));
+    }
+    // Admission rejects unsupported negotiation before collecting/provider work.
+    let input = history_codec(input)?;
+    let output = history_codec(output)?;
+    let bytes = tokio::select! {
+        biased;
+        _ = admission.cancelled() => return Err(ReadError::Cancelled),
+        _ = tokio::time::sleep_until(admission.deadline().into()) => return Err(ReadError::Deadline),
+        result = to_bytes(body, history::MAX_REQUEST_BYTES.min(reads.limits().max_input_bytes)) => result.map_err(|_| ReadError::Budget(BudgetKind::Input))?,
+    };
+    let bytes = if scoped {
+        service
+            .wire_admitted(admission, bytes.to_vec(), input, output)
+            .await?
+    } else {
+        service
+            .legacy_wire_admitted(admission, bytes.to_vec(), input, output)
+            .await?
+    };
+    Ok(([(axum::http::header::CONTENT_TYPE, output.mime())], bytes).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +170,13 @@ pub async fn handle_write(
     }
 
     let count = items.len();
-    state.his.his_write(&id, items).await;
+    state
+        .his
+        .as_ref()
+        .ok_or_else(|| HaystackError::bad_request("history unavailable"))?
+        .his_write(&id, items)
+        .await
+        .map_err(|_| HaystackError::internal("history provider write failed"))?;
 
     log::info!("hisWrite: stored {} items for point {}", count, id);
     let grid = HGrid::new();

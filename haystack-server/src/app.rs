@@ -17,10 +17,10 @@ use crate::actions::ActionRegistry;
 use crate::auth::AuthManager;
 use crate::capabilities::{CAPABILITIES, ServiceProfile};
 use crate::cors::CorsPolicy;
-use crate::his_store::HisStore;
 use crate::ops;
 use crate::state::{AppState, SharedState};
 use crate::ws::WatchManager;
+use haystack_app::HisStore;
 
 /// Builder for the Haystack HTTP server.
 pub struct HaystackServer {
@@ -157,7 +157,7 @@ impl HaystackServer {
     /// Set the history storage provider (default: in-memory [`HisStore`]).
     pub fn with_history_provider(
         mut self,
-        provider: Box<dyn crate::his_provider::HistoryProvider>,
+        provider: Box<dyn haystack_app::HistoryProvider>,
     ) -> Self {
         self.history_provider = Some(HistoryBinding {
             provider: Arc::from(provider),
@@ -170,7 +170,7 @@ impl HaystackServer {
     /// The application invokes neither initialization nor cleanup hooks.
     pub fn with_borrowed_history_provider(
         mut self,
-        provider: Arc<dyn crate::his_provider::HistoryProvider>,
+        provider: Arc<dyn haystack_app::HistoryProvider>,
     ) -> Self {
         self.history_provider = Some(HistoryBinding {
             provider,
@@ -181,17 +181,12 @@ impl HaystackServer {
 
     /// Transfer this listener configuration to ApplicationBuilder::owned_resource.
     pub fn into_listener(self) -> HttpListener {
-        HttpListener {
-            server: Some(self),
-            provider: None,
-            attempted: false,
-            initialized: false,
-        }
+        HttpListener { server: Some(self) }
     }
 
     /// Start a legacy application borrowing the current runtime. Scoped setups
     /// use their ApplicationBuilder so one managed service owns their authority.
-    pub fn start(self) -> std::io::Result<haystack_app::ApplicationOwner> {
+    pub fn start(mut self) -> std::io::Result<haystack_app::ApplicationOwner> {
         self.validate_configuration()?;
         if self.application.is_some() {
             return Err(std::io::Error::new(
@@ -205,6 +200,25 @@ impl HaystackServer {
             haystack_app::ReadLimits::default(),
         )
         .map_err(std::io::Error::other)?;
+        let binding = self
+            .history_provider
+            .take()
+            .unwrap_or_else(|| HistoryBinding {
+                provider: Arc::new(HisStore::new()),
+                owned: true,
+            });
+        let history = haystack_app::HistoryService::new(
+            builder.handle().read_service(),
+            binding.provider,
+            haystack_app::HistoryLimits::default(),
+        )
+        .map_err(std::io::Error::other)?;
+        let builder = if binding.owned {
+            builder.owned_history(history)
+        } else {
+            builder.borrowed_history(history)
+        }
+        .map_err(std::io::Error::other)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
         builder
             .owned_resource(self.into_listener())
@@ -215,18 +229,13 @@ impl HaystackServer {
     /// Assemble an adapter for a caller-owned listener. The application still
     /// seals built-in admission and observes admitted reads/upgrades, but owns
     /// neither this router's listener nor arbitrary tasks spawned by custom
-    /// routes. Configured providers must be explicitly borrowed and initialized
-    /// by their caller; the default in-memory store belongs to this router.
+    /// routes. History comes from the exact application selection; independent
+    /// listener providers are rejected. Borrowed provider hooks remain external.
     pub fn into_external_router(self) -> std::io::Result<Router> {
-        if self.application.is_none()
-            || self
-                .history_provider
-                .as_ref()
-                .is_some_and(|binding| binding.owned)
-        {
+        if self.application.is_none() || self.history_provider.is_some() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "external routers require an application handle and explicitly borrowed providers",
+                "external routers require application-selected history and an application handle",
             ));
         }
         self.build_router()
@@ -269,6 +278,13 @@ impl HaystackServer {
         }
     }
     fn validate_configuration(&self) -> std::io::Result<()> {
+        if self.application.is_some() && self.history_provider.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "select history once on the application builder",
+            ));
+        }
+
         if let Some(reads) = &self.read_service
             && !self
                 .application
@@ -309,14 +325,16 @@ impl HaystackServer {
                 graph.set_namespace(Arc::new(DefNamespace::new()));
             }
         });
-        let his = self
-            .history_provider
-            .map(|binding| binding.provider)
-            .unwrap_or_else(|| Arc::new(HisStore::new()));
+        let history_service = self
+            .application
+            .as_ref()
+            .and_then(|app| app.history_service());
+        let his = history_service.as_ref().map(|service| service.provider());
 
         let mutation_service = self.application.as_ref().and_then(|a| a.mutation_service());
         let state: SharedState = Arc::new(AppState {
             mutation_service,
+            history_service,
             application: self.application,
             graph: self.graph,
             read_service: self.read_service,
@@ -330,10 +348,13 @@ impl HaystackServer {
         });
 
         let mut core_router = Router::new();
-        for capability in CAPABILITIES
-            .iter()
-            .filter(|capability| capability.enabled(profile, state.mutation_service.is_some()))
-        {
+        for capability in CAPABILITIES.iter().filter(|capability| {
+            capability.enabled(
+                profile,
+                state.mutation_service.is_some(),
+                state.history_service.is_some(),
+            )
+        }) {
             core_router = core_router.route(capability.path, capability.router(profile));
         }
 
@@ -382,16 +403,13 @@ impl HaystackServer {
 }
 
 struct HistoryBinding {
-    provider: Arc<dyn crate::his_provider::HistoryProvider>,
+    provider: Arc<dyn haystack_app::HistoryProvider>,
     owned: bool,
 }
 
 /// An owned HTTP listener, initialized and closed by the application coordinator.
 pub struct HttpListener {
     server: Option<HaystackServer>,
-    provider: Option<HistoryBinding>,
-    attempted: bool,
-    initialized: bool,
 }
 impl haystack_app::ApplicationResource for HttpListener {
     fn name(&self) -> &str {
@@ -425,28 +443,10 @@ impl haystack_app::ApplicationResource for HttpListener {
                 ));
             }
             server.application = Some(application.clone());
-            let provider = server
-                .history_provider
-                .take()
-                .unwrap_or_else(|| HistoryBinding {
-                    provider: Arc::new(HisStore::new()),
-                    owned: true,
-                });
-            let selected = server.profile() == ServiceProfile::LegacyUnrestricted;
-            server.history_provider = Some(HistoryBinding {
-                provider: provider.provider.clone(),
-                owned: false,
-            });
-            self.provider = Some(provider);
-            if selected && self.provider.as_ref().expect("provider").owned {
-                self.attempted = true;
-                self.provider
-                    .as_ref()
-                    .expect("provider")
-                    .provider
-                    .initialize()
-                    .await?;
-                self.initialized = true;
+            if server.history_provider.is_some() {
+                return Err(haystack_app::ApplicationError::Configuration(
+                    "select history once on the application builder",
+                ));
             }
             let listener =
                 tokio::net::TcpListener::bind(format!("{}:{}", server.host, server.port))
@@ -484,31 +484,10 @@ impl haystack_app::ApplicationResource for HttpListener {
         })
     }
     fn rollback_start(&mut self) -> haystack_app::ResourceFuture<'_> {
-        Box::pin(async move {
-            if let Some(binding) = &self.provider {
-                if self.initialized {
-                    binding.provider.close().await?;
-                } else if self.attempted {
-                    binding.provider.rollback_initialize().await?;
-                }
-            }
-            self.provider = None;
-            Ok(())
-        })
+        Box::pin(async { Ok(()) })
     }
     fn close(&mut self) -> haystack_app::ResourceFuture<'_> {
-        Box::pin(async move {
-            if self.initialized {
-                self.provider
-                    .as_ref()
-                    .expect("initialized provider")
-                    .provider
-                    .close()
-                    .await?;
-            }
-            self.provider = None;
-            Ok(())
-        })
+        Box::pin(async { Ok(()) })
     }
 }
 

@@ -1,10 +1,10 @@
 use super::items::{history_dicts, history_items};
 use super::server::TestServer;
 use chrono::{DateTime, FixedOffset, TimeZone};
+use haystack_app::{HisItem, HisStore};
 use haystack_core::data::{HDict, HGrid};
 use haystack_core::graph::{EntityGraph, SharedGraph};
 use haystack_core::kinds::{HRef, Kind, Number};
-use haystack_server::his_store::{HisItem, HisStore};
 use sha2::{Digest, Sha256};
 
 pub const SCALES: [usize; 2] = [1000, 10_000];
@@ -27,7 +27,7 @@ impl HistoryFixture {
 
     pub fn store(&self) -> HisStore {
         let store = HisStore::new();
-        store.write(POINT_ID, self.items.clone());
+        store.write(POINT_ID, self.items.clone()).unwrap();
         assert_eq!(store.len(POINT_ID), self.count);
         store
     }
@@ -39,6 +39,8 @@ impl HistoryFixture {
         point.set("point", Kind::Marker);
         point.set("his", Kind::Marker);
         point.set("kind", Kind::Str("Number".into()));
+        point.set("tz", Kind::Str("UTC".into()));
+        point.set("unit", Kind::Str("°F".into()));
         graph.add(point).expect("history fixture point");
         let server = TestServer::start(SharedGraph::new(graph));
         let client = server.connect_http();

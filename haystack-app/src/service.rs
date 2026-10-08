@@ -256,8 +256,9 @@ impl ReadService {
 }
 /// Owns one logical request slot through body collection and worker execution.
 /// Dropping before execution cancels collection and releases its slot; after the
-/// handoff the worker and any deferred mutation plan share ownership until both
-/// actually release it.
+/// handoff the awaiting caller, worker, and any deferred mutation plan share
+/// ownership until each actually releases it. A ready result remains registered
+/// through delivery, so drain cannot overtake a completed admitted request.
 pub struct ReadAdmission {
     inner: Arc<Inner>,
     principal: Option<Principal>,
@@ -319,6 +320,38 @@ impl ReadAdmission {
     pub(crate) fn belongs_to(&self, service: &ReadService) -> bool {
         Arc::ptr_eq(&self.inner, &service.inner)
     }
+    /// Transfers the original registration into a long-lived bounded session.
+    pub(crate) fn into_session(mut self) -> Result<(Principal, Budget), ReadError> {
+        let mut budget = self.budget.take().expect("live admission");
+        budget.check()?;
+        if budget.lease.is_none() {
+            budget.lease = Some(Arc::new(WorkLease {
+                _permit: self.permit.take().expect("live admission"),
+                _guard: self.guard.take(),
+            }));
+        }
+        Ok((self.principal.take().expect("live admission"), budget))
+    }
+    pub(crate) fn budget_mut(&mut self) -> &mut Budget {
+        self.budget.as_mut().expect("live admission")
+    }
+    pub(crate) fn retain_work(&mut self) -> Result<Arc<WorkLease>, ReadError> {
+        let budget = self.budget.as_mut().expect("live admission");
+        budget.check()?;
+        if budget.lease.is_none() {
+            budget.lease = Some(Arc::new(WorkLease {
+                _permit: self.permit.take().expect("live admission"),
+                _guard: self.guard.take(),
+            }));
+        }
+        Ok(budget.lease.as_ref().expect("installed lease").clone())
+    }
+    pub(crate) fn runtime(&self) -> tokio::runtime::Handle {
+        self.inner
+            .lifecycle
+            .as_ref()
+            .map_or_else(tokio::runtime::Handle::current, |life| life.runtime())
+    }
     pub(crate) async fn run_task<T: Send + 'static>(
         mut self,
         task: impl FnOnce(Principal, &mut Budget) -> Result<T, ReadError> + Send + 'static,
@@ -339,6 +372,12 @@ impl ReadAdmission {
             _permit: permit,
             _guard: self.guard.take(),
         }));
+        // The worker and awaiting caller share the same registration through
+        // completion handoff. Otherwise the worker can make drain observe zero
+        // work and signal owner stop before its ready result reaches the caller.
+        // On prompt cancellation/drop this copy releases while the worker's
+        // capture still owns any queued or running work until actual exit.
+        let _completion_lease = budget.lease.as_ref().expect("installed lease").clone();
         let mut job = spawn_worker(inner, principal, task, budget);
         let result = tokio::select! {
             biased;
@@ -351,6 +390,10 @@ impl ReadAdmission {
                 job.abort();
                 Err(ReadError::Cancelled)
             },
+            // A completed result wins an owner stop racing delivery. The
+            // caller's cancellation and absolute deadline keep their priority;
+            // an in-flight worker still takes the prompt owner-stop branch.
+            result = &mut job => result.map_err(|_| ReadError::Unavailable)?,
             _ = async {
                 match owner_cancel { Some(token) => token.cancelled().await, None => std::future::pending::<()>().await }
             } => {
@@ -358,7 +401,6 @@ impl ReadAdmission {
                 job.abort();
                 Err(ReadError::Cancelled)
             },
-            result = &mut job => result.map_err(|_| ReadError::Unavailable)?,
         };
         // A stop is a prompt request outcome, not proof that the worker exited.
         // Awaiting an aborted spawn_blocking job can wait indefinitely behind
@@ -1036,5 +1078,113 @@ fn application_read_error(error: ApplicationError) -> ReadError {
     match error {
         ApplicationError::NotReady => ReadError::NotReady,
         _ => ReadError::Closed,
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use crate::AllowAll;
+    use haystack_core::graph::EntityGraph;
+    use std::{future::Future, task::Poll, time::Duration};
+
+    #[test]
+    fn second_review_completed_worker_wins_owner_stop_but_not_caller_cancellation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for caller_stop in [false, true] {
+                let reads = ReadService::new(
+                    SharedGraph::new(EntityGraph::new()),
+                    Arc::new(AllowAll),
+                    ReadLimits::default(),
+                )
+                .unwrap();
+                let context =
+                    ReadContext::with_timeout(Principal::Anonymous, Duration::from_secs(5));
+                let caller = context.cancellation.clone();
+                let stop = CancellationToken::new();
+                let mut admission = reads.begin(context).await.unwrap();
+                admission.budget_mut().owner_cancel = Some(stop.clone());
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let mut result = Box::pin(admission.run_task(move |_, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(7)
+                }));
+                assert!(
+                    std::future::poll_fn(|cx| Poll::Ready(result.as_mut().poll(cx)))
+                        .await
+                        .is_pending()
+                );
+                entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                let sentinel = tokio::task::spawn_blocking(|| ());
+                release_tx.send(()).unwrap();
+                sentinel.await.unwrap();
+                // One blocking thread makes this a receipt that the first
+                // worker has exited and its join result is ready, without
+                // polling the request future or relying on elapsed sleeps.
+                stop.cancel();
+                if caller_stop {
+                    caller.cancel();
+                }
+                if caller_stop {
+                    assert_eq!(result.await.unwrap_err(), ReadError::Cancelled);
+                } else {
+                    assert_eq!(result.await.unwrap(), 7);
+                }
+                assert_eq!(reads.load().admitted, 0);
+            }
+        });
+    }
+    #[test]
+    fn second_review_owner_stop_still_returns_promptly_while_worker_is_running() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let reads = ReadService::new(
+                SharedGraph::new(EntityGraph::new()),
+                Arc::new(AllowAll),
+                ReadLimits::default(),
+            )
+            .unwrap();
+            let mut admission = reads
+                .begin(ReadContext::with_timeout(
+                    Principal::Anonymous,
+                    Duration::from_secs(5),
+                ))
+                .await
+                .unwrap();
+            let stop = CancellationToken::new();
+            admission.budget_mut().owner_cancel = Some(stop.clone());
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let mut result = Box::pin(admission.run_task(move |_, _| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(7)
+            }));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(result.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            stop.cancel();
+            let outcome = result.await;
+            let held = reads.load().admitted;
+            release_tx.send(()).unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            assert_eq!(outcome.unwrap_err(), ReadError::Cancelled);
+            assert_eq!(held, 1);
+            assert_eq!(reads.load().admitted, 0);
+        });
     }
 }

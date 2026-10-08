@@ -1,7 +1,7 @@
 use chrono::{Duration, FixedOffset, TimeZone};
+use haystack_app::HisItem;
 use haystack_core::data::HDict;
 use haystack_core::kinds::{HDateTime, Kind, Number};
-use haystack_server::his_store::HisItem;
 
 pub fn history_items(count: usize, start_minutes: i64) -> Vec<HisItem> {
     assert!(count <= 10_000, "benchmark history cap");

@@ -350,8 +350,14 @@ fn decode_number(m: &Map<String, Value>) -> Result<Kind, CodecError> {
         }
     };
     let unit = match m.get("unit") {
+        None => None,
         Some(Value::String(u)) => Some(u.clone()),
-        _ => None,
+        Some(_) => {
+            return Err(CodecError::Parse {
+                pos: 0,
+                message: "number 'unit' must be a string when present".into(),
+            });
+        }
     };
     Ok(Kind::Number(Number::new(v, unit)))
 }

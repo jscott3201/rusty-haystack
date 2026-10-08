@@ -1,5 +1,5 @@
 //! Explicit ownership for application work, resources and shutdown.
-use crate::{MutationService, ReadError, ReadLimits, ReadPolicy, ReadService};
+use crate::{HistoryService, MutationService, ReadError, ReadLimits, ReadPolicy, ReadService};
 use futures_util::FutureExt;
 use haystack_core::graph::SharedGraph;
 use parking_lot::Mutex;
@@ -140,6 +140,7 @@ pub struct ApplicationBuilder {
 struct BuildParts {
     application: ApplicationHandle,
     resources: Vec<Box<dyn ApplicationResource>>,
+    history_resource: Option<Box<dyn ApplicationResource>>,
 }
 impl ApplicationBuilder {
     pub fn new(
@@ -155,8 +156,10 @@ impl ApplicationBuilder {
                     lifecycle,
                     reads,
                     mutations: Arc::new(Mutex::new(None)),
+                    history: Arc::new(Mutex::new(None)),
                 },
                 resources: vec![],
+                history_resource: None,
             }),
             startup_timeout: Duration::from_secs(30),
             shutdown: ShutdownPolicy::default(),
@@ -179,6 +182,34 @@ impl ApplicationBuilder {
         let mut selected = app.mutations.lock();
         if selected.is_some() {
             return Err(ReadError::InvalidQuery("mutation service already selected"));
+        }
+        *selected = Some(service);
+        drop(selected);
+        Ok(self)
+    }
+    /// Transfer history provider lifecycle ownership to the application. Its
+    /// initialization precedes all listener resources regardless of call order.
+    pub fn owned_history(self, service: HistoryService) -> Result<Self, ReadError> {
+        self.select_history(service, true)
+    }
+    /// Borrow an externally managed history provider; no lifecycle hooks run.
+    pub fn borrowed_history(self, service: HistoryService) -> Result<Self, ReadError> {
+        self.select_history(service, false)
+    }
+    fn select_history(mut self, service: HistoryService, owned: bool) -> Result<Self, ReadError> {
+        let parts = self.parts.as_mut().expect("unconsumed builder");
+        if !service
+            .read_service()
+            .same_service(&parts.application.reads)
+        {
+            return Err(ReadError::Forbidden);
+        }
+        let mut selected = parts.application.history.lock();
+        if selected.is_some() {
+            return Err(ReadError::InvalidQuery("history service already selected"));
+        }
+        if owned {
+            parts.history_resource = Some(Box::new(HistoryResource(service.provider())));
         }
         *selected = Some(service);
         drop(selected);
@@ -208,7 +239,10 @@ impl ApplicationBuilder {
                 "startup timeout must be positive and at most one hour",
             ));
         }
-        let parts = self.parts.take().expect("unconsumed builder");
+        let mut parts = self.parts.take().expect("unconsumed builder");
+        if let Some(history) = parts.history_resource.take() {
+            parts.resources.insert(0, history);
+        }
         let owner = ApplicationOwner {
             application: parts.application.clone(),
         };
@@ -263,8 +297,12 @@ pub struct ApplicationHandle {
     pub(crate) lifecycle: Arc<Lifecycle>,
     reads: ReadService,
     mutations: Arc<Mutex<Option<MutationService>>>,
+    history: Arc<Mutex<Option<HistoryService>>>,
 }
 impl ApplicationHandle {
+    pub fn history_service(&self) -> Option<HistoryService> {
+        self.history.lock().clone()
+    }
     pub fn mutation_service(&self) -> Option<MutationService> {
         self.mutations.lock().clone()
     }
@@ -628,5 +666,24 @@ async fn cleanup(
     {
         errors.push(error.clone());
         life.fail(error);
+    }
+}
+
+struct HistoryResource(Arc<dyn crate::HistoryProvider>);
+impl ApplicationResource for HistoryResource {
+    fn name(&self) -> &str {
+        "history"
+    }
+    fn initialize(&mut self, _: ResourceContext) -> ResourceFuture<'_, ReadyInfo> {
+        Box::pin(async move {
+            self.0.initialize().await?;
+            Ok(ReadyInfo::default())
+        })
+    }
+    fn rollback_start(&mut self) -> ResourceFuture<'_> {
+        self.0.rollback_initialize()
+    }
+    fn close(&mut self) -> ResourceFuture<'_> {
+        self.0.close()
     }
 }
