@@ -1,11 +1,13 @@
-# Initial typed HTTP read profile
+# Typed HTTP read profile
 
 `GET` or `POST /api/readById` and `/api/sys.api::readById` execute the pinned
 `sys.api::readById` signature through the application's existing read service.
 The service loads the immutable profile at construction. The native signature
 profile remains separate from its HTTP error closure; neither admits complete
-`sys` or `sys.api` libraries. Full Jeto, a unified executable function registry,
-generated clients, and complete H5 conformance are outside this profile.
+`sys` or `sys.api` libraries. The shared [contextual Jeto codec](jeto.md) handles
+admitted native values. A unified executable function registry, broader catalog
+admission, generated clients, and complete H5 conformance remain outside this
+profile.
 
 The declaration pin is Project-Haystack/xeto commit
 `873b922451d3ef4c0c9c08ef3daa542f352d69f3`. The raw error declarations and their
@@ -29,9 +31,13 @@ from arguments. Other argument names and extra grid columns cannot confer
 projection, cursor, page, or policy authority. GET values beginning with `[` or
 `{` are parsed as JSON; other decoded values are contextual scalar text.
 An empty GET `id` is a present empty Ref under the pinned Ref pattern; it does
-not default to `x`. POST named JSON accepts contextual Ref and Bool strings,
-booleans, and explicit boxed Ref/Bool/Str values; native fitting then enforces
-parameter types. Dict null removes that argument, allowing the parameter's
+not default to `x`. The immutable codec argument context is derived from the
+admitted function's actual Ref and Bool parameter declarations at construction;
+it does not guess types from tag names. POST named JSON is decoded completely
+through this context before only the declared arguments bind. Contextual scalar
+text and explicit boxes follow the core codec's precedence; native fitting then
+enforces parameter types. Duplicate keys, malformed boxes, and unknown specs in
+any decoded member are rejected, including members that cannot bind arguments. Dict null removes that argument, allowing the parameter's
 own default. Omitted or null id defaults to Null, which behaves as a missing
 entity. Omitted or null checked defaults to true. Native explicit-null fitting
 remains unchanged.
@@ -52,23 +58,35 @@ The version-4 default response is Zinc; the version-5 default is Jeto JSON.
 range specificity so a wildcard cannot override a specific exclusion;
 `xeto-filetype` takes precedence and recognizes `zinc`, `hayson`, `json`, and
 (version 5) `jeto`. Every JSON response reports `application/json`.
-`Accept: application/json;box=auto` is supported. Other box modes, unsupported
-formats, and unsupported media parameters are rejected with 406. Response gzip
+`Accept: application/json;box=auto`, `box=all`, and `box=none` are supported,
+also through the `text/jeto` alias. Auto and all must preserve exact native
+identity. None succeeds only when the unboxed result is also exact; identity
+loss returns 406. This exact-only rule is a selected HTTP restriction, not a
+universal Jeto limitation: the core codec exposes deliberate lossy outcomes.
+Unknown modes, duplicate box parameters, unsupported formats, and unsupported
+media parameters are rejected with 406. Response gzip
 is supported with bounded compression under the same admission and budget.
 Successful responses vary on Accept, Xeto-Version and Accept-Encoding, while
 preserving configured CORS variation.
 
-The initial Jeto encoder preserves null results and list elements, Bool, Str,
-Int, finite Float, finite Number with a representable unit, Ref with display,
-Marker, None, NA, Buf, lists, and ordinary dicts. Auto boxing preserves types
-that an untyped JSON position would lose. Integer values retain their signed
-64-bit identity; finite floating-point values retain signed zero. A dict member
-whose value is null, or a `spec` tag carrying ordinary record data, cannot be
-round-tripped through the selected Jeto dict contract and is rejected. Other
-scalar types, non-finite numeric identity, nominal provenance, and nested grids
-are rejected with 406. H4 output uses existing strict projection and likewise
-rejects rich values it cannot preserve. This profile never silently projects a
-rich result into an H4 value.
+The codec preserves null results and list elements, Bool, Str, signed 64-bit
+Int, binary64 Float and Number, Ref display, Marker, None, NA, canonical
+base64url Buf, Uri, admitted Date/Time/DateTime values, lists, dictionaries, and
+nested grids. Auto boxing retains types that an untyped JSON position would
+lose. Signed zero, supported fractional seconds, stored DateTime offset and
+zone text survive. Canonical positive NaN and infinities are supported;
+noncanonical NaN bits, unit-bearing non-finite Numbers, empty Number units,
+subminute DateTime offsets, and other documented core exclusions return 406.
+
+Grid and column native Ref-valued `of` metadata maps to unboxed structural wire
+fields even in all mode. Grid row and column order, sparse cells, domain
+metadata, and nested context scope are preserved. Null dictionary members,
+ordinary record data in `spec`, invalid grid shapes, and metadata collisions
+are rejected when they cannot preserve identity. This service admits no domain
+nominal catalog; such results return 406. The core codec can preserve nominal
+values only under an explicitly supplied matching catalog identity/revision.
+H4 output keeps its existing strict projection and rejects rich values it
+cannot preserve.
 
 A null, missing or denied id is indistinguishable: `checked=false` returns null;
 `checked=true` produces the same UnknownEntity error for both. Version-4
@@ -94,10 +112,14 @@ non-API paths. Authenticated custom fallbacks retain bearer enforcement.
 
 One admission owns raw URI/header/body reservation, contextual decode, signature
 fitting, the authorized read, result fitting, encoding and optional gzip. Input
-collection is cumulative and uses geometrically bounded buffer growth. Zinc
-decode reserves expanded work for every row, including repeated column names,
-even though only the first row binds arguments. The
-same cancellation and absolute deadline apply to queued admission and pending
+collection is cumulative and uses geometrically bounded buffer growth. Jeto
+parsing, contextual reconstruction, generated scalar boxes, escaped strings,
+structural wrappers, and output growth charge the original work, retained-byte,
+value-node and depth allowances before allocation. These are conservative
+budget reservations, not heap allocation or performance measurements. Every
+Jeto member and grid row is decoded within that allowance. Zinc separately
+reserves expanded work for every row, including repeated column names, even
+though only the first row binds arguments. The same cancellation and absolute deadline apply to queued admission and pending
 bodies. The authorized View applies the same entity/tag/reference/nominal
 visibility as legacy shared reads; denied ids are never probed through a raw
 existence check. Dropping or cancelling the waiting future does not release a

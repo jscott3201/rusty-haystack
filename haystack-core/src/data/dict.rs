@@ -8,9 +8,12 @@ use std::fmt;
 ///
 /// An `HDict` is a mutable dictionary mapping tag names (`String`) to values (`Kind`).
 /// Dicts are used as rows in grids, as entity records, and as metadata containers.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct HDict {
     tags: HashMap<String, Kind>,
+    // A conservative table-scan bound. HashMap::capacity() may decrease on
+    // deletion due to tombstones even though its bucket allocation is retained.
+    scan_bound: usize,
 }
 
 impl HDict {
@@ -19,9 +22,34 @@ impl HDict {
         Self::default()
     }
 
-    /// Create a dict from a pre-built HashMap.
+    /// Create a dict from a pre-built HashMap. Normalize its table once so an
+    /// already-sparse caller map cannot hide retained buckets from metered
+    /// traversal. Tag/value identity is unchanged; excess capacity may shrink.
     pub fn from_tags(tags: HashMap<String, Kind>) -> Self {
-        Self { tags }
+        // Move into an explicitly fresh table: collecting an IntoIter may reuse
+        // its allocation, and shrink_to_fit does not promise a table shape.
+        let mut normalized = HashMap::with_capacity(tags.len());
+        normalized.extend(tags);
+        let scan_bound = bucket_bound(normalized.capacity());
+        Self {
+            tags: normalized,
+            scan_bound,
+        }
+    }
+
+    pub(crate) fn try_with_capacity(
+        capacity: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let mut tags = HashMap::new();
+        tags.try_reserve(capacity)?;
+        let scan_bound = bucket_bound(tags.capacity());
+        Ok(Self { tags, scan_bound })
+    }
+
+    /// Upper bound for a complete native table traversal, including buckets
+    /// retained after deletion. Caller-owned storage is not new output memory.
+    pub(crate) fn scan_bound(&self) -> usize {
+        self.scan_bound
     }
 
     /// Returns `true` if the dict contains a tag with the given name.
@@ -74,6 +102,7 @@ impl HDict {
     /// Set (insert or overwrite) a tag.
     pub fn set(&mut self, name: impl Into<String>, val: Kind) {
         self.tags.insert(name.into(), val);
+        self.scan_bound = self.scan_bound.max(bucket_bound(self.tags.capacity()));
     }
 
     /// Remove a tag by name, returning its value if it was present.
@@ -92,7 +121,7 @@ impl HDict {
                     self.tags.remove(k);
                 }
                 _ => {
-                    self.tags.insert(k.clone(), v.clone());
+                    self.set(k.clone(), v.clone());
                 }
             }
         }
@@ -123,6 +152,23 @@ impl HDict {
     /// Collect all tag names into a HashSet.
     pub fn tag_name_set(&self) -> std::collections::HashSet<&str> {
         self.tags.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+// Rust 1.99 HashMap uses power-of-two buckets with at most 7/8 occupancy.
+// Fresh/normalized capacity rounds back to the allocated bucket count. Empty
+// maps need no scan; removals never lower the recorded bound.
+fn bucket_bound(capacity: usize) -> usize {
+    if capacity == 0 {
+        0
+    } else {
+        capacity.checked_next_power_of_two().unwrap_or(usize::MAX)
+    }
+}
+
+impl fmt::Debug for HDict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HDict").field("tags", &self.tags).finish()
     }
 }
 
@@ -444,5 +490,64 @@ mod tests {
         let tags = d.tags();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags.get("a"), Some(&Kind::Marker));
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    #[test]
+    fn scan_bound_survives_deletion_growth_clone_and_merge() {
+        let mut dict = HDict::try_with_capacity(128).unwrap();
+        let capacity = dict.tags().capacity();
+        for index in 0..capacity {
+            dict.set(index.to_string(), Kind::Bool(true));
+        }
+        let bound = dict.scan_bound();
+        let names: Vec<_> = dict.tag_names().map(str::to_owned).collect();
+        for name in &names[1..] {
+            dict.remove_tag(name);
+        }
+        assert_eq!(dict.scan_bound(), bound);
+        assert_eq!(dict.clone().scan_bound(), bound);
+        assert_eq!(dict.len(), 1);
+        let mut equivalent = HDict::new();
+        equivalent.set(&names[0], Kind::Bool(true));
+        assert_eq!(dict, equivalent);
+        assert_eq!(format!("{dict:?}"), format!("{equivalent:?}"));
+        use std::hash::{Hash, Hasher};
+        let mut original_hash = std::collections::hash_map::DefaultHasher::new();
+        let mut equivalent_hash = std::collections::hash_map::DefaultHasher::new();
+        dict.hash(&mut original_hash);
+        equivalent.hash(&mut equivalent_hash);
+        assert_eq!(original_hash.finish(), equivalent_hash.finish());
+        let mut changes = HDict::new();
+        for index in 0..(capacity * 4) {
+            changes.set(format!("new{index}"), Kind::Bool(false));
+        }
+        dict.merge(&changes);
+        assert!(dict.scan_bound() >= bucket_bound(dict.tags().capacity()));
+        let mut remove = HDict::new();
+        for name in dict.tag_names() {
+            remove.set(name, Kind::Remove);
+        }
+        let grown_bound = dict.scan_bound();
+        dict.merge(&remove);
+        assert_eq!(dict.scan_bound(), grown_bound);
+        assert!(dict.is_empty());
+    }
+    #[test]
+    fn incoming_sparse_map_is_normalized_without_identity_loss() {
+        let mut tags = HashMap::with_capacity(16_384);
+        let capacity = tags.capacity();
+        for index in 0..capacity {
+            tags.insert(index.to_string(), Kind::Int(index as i64));
+        }
+        tags.retain(|name, _| name == "42");
+        let dict = HDict::from_tags(tags);
+        assert_eq!(dict.len(), 1);
+        assert_eq!(dict.get("42"), Some(&Kind::Int(42)));
+        assert_eq!(dict.scan_bound(), 4);
+        assert_eq!(dict.tags().capacity(), 3);
     }
 }

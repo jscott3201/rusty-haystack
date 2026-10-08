@@ -841,9 +841,157 @@ fn shared_graph_benchmarks(c: &mut Criterion) {
     });
 }
 
+// Codec cost only: contexts and native/wire fixtures are prepared outside the
+// timed operation; each iteration includes the codec result's destruction.
+// The independent typed-v1 assertions below are also outside timed intervals.
+fn jeto_resource_benchmarks(c: &mut Criterion) {
+    use haystack_core::codecs::{jeto, typed};
+    use std::time::Duration;
+    let context = jeto::Context::standard();
+    let sparse_wire = br#"{"a":true}"#;
+    let mut sparse_native = HDict::new();
+    sparse_native.set("a", Kind::Bool(true));
+    let sparse_native = Kind::Dict(Box::new(sparse_native));
+    assert_eq!(
+        typed::encode(&jeto::decode(sparse_wire, &context, None, jeto::Limits::default()).unwrap())
+            .unwrap(),
+        typed::encode(&sparse_native).unwrap(),
+    );
+
+    let mut columns = Vec::new();
+    let mut columns_wire = Vec::new();
+    for index in 0..24 {
+        let name = format!("c{index:02}");
+        let mut meta = HDict::new();
+        meta.set("of", Kind::Ref(HRef::from_val("sys::Number")));
+        columns.push(HCol::with_meta(&name, meta));
+        columns_wire.push(serde_json::json!({"name": name, "of": "sys::Number"}));
+    }
+    let mut rows = Vec::new();
+    let mut rows_wire = Vec::new();
+    for index in 0..48 {
+        let mut row = HDict::new();
+        row.set("c23", Kind::Number(Number::unitless(index as f64)));
+        rows.push(row);
+        rows_wire.push(serde_json::json!({"c23": index}));
+    }
+    let grid_wire = serde_json::to_vec(
+        &serde_json::json!({"spec":"sys::Grid", "cols":columns_wire, "rows":rows_wire}),
+    )
+    .unwrap();
+    let grid_native = Kind::Grid(Box::new(HGrid::from_parts(HDict::new(), columns, rows)));
+    assert_eq!(
+        typed::encode(&jeto::decode(&grid_wire, &context, None, jeto::Limits::default()).unwrap())
+            .unwrap(),
+        typed::encode(&grid_native).unwrap(),
+    );
+
+    let mut retained = HDict::new();
+    for index in 0..16_384 {
+        retained.set(format!("key{index:05}"), Kind::Int(42));
+    }
+    // Select the final occupied iterator position so both processes exercise
+    // the retained table scan, independently of HashMap's randomized seed.
+    let keep = retained.tag_names().last().unwrap().to_owned();
+    let remove: Vec<_> = retained
+        .tag_names()
+        .filter(|name| *name != keep)
+        .map(str::to_owned)
+        .collect();
+    for name in remove {
+        retained.remove_tag(&name);
+    }
+    let capacity = retained.tags().capacity();
+    assert_eq!(retained.len(), 1);
+    assert!(capacity > 16_384);
+    let mut fresh = HDict::new();
+    fresh.set(&keep, Kind::Int(42));
+    let retained = Kind::Dict(Box::new(retained));
+    let fresh = Kind::Dict(Box::new(fresh));
+    for value in [&retained, &fresh] {
+        let wire = jeto::encode(
+            value,
+            &context,
+            None,
+            jeto::Boxing::Auto,
+            jeto::Limits::default(),
+        )
+        .unwrap()
+        .into_exact()
+        .unwrap();
+        assert_eq!(
+            typed::encode(&jeto::decode(&wire, &context, None, jeto::Limits::default()).unwrap())
+                .unwrap(),
+            typed::encode(value).unwrap()
+        );
+    }
+    eprintln!(
+        "Jeto resource fixture: sparse object {} bytes; Grid {} bytes/24 columns/48 sparse rows; retained Dict capacity {capacity}/1 live member",
+        sparse_wire.len(),
+        grid_wire.len()
+    );
+    let mut group = c.benchmark_group("jeto_resources");
+    group
+        .sample_size(30)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(3));
+    group.bench_function("decode_one_member_object", |b| {
+        b.iter(|| {
+            jeto::decode(
+                black_box(sparse_wire),
+                &context,
+                None,
+                jeto::Limits::default(),
+            )
+            .unwrap()
+        })
+    });
+    group.bench_function("decode_contextual_sparse_grid", |b| {
+        b.iter(|| {
+            jeto::decode(
+                black_box(&grid_wire),
+                &context,
+                None,
+                jeto::Limits::default(),
+            )
+            .unwrap()
+        })
+    });
+    group.bench_function("encode_retained_capacity_dict", |b| {
+        b.iter(|| {
+            jeto::encode(
+                black_box(&retained),
+                &context,
+                None,
+                jeto::Boxing::Auto,
+                jeto::Limits::default(),
+            )
+            .unwrap()
+            .into_exact()
+            .unwrap()
+        })
+    });
+    group.bench_function("encode_fresh_dict_control", |b| {
+        b.iter(|| {
+            jeto::encode(
+                black_box(&fresh),
+                &context,
+                None,
+                jeto::Boxing::Auto,
+                jeto::Limits::default(),
+            )
+            .unwrap()
+            .into_exact()
+            .unwrap()
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     codec_benchmarks,
+    jeto_resource_benchmarks,
     trio_json3_benchmarks,
     filter_benchmarks,
     graph_benchmarks,
