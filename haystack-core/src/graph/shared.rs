@@ -91,6 +91,17 @@ impl SharedGraph {
         f(&guard)
     }
 
+    /// Attempt one bounded read-lock acquisition, then run `f` under that guard.
+    /// Applications can include repeated short attempts in their absolute
+    /// deadline and cancellation policy without detaching a blocked lock waiter.
+    pub fn read_for<F, R>(&self, wait: std::time::Duration, f: F) -> Option<R>
+    where
+        F: FnOnce(&EntityGraph) -> R,
+    {
+        let guard = self.inner.try_read_for(wait)?;
+        Some(f(&guard))
+    }
+
     /// Execute a closure with exclusive (write) access to the graph.
     ///
     /// If its revision changes, broadcast the final version once after releasing

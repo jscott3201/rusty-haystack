@@ -23,3 +23,5 @@ pub mod ops_handler;
 pub mod point_write;
 pub mod read;
 pub mod watch;
+
+pub(crate) mod shared_read;

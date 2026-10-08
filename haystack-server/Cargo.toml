@@ -17,6 +17,7 @@ name = "haystack_server"
 
 [dependencies]
 haystack-core.workspace = true
+haystack-app.workspace = true
 haystack-client.workspace = true
 axum = { workspace = true, features = ["ws"] }
 tower-http = { workspace = true, features = ["cors"] }
@@ -38,6 +39,7 @@ futures-util.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+reqwest.workspace = true
 tokio-tungstenite.workspace = true
 criterion = { workspace = true, features = ["html_reports"] }
 # `util` carries ServiceExt::oneshot, which drives the router's middleware

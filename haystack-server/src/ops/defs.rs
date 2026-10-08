@@ -26,7 +26,7 @@ pub async fn handle(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let ns = state.namespace.read();
+    let ns = state.namespace();
 
     // Parse optional filter from request
     let filter: Option<String> = if body.trim().is_empty() {
@@ -98,7 +98,7 @@ pub async fn handle_libs(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let ns = state.namespace.read();
+    let ns = state.namespace();
 
     let cols = vec![HCol::new("name"), HCol::new("version")];
     let libs = ns.libs();

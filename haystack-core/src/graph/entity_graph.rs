@@ -1,6 +1,6 @@
 // EntityGraph — in-memory entity store with bitmap indexing and ref adjacency.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -36,13 +36,18 @@ pub enum GraphError {
     IdExhausted,
 }
 
+/// A catalog publication was based on an obsolete generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("catalog generation changed")]
+pub struct CatalogChanged;
+
 /// Maximum entity ID — constrained by RoaringBitmap (u32) and snapshot format.
 const MAX_ENTITY_ID: usize = u32::MAX as usize;
 
 /// Core entity graph with bitmap tag indexing and bidirectional ref adjacency.
 pub struct EntityGraph {
     /// ref_val -> entity dict
-    entities: HashMap<String, HDict>,
+    entities: BTreeMap<String, HDict>,
     /// ref_val -> internal numeric id (for bitmap indexing)
     id_map: HashMap<String, usize>,
     /// internal numeric id -> ref_val
@@ -57,6 +62,10 @@ pub struct EntityGraph {
     adjacency: RefAdjacency,
     /// Optional ontology namespace for spec-aware operations.
     namespace: Option<Arc<DefNamespace>>,
+    /// Changes when the catalog is replaced, independently of entity revision.
+    catalog_generation: u64,
+    /// Distinguishes replacement graphs even when their revisions coincide.
+    incarnation: [u8; 16],
     /// Monotonic version counter, incremented on every mutation.
     version: u64,
     /// Ordered list of mutations.
@@ -151,7 +160,7 @@ impl EntityGraph {
             value_index.index_field(field);
         }
         Self {
-            entities: HashMap::new(),
+            entities: BTreeMap::new(),
             id_map: HashMap::new(),
             reverse_id: HashMap::new(),
             next_id: 0,
@@ -159,6 +168,8 @@ impl EntityGraph {
             tag_index: TagBitmapIndex::new(),
             adjacency: RefAdjacency::new(),
             namespace: None,
+            catalog_generation: 0,
+            incarnation: rand::random(),
             version: 0,
             changelog: std::collections::VecDeque::new(),
             changelog_capacity: capacity,
@@ -193,6 +204,58 @@ impl EntityGraph {
         self.namespace.as_ref()
     }
 
+    /// Catalog revision captured under the same graph guard as entity revision.
+    pub fn catalog_generation(&self) -> u64 {
+        self.catalog_generation
+    }
+
+    /// Identity of this graph instance; replacing the graph changes this value.
+    pub fn incarnation(&self) -> [u8; 16] {
+        self.incarnation
+    }
+
+    /// Publish a catalog only if the caller built it from the current generation.
+    /// A conflict does not mutate the catalog or emit entity/watch changes.
+    pub fn compare_set_namespace(
+        &mut self,
+        expected: u64,
+        ns: impl Into<Arc<DefNamespace>>,
+    ) -> Result<u64, CatalogChanged> {
+        if self.catalog_generation != expected {
+            return Err(CatalogChanged);
+        }
+        self.set_namespace(ns);
+        Ok(self.catalog_generation)
+    }
+
+    /// Borrow entities in stable Ref-ID order, exclusively after `after`.
+    /// Does not collect, sort, clone, or consult recycled numeric index IDs.
+    pub fn entities_after<'a>(
+        &'a self,
+        after: Option<&str>,
+    ) -> impl Iterator<Item = (&'a str, &'a HDict)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let start = after.map_or(Unbounded, Excluded);
+        self.entities
+            .range::<str, _>((start, Unbounded))
+            .map(|(id, entity)| (id.as_str(), entity))
+    }
+
+    /// Borrow every raw inbound edge, before tag or resource-policy filtering.
+    /// Callers must charge work for each visited edge, including denied edges.
+    pub fn incoming_edges(&self, target: &str) -> impl Iterator<Item = (&str, &str)> {
+        self.adjacency
+            .reverse_raw()
+            .get(target)
+            .into_iter()
+            .flatten()
+            .filter_map(|(tag, numeric)| {
+                self.reverse_id
+                    .get(numeric)
+                    .map(|source| (tag.as_str(), source.as_str()))
+            })
+    }
+
     /// Replace the attached ontology with a newer one.
     ///
     /// The swap is atomic with respect to queries: a query holds the graph for its
@@ -204,6 +267,10 @@ impl EntityGraph {
     /// Callers that must not have the ontology shift under them should keep their
     /// own `namespace_arc()` handle instead.
     pub fn set_namespace(&mut self, ns: impl Into<Arc<DefNamespace>>) {
+        self.catalog_generation = self
+            .catalog_generation
+            .checked_add(1)
+            .expect("catalog generation exhausted");
         self.namespace = Some(ns.into());
         // The query cache is keyed on (filter, version), and this does not bump the
         // version — no entity changed, so waking every watcher would be noise. But
@@ -866,7 +933,6 @@ impl EntityGraph {
     /// Shrink internal collections to fit their current size, reclaiming memory
     /// from previous bulk removals. Call this after removing many entities.
     pub fn compact(&mut self) {
-        self.entities.shrink_to_fit();
         self.id_map.shrink_to_fit();
         self.reverse_id.shrink_to_fit();
         self.free_ids.shrink_to_fit();

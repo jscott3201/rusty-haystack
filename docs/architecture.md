@@ -2,19 +2,19 @@
 
 ## Crate Dependency Graph
 
-```
-haystack-core          (foundation -- no workspace deps)
-    |
-    +-- haystack-client    (HTTP/WS client, SCRAM handshake)
-    |       |
-    +-------+-- haystack-server  (HTTP API, 20+ ops, WebSocket, auth)
-    |               |
-    +-------+-------+-- haystack-cli   (CLI binary, depends on all three)
-    |
-    +-- rusty-haystack     (PyO3 Python bindings, core only)
-```
+| Crate | Workspace dependencies | Responsibility |
+| --- | --- | --- |
+| `haystack-core` | None | Types, codecs, pure graph and query/catalog machinery |
+| `haystack-app` | core | Authorized, bounded application reads shared by embedding and HTTP |
+| `haystack-client` | core | HTTP/WebSocket client and authentication |
+| `haystack-server` | core, app, client | HTTP profiles, authentication and legacy providers |
+| `haystack-cli` | core, client, server | Command-line application |
+| `rusty-haystack` | core, client, server | Python bindings |
 
-`haystack-core` is the foundation. Every other crate depends on it directly. `haystack-cli` ties everything together into a single binary.
+The application read service has no HTTP-framework dependency. Its scoped HTTP
+adapter and embedded callers share the same policy and execution contracts;
+see [shared reads](shared-reads.md). The legacy server profile remains explicit
+compatibility behavior.
 
 ## Core Abstractions
 
@@ -62,11 +62,12 @@ An in-memory entity store with bitmap indexing for fast tag-based queries and re
 
 ```
 EntityGraph
-  +-- entities: HashMap<String, HDict>    (ref_val -> entity)
+  +-- entities: BTreeMap<String, HDict>    (ref_val -> entity)
   +-- tag_index: TagBitmapIndex           (fast has/missing queries)
   +-- adjacency: RefAdjacency             (bidirectional ref links)
-  +-- namespace: Option<DefNamespace>     (ontology for spec-aware ops)
-  +-- version: u64                        (monotonic counter)
+  +-- namespace: Option<Arc<DefNamespace>>     (ontology for spec-aware ops)
+  +-- version: u64                        (entity change counter)
+  +-- catalog_generation: u64             (namespace publication counter)
   +-- changelog: Vec<GraphDiff>           (capped at 50,000 entries)
 ```
 

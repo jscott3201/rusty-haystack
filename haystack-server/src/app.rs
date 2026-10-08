@@ -8,7 +8,6 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
 
 use haystack_core::auth::{AuthHeader, parse_auth_header};
 use haystack_core::graph::SharedGraph;
@@ -16,17 +15,19 @@ use haystack_core::ontology::DefNamespace;
 
 use crate::actions::ActionRegistry;
 use crate::auth::AuthManager;
+use crate::capabilities::{CAPABILITIES, ServiceProfile};
 use crate::cors::CorsPolicy;
 use crate::his_store::HisStore;
 use crate::ops;
 use crate::state::{AppState, SharedState};
-use crate::ws;
 use crate::ws::WatchManager;
 
 /// Builder for the Haystack HTTP server.
 pub struct HaystackServer {
     graph: SharedGraph,
-    namespace: DefNamespace,
+    namespace: Option<DefNamespace>,
+    read_service: Option<haystack_app::ReadService>,
+    trusted_external_routes: bool,
     auth_manager: AuthManager,
     actions: ActionRegistry,
     custom_router: Option<Router<SharedState>>,
@@ -42,7 +43,9 @@ impl HaystackServer {
     pub fn new(graph: SharedGraph) -> Self {
         Self {
             graph,
-            namespace: DefNamespace::new(),
+            namespace: None,
+            read_service: None,
+            trusted_external_routes: false,
             auth_manager: AuthManager::empty(),
             actions: ActionRegistry::new(),
             custom_router: None,
@@ -56,7 +59,28 @@ impl HaystackServer {
 
     /// Set the ontology namespace for def/spec operations.
     pub fn with_namespace(mut self, ns: DefNamespace) -> Self {
-        self.namespace = ns;
+        self.namespace = Some(ns);
+        self
+    }
+
+    /// Serve bounded, policy-authorized reads using the supplied service and graph.
+    /// Unsupported built-in operations are absent in this profile.
+    pub fn with_scoped_reads(mut self, service: haystack_app::ReadService) -> Self {
+        self.graph = service.graph();
+        self.read_service = Some(service);
+        self
+    }
+
+    /// Select the legacy coarse-permission API (also the compatibility default).
+    pub fn with_legacy_unrestricted(mut self) -> Self {
+        self.read_service = None;
+        self
+    }
+
+    /// Explicitly authorize custom routes as a separate trusted authority.
+    /// The read service cannot police arbitrary handlers receiving `AppState`.
+    pub fn with_trusted_external_routes(mut self) -> Self {
+        self.trusted_external_routes = true;
         self
     }
 
@@ -139,7 +163,7 @@ impl HaystackServer {
         F: FnOnce(std::net::SocketAddr),
     {
         let (host, port) = (self.host.clone(), self.port);
-        let app = self.build_router();
+        let app = self.build_router()?;
 
         log::info!("Starting haystack-server on {host}:{port}");
 
@@ -161,14 +185,37 @@ impl HaystackServer {
     /// directly in tests. Layer *order* below is load-bearing rather than
     /// incidental, and an assertion about it in a comment is worth only as much
     /// as the test that exercises it.
-    fn build_router(self) -> Router {
+    fn build_router(self) -> std::io::Result<Router> {
+        let profile = if self.read_service.is_some() {
+            ServiceProfile::ScopedReadService
+        } else {
+            ServiceProfile::LegacyUnrestricted
+        };
+        if profile == ServiceProfile::ScopedReadService
+            && (self.custom_router.is_some() || self.authenticated_router.is_some())
+            && !self.trusted_external_routes
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scoped reads require explicit trusted external authority for custom routes",
+            ));
+        }
+        // Initialize only when absent; preserve an embedding's existing catalog.
+        self.graph.write(|graph| {
+            if let Some(namespace) = self.namespace {
+                graph.set_namespace(Arc::new(namespace));
+            } else if graph.namespace_arc().is_none() {
+                graph.set_namespace(Arc::new(DefNamespace::new()));
+            }
+        });
         let his: Box<dyn crate::his_provider::HistoryProvider> = self
             .history_provider
             .unwrap_or_else(|| Box::new(HisStore::new()));
 
         let state: SharedState = Arc::new(AppState {
             graph: self.graph,
-            namespace: parking_lot::RwLock::new(self.namespace),
+            read_service: self.read_service,
+            profile,
             lib_mutations: parking_lot::Mutex::new(()),
             auth: self.auth_manager,
             watches: WatchManager::new(),
@@ -177,34 +224,13 @@ impl HaystackServer {
             started_at: std::time::Instant::now(),
         });
 
-        let mut core_router = Router::new()
-            // GET routes
-            .route("/api/about", get(ops::about::handle))
-            .route("/api/ops", get(ops::ops_handler::handle))
-            .route("/api/formats", get(ops::formats::handle))
-            .route("/api/ws", get(ws::ws_handler))
-            // POST routes
-            .route("/api/read", post(ops::read::handle))
-            .route("/api/nav", post(ops::nav::handle))
-            .route("/api/defs", post(ops::defs::handle))
-            .route("/api/libs", post(ops::defs::handle_libs))
-            .route("/api/hisRead", post(ops::his::handle_read))
-            .route("/api/hisWrite", post(ops::his::handle_write))
-            .route("/api/watchSub", post(ops::watch::handle_sub))
-            .route("/api/watchPoll", post(ops::watch::handle_poll))
-            .route("/api/watchUnsub", post(ops::watch::handle_unsub))
-            .route("/api/pointWrite", post(ops::point_write::handle))
-            .route("/api/invokeAction", post(ops::invoke::handle))
-            .route("/api/close", post(ops::about::handle_close))
-            .route("/api/import", post(ops::data::handle_import))
-            .route("/api/export", post(ops::data::handle_export))
-            .route("/api/validate", post(ops::libs::handle_validate))
-            .route("/api/specs", post(ops::libs::handle_specs))
-            .route("/api/spec", post(ops::libs::handle_spec))
-            .route("/api/loadLib", post(ops::libs::handle_load_lib))
-            .route("/api/unloadLib", post(ops::libs::handle_unload_lib))
-            .route("/api/exportLib", post(ops::libs::handle_export_lib))
-            .route("/api/changes", post(ops::changes::handle));
+        let mut core_router = Router::new();
+        for capability in CAPABILITIES
+            .iter()
+            .filter(|capability| capability.enabled(profile))
+        {
+            core_router = core_router.route(capability.path, capability.router(profile));
+        }
 
         // Merge the authenticated custom router before applying the auth layer,
         // so its routes are also protected by the built-in auth middleware.
@@ -243,7 +269,7 @@ impl HaystackServer {
             app = app.layer(cors);
         }
 
-        app
+        Ok(app)
     }
 }
 
@@ -277,6 +303,8 @@ async fn auth_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
+    req.extensions_mut()
+        .insert(ops::shared_read::ReadStarted(std::time::Instant::now()));
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
@@ -411,7 +439,8 @@ mod tests {
         #[tokio::test]
         async fn unauthenticated_post_is_rejected() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app
                 .oneshot(
@@ -434,7 +463,8 @@ mod tests {
         #[tokio::test]
         async fn preflight_is_answered_without_authentication() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -457,7 +487,8 @@ mod tests {
         #[tokio::test]
         async fn preflight_allows_post_and_the_authorization_header() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
             let headers = res.headers();
@@ -490,7 +521,8 @@ mod tests {
         #[tokio::test]
         async fn preflight_does_not_allow_credentials() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -517,7 +549,8 @@ mod tests {
                 ORIGIN.to_string(),
                 "bad\norigin".to_string(),
             ]))
-            .build_router();
+            .build_router()
+            .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -535,8 +568,9 @@ mod tests {
         /// would take the server down after it had already loaded its data.
         #[tokio::test]
         async fn a_wildcard_origin_is_refused_rather_than_panicking() {
-            let app =
-                server_with_auth_and_cors(CorsPolicy::Allow(vec!["*".to_string()])).build_router();
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec!["*".to_string()]))
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -551,7 +585,8 @@ mod tests {
         #[tokio::test]
         async fn an_origin_off_the_allowlist_is_not_granted() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app
                 .oneshot(preflight("https://attacker.example.com"))
@@ -575,7 +610,9 @@ mod tests {
         /// were installed that merely granted nothing.
         #[tokio::test]
         async fn disabled_grants_nothing_and_preflight_falls_through_to_auth() {
-            let app = server_with_auth_and_cors(CorsPolicy::Disabled).build_router();
+            let app = server_with_auth_and_cors(CorsPolicy::Disabled)
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -588,3 +625,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "scoped_body_tests.rs"]
+mod scoped_body_tests;

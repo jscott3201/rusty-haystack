@@ -886,14 +886,15 @@ fn parse_cols(line: &str) -> Result<Vec<HCol>, CodecError> {
 fn parse_row(line: &str, cols: &[HCol]) -> Result<HDict, CodecError> {
     let parts = split_csv_aware(line);
     let mut dict = HDict::new();
-    for (i, col) in cols.iter().enumerate() {
-        if i < parts.len() {
-            let cell = parts[i].trim();
-            if !cell.is_empty() && cell != "N" {
-                let mut parser = ZincParser::new(cell);
-                let val = parser.read_val()?;
-                dict.set(&col.name, val);
-            }
+    // Omitted trailing cells are absent. Do not visit every declared column
+    // for each short row; wide headers and short rows otherwise multiply work.
+    // zip also preserves the existing behavior of ignoring surplus cells.
+    for (col, part) in cols.iter().zip(parts.iter()) {
+        let cell = part.trim();
+        if !cell.is_empty() && cell != "N" {
+            let mut parser = ZincParser::new(cell);
+            let val = parser.read_val()?;
+            dict.set(&col.name, val);
         }
     }
     Ok(dict)

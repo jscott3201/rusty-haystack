@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "haystack-core",
+    "haystack-app",
     "rusty-haystack",
     "haystack-cli",
     "haystack-server",
@@ -23,6 +24,7 @@ categories = ["encoding", "network-programming"]
 [workspace.dependencies]
 haystack-core = { package = "rusty-haystack-core", version = "0.9.0", path = "haystack-core" }
 haystack-client = { package = "rusty-haystack-client", version = "0.9.0", path = "haystack-client" }
+haystack-app = { package = "rusty-haystack-app", version = "0.9.0", path = "haystack-app" }
 haystack-server = { package = "rusty-haystack-server", version = "0.9.0", path = "haystack-server" }
 axum = "0.8"
 # Direct consumers request only std; transitive consumers may enable SIMD.

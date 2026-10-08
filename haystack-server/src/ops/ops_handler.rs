@@ -11,37 +11,22 @@ use crate::content;
 use crate::state::SharedState;
 
 /// GET /api/ops — returns a grid listing all available operations.
-pub async fn handle(State(_state): State<SharedState>, headers: HeaderMap) -> Response {
+pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let ops = vec![
-        ("about", "Summary information for server"),
-        ("ops", "Operations supported by this server"),
-        ("formats", "Grid data formats supported by this server"),
-        ("read", "Read entity records by id or filter"),
-        ("nav", "Navigate a project for discovery"),
-        ("defs", "Query the definitions namespace"),
-        ("libs", "Query the library namespace"),
-        ("watchSub", "Subscribe to entity changes"),
-        ("watchPoll", "Poll for entity changes"),
-        ("watchUnsub", "Unsubscribe from entity changes"),
-        ("pointWrite", "Write a value to a writable point"),
-        ("hisRead", "Read historical time-series data"),
-        ("hisWrite", "Write historical time-series data"),
-        ("invokeAction", "Invoke an action on an entity"),
-        ("close", "Close the current session"),
-    ];
+    let ops = crate::capabilities::CAPABILITIES
+        .iter()
+        .filter(|capability| capability.enabled(state.profile));
 
     let cols = vec![HCol::new("name"), HCol::new("summary")];
     let rows: Vec<HDict> = ops
-        .into_iter()
-        .map(|(name, summary)| {
+        .map(|capability| {
             let mut row = HDict::new();
-            row.set("name", Kind::Str(name.to_string()));
-            row.set("summary", Kind::Str(summary.to_string()));
+            row.set("name", Kind::Str(capability.name.to_string()));
+            row.set("summary", Kind::Str(capability.summary.to_string()));
             row
         })
         .collect();

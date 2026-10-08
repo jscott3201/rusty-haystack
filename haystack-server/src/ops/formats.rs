@@ -11,7 +11,7 @@ use crate::content;
 use crate::state::SharedState;
 
 /// GET /api/formats — returns a grid listing supported MIME formats.
-pub async fn handle(State(_state): State<SharedState>, headers: HeaderMap) -> Response {
+pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
@@ -27,6 +27,10 @@ pub async fn handle(State(_state): State<SharedState>, headers: HeaderMap) -> Re
     let cols = vec![HCol::new("mime"), HCol::new("receive"), HCol::new("send")];
     let rows: Vec<HDict> = formats
         .into_iter()
+        .filter(|(mime, _)| {
+            state.profile == crate::capabilities::ServiceProfile::LegacyUnrestricted
+                || *mime != "text/trio"
+        })
         .map(|(mime, _label)| {
             let mut row = HDict::new();
             row.set("mime", Kind::Str(mime.to_string()));

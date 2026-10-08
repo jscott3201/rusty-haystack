@@ -117,3 +117,18 @@ versions, free-threaded Python, alternate compression/TLS backends, and unlisted
 feature or platform combinations are unqualified until explicit checks and execution
 evidence cover them. PyO3 is not built with `abi3`; one interpreter's successful build
 does not qualify another interpreter's wheel.
+
+## Shared application reads
+
+`rusty-haystack-app` participates in the workspace Clippy, unit/integration and
+doctest selections above. It has no Axum dependency. The server's scoped HTTP
+profile is tested against actual embedded codec output over a loopback TCP
+listener, with separate fixtures for body admission, deadlines, cancellation,
+policy masking, cursor invalidation, and unavailable routes. These are local
+behavior checks, not production authorization-policy certification or artifact
+publication qualification. See [shared read contracts](shared-reads.md).
+
+The CLI container copies `haystack-app` as a workspace member. Crates.io publication
+orders core, client, app, server, then CLI, with the existing index wait between
+packages. The CLI/wheel/sdist artifact matrix and receipt identity remain separate
+from this source-package ordering.
