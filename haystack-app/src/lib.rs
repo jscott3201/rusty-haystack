@@ -39,11 +39,13 @@ pub use mutation::{
 mod lifecycle;
 mod output;
 mod policy;
+mod registry;
+pub use registry::{FunctionDescriptor, FunctionIdentity};
 mod sanitize;
 mod service;
-mod typed_read;
+mod typed_http;
 mod types;
-pub use typed_read::{ApiError, TypedReadInput, TypedReadResponse};
+pub use typed_http::{ApiError, TypedInvocationInput, TypedInvocationResponse};
 mod wire;
 
 pub use haystack_core::filter::CatalogKind;

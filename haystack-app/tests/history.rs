@@ -614,6 +614,9 @@ impl ReadPolicy for MutableRules {
     }
 }
 impl PolicySnapshot for MutableSnapshot {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         if self.0 == 0 { "allowed" } else { "revoked" }
     }

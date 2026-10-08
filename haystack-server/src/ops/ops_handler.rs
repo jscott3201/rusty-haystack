@@ -30,7 +30,7 @@ pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Res
         });
 
     let cols = vec![HCol::new("name"), HCol::new("summary")];
-    let rows: Vec<HDict> = ops
+    let mut rows: Vec<HDict> = ops
         .map(|capability| {
             let mut row = HDict::new();
             row.set("name", Kind::Str(capability.name.to_string()));
@@ -39,6 +39,23 @@ pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Res
         })
         .collect();
 
+    if let Some(application) = &state.application {
+        for function in application.read_service().typed_functions() {
+            if crate::capabilities::CAPABILITIES
+                .iter()
+                .any(|capability| capability.name == function.name)
+            {
+                continue;
+            }
+            let mut row = HDict::new();
+            row.set("name", Kind::Str(function.name.to_owned()));
+            row.set(
+                "summary",
+                Kind::Str(function.doc.unwrap_or(function.signature).to_owned()),
+            );
+            rows.push(row);
+        }
+    }
     let grid = HGrid::from_parts(HDict::new(), cols, rows);
     match content::encode_response_grid(&grid, accept) {
         Ok((body, ct)) => ([(axum::http::header::CONTENT_TYPE, ct)], body).into_response(),

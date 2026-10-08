@@ -366,7 +366,7 @@ impl HaystackServer {
             started_at: std::time::Instant::now(),
         });
 
-        let mut core_router = Router::new().layer(middleware::from_fn(crate::typed_read::fallback));
+        let mut core_router = Router::new().layer(middleware::from_fn(crate::typed_http::fallback));
         for capability in CAPABILITIES.iter().filter(|capability| {
             capability.enabled(
                 profile,
@@ -379,16 +379,27 @@ impl HaystackServer {
             core_router = core_router.route(capability.path, capability.router(profile));
         }
 
+        if let Some(application) = &state.application {
+            let service = application.read_service();
+            for function in service.typed_functions() {
+                for name in [function.name, function.identity.qname.as_str()] {
+                    let path = format!("/api/{name}");
+                    if !CAPABILITIES
+                        .iter()
+                        .any(|capability| capability.path == path)
+                    {
+                        core_router =
+                            core_router.route(&path, axum::routing::any(crate::typed_http::handle));
+                    }
+                }
+            }
+        }
         core_router = core_router
-            .route(
-                "/api/sys.api::readById",
-                axum::routing::any(crate::typed_read::handle),
-            )
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 builtin_auth_middleware,
             ))
-            .layer(middleware::from_fn(crate::typed_read::version_header));
+            .layer(middleware::from_fn(crate::typed_http::version_header));
 
         // Custom fallbacks own unmatched paths, including /api paths. Apply
         // ordinary authentication without typed dispatch or version rewriting.
@@ -530,7 +541,7 @@ async fn lifecycle_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let typed = crate::typed_read::selected(&request);
+    let typed = crate::typed_http::selected(&request);
     let Some(application) = &state.application else {
         return next.run(request).await;
     };
@@ -538,7 +549,7 @@ async fn lifecycle_middleware(
         Ok(guard) => Arc::new(guard),
         Err(error) => {
             if typed {
-                return crate::typed_read::error(haystack_app::ApiError::Unavailable);
+                return crate::typed_http::error(haystack_app::ApiError::Unavailable);
             }
             return crate::error::HaystackError::new(
                 error.to_string(),
@@ -551,7 +562,7 @@ async fn lifecycle_middleware(
     request.extensions_mut().insert(guard.clone());
     tokio::select! {
         biased;
-        _ = cancellation.cancelled() => if typed { crate::typed_read::error(haystack_app::ApiError::Unavailable) } else { crate::error::HaystackError::new("application stopping", StatusCode::SERVICE_UNAVAILABLE).into_response() },
+        _ = cancellation.cancelled() => if typed { crate::typed_http::error(haystack_app::ApiError::Unavailable) } else { crate::error::HaystackError::new("application stopping", StatusCode::SERVICE_UNAVAILABLE).into_response() },
         response = next.run(request) => response,
     }
 }
@@ -584,8 +595,8 @@ async fn builtin_auth_middleware(
 ) -> Response {
     req.extensions_mut()
         .insert(ops::shared_read::ReadStarted(std::time::Instant::now()));
-    if crate::typed_read::selected(&req) {
-        return crate::typed_read::handle(State(state), req).await;
+    if crate::typed_http::selected(&req) {
+        return crate::typed_http::handle(State(state), req).await;
     }
     auth_middleware(State(state), req, next).await
 }

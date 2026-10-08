@@ -671,6 +671,9 @@ mod tests {
         }
     }
     impl PolicySnapshot for Snapshot {
+        fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+            true
+        }
         fn scope_key(&self) -> &str {
             if self.0 { "visible" } else { "revoked" }
         }

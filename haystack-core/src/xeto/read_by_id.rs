@@ -1,4 +1,4 @@
-//! Admission of one pinned Xeto function closure, independent of the legacy
+//! Admission of a bounded pinned Xeto function closure, independent of the legacy
 //! compatibility loader. This is not a complete `sys` or `sys.api` library.
 //!
 //! Source integrity, parsing, resolution and value fitting have separate errors.
@@ -22,9 +22,11 @@ use super::spec::{Slot, Spec, spec_from_def};
 pub const READ_BY_ID_UPSTREAM_COMMIT: &str = "873b922451d3ef4c0c9c08ef3daa542f352d69f3";
 const PROFILE: &str = "pinned-xeto-readById";
 const HTTP_PROFILE: &str = "pinned-xeto-readById-http";
-const HTTP_TYPES: &[&str] = &["Number", "Int", "List"];
+const HTTP_TYPES: &[&str] = &["Number", "Int", "List", "Grid"];
 const HTTP_ERRORS: &[&str] = &[
     "ApiErr",
+    "AmbiguousFuncErr",
+    "MethodNotAllowedErr",
     "AuthErr",
     "InternalErr",
     "InvalidArgsErr",
@@ -243,8 +245,7 @@ impl ReadByIdProfile {
         Self::admit(provenance, sources)
     }
 
-    /// Admit the reachable HTTP error closure in addition to the unchanged
-    /// native signature. This remains an explicit subset of both libraries.
+    /// Admit the reachable HTTP error and ops closures alongside readById. This remains an explicit subset of both libraries.
     pub fn load_http_pinned() -> Result<Self, ProfileError> {
         let provenance = serde_json::from_str(HTTP_MANIFEST)
             .map_err(|e| source_error("http-manifest.json", e.to_string()))?;
@@ -337,7 +338,8 @@ impl ReadByIdProfile {
     /// Operations are derived from admitted +Funcs members and their own metadata.
     pub fn operations(&self) -> impl Iterator<Item = &AdmittedSpec> {
         self.specs.values().filter(|s| {
-            s.member_of.as_deref() == Some("sys::Funcs") && s.spec.meta.contains_key("op")
+            s.member_of.as_deref() == Some("sys::Funcs")
+                && s.spec.meta.get("op") == Some(&Kind::Marker)
         })
     }
 
@@ -413,8 +415,8 @@ impl ReadByIdProfile {
         Ok(BoundArguments { values, origins })
     }
 
-    /// Fit the native result against the admitted returns member. A Dict is
-    /// unconstrained here: rich Kind values within it are preserved as-is.
+    /// Fit the native result against the admitted returns member. A generic
+    /// Dict remains unconstrained; Grid rows fit their resolved `of` declaration.
     pub fn fit_result(&self, operation: &str, value: &Kind) -> Result<(), ProfileError> {
         let function = self.operation(operation)?;
         let slot = function
@@ -446,7 +448,7 @@ impl ReadByIdProfile {
         if matches!(value, Kind::Null) && slot.is_maybe() {
             return Ok(());
         }
-        if self.fits_type(slot_type(slot), value) {
+        if self.fits_slot(slot, value) {
             return Ok(());
         }
         Err(fit_error(
@@ -457,9 +459,57 @@ impl ReadByIdProfile {
         ))
     }
 
+    fn fits_slot(&self, slot: &Slot, value: &Kind) -> bool {
+        if matches!(value, Kind::Null) && slot.is_maybe() {
+            return true;
+        }
+        if !self.fits_type(slot_type(slot), value) {
+            return false;
+        }
+        match (slot.meta.get("of"), value) {
+            (Some(Kind::Ref(of)), Kind::Grid(grid)) => {
+                grid.rows.iter().all(|row| self.fits_dict(&of.val, row))
+            }
+            (Some(Kind::Ref(of)), Kind::List(values)) => {
+                values.iter().all(|item| self.fits_type(&of.val, item))
+            }
+            _ => true,
+        }
+    }
+
+    // A native row is already a Dict. Validate the selected derived type's
+    // fields without cloning the row; generic Dict remains unconstrained.
+    // Structural spec metadata and extension fields are not closed away.
+    fn fits_dict(&self, qname: &str, row: &HDict) -> bool {
+        let mut current = Some(qname);
+        while let Some(name) = current {
+            if name == "sys::Dict" {
+                return true;
+            }
+            let Some(declaration) = self.specs.get(name) else {
+                return false;
+            };
+            for slot in &declaration.spec.slots {
+                match row.get(&slot.name) {
+                    Some(value) if self.fits_slot(slot, value) => {}
+                    None if slot.is_maybe() => {}
+                    _ => return false,
+                }
+            }
+            current = declaration.spec.base.as_deref();
+        }
+        false
+    }
+
     fn fits_type(&self, qname: &str, value: &Kind) -> bool {
         if matches!(value, Kind::Null) {
             return false;
+        }
+        if qname == "sys::Obj" {
+            return true;
+        }
+        if let Kind::Dict(row) = value {
+            return self.fits_dict(qname, row);
         }
         let mut current = Some(qname);
         while let Some(name) = current {
@@ -467,6 +517,8 @@ impl ReadByIdProfile {
                 return false;
             };
             match (name, value) {
+                ("sys::Grid", Kind::Grid(_)) => return true,
+                ("sys::Grid", _) => return false,
                 ("sys::Int", Kind::Int(_)) | ("sys::Number", Kind::Number(_)) => return true,
                 ("sys::Int" | "sys::Number", _) => return false,
                 ("sys::List", Kind::List(_)) => return true,
@@ -570,7 +622,8 @@ impl ReadByIdProfile {
                             || def.is_augmentation
                             || !(identity.role == "errors"
                                 && HTTP_ERRORS.contains(&def.name.as_str())
-                                || identity.role == "api-types" && def.name == "ApiVersion")
+                                || identity.role == "api-types"
+                                    && matches!(def.name.as_str(), "ApiVersion" | "OpInfo"))
                         {
                             return Err(resolve_error(
                                 identity,
@@ -670,7 +723,7 @@ impl ReadByIdProfile {
                     let mut members = Vec::new();
                     validate_slot_syntax(&def.slots, identity, "+Funcs")?;
                     for member in &def.slots {
-                        if member.name != "readById"
+                        if !(member.name == "readById" || http && member.name == "ops")
                             || member.is_global
                             || member.is_query
                             || member.is_marker
@@ -1359,7 +1412,7 @@ fn validate_closure(
                 return Err(source_error(HTTP_PROFILE, "missing HTTP carrier"));
             }
         }
-        for name in HTTP_ERRORS.iter().chain([&"ApiVersion"]) {
+        for name in HTTP_ERRORS.iter().chain([&"ApiVersion", &"OpInfo"]) {
             if !specs.contains_key(&format!("sys.api::{name}")) {
                 return Err(source_error(HTTP_PROFILE, "missing HTTP declaration"));
             }
@@ -1374,7 +1427,11 @@ fn validate_closure(
         let allowed: &[&str] = match entry.spec.qname.as_str() {
             "sys::Func" => &["returns"],
             FUNCTION => &["id", "checked", "returns"],
+            "sys.api::ops" if http => &["returns"],
+            "sys.api::OpInfo" if http => &["qname", "doc", "noSideEffects", "signature"],
             "sys.api::ApiErr" if http => &["status", "dis", "errTrace"],
+            "sys.api::AmbiguousFuncErr" if http => &["funcName", "candidates"],
+            "sys.api::MethodNotAllowedErr" if http => &["allow"],
             "sys.api::UnknownEntityErr" if http => &["id"],
             "sys.api::UnknownFuncErr" if http => &["funcName"],
             "sys.api::UnsupportedVersionErr" if http => &["allow"],
@@ -1388,6 +1445,25 @@ fn validate_closure(
                     "nested constraints or additional members are not admitted",
                 ));
             }
+        }
+    }
+    if http {
+        let ops = specs
+            .get("sys.api::ops")
+            .ok_or_else(|| source_error(HTTP_PROFILE, "missing ops function"))?;
+        if ops.spec.base.as_deref() != Some("sys::Func")
+            || ops.spec.slots.len() != 1
+            || ops.spec.slots[0].name != "returns"
+            || ops.spec.slots[0].type_ref.as_deref() != Some("sys::Grid")
+            || ops.spec.slots[0].is_maybe()
+            || ops.spec.slots[0].meta.get("of")
+                != Some(&Kind::Ref(HRef::from_val("sys.api::OpInfo")))
+        {
+            return Err(resolve_error(
+                &ops.source,
+                "sys.api::ops",
+                "unsupported ops signature",
+            ));
         }
     }
     let function = specs
@@ -1844,6 +1920,54 @@ mod tests {
                 .values()
                 .get("checked"),
             Some(&Kind::Bool(false))
+        );
+    }
+    #[test]
+    fn ops_http_closure_rejects_missing_duplicate_unknown_and_unsupported_declarations() {
+        let inputs = || {
+            let provenance: ProfileProvenance = serde_json::from_str(HTTP_MANIFEST).unwrap();
+            let raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+            let sources = extract_sources(&provenance, &raw).unwrap();
+            (provenance, sources)
+        };
+        for case in 0..4 {
+            let (provenance, mut sources) = inputs();
+            let role = if case < 2 { "api-types" } else { "functions" };
+            let source = sources
+                .iter_mut()
+                .find(|source| source.identity.role == role)
+                .unwrap();
+            match case {
+                0 => source
+                    .text
+                    .truncate(source.text.find("// Summary of one operation").unwrap()),
+                1 => source
+                    .text
+                    .push_str("\nOpInfo: Dict { qname: Str, signature: Str }\n"),
+                2 => source.text = source.text.replace("of:OpInfo", "of:AbsentInfo"),
+                3 => {
+                    source.text = source
+                        .text
+                        .replace("returns: Grid<of:OpInfo>", "returns: Dict")
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    ReadByIdProfile::admit(provenance, sources),
+                    Err(ProfileError::Resolve { .. })
+                ),
+                "case {case}"
+            );
+        }
+        let provenance = serde_json::from_str(HTTP_MANIFEST).unwrap();
+        let mut raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+        raw.iter_mut()
+            .find(|(path, _)| path.ends_with("sys.api/types.xeto"))
+            .unwrap()
+            .1 = "changed upstream source";
+        assert!(
+            matches!(extract_sources(&provenance, &raw), Err(ProfileError::Source { message, .. }) if message == "SHA-256 mismatch")
         );
     }
 }

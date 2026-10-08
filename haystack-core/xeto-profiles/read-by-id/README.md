@@ -1,6 +1,7 @@
 # Pinned Xeto readById admission profile
 
-This package admits one function and its required type/metadata closure from
+The native bootstrap profile admits readById and its required type/metadata
+closure; the HTTP profile additionally admits ops and its reachable types/errors from
 [Project-Haystack/xeto at 873b922451d3ef4c0c9c08ef3daa542f352d69f3](https://github.com/Project-Haystack/xeto/tree/873b922451d3ef4c0c9c08ef3daa542f352d69f3).
 It is a bootstrap subset of `sys` and `sys.api`, **not complete upstream libraries**.
 The pinned build properties say version `5.0.0`, maturity `alpha`, and dependency
@@ -22,7 +23,7 @@ separate from the original `sys::Funcs` type.
 
 ## Provenance and reproducible extraction
 
-`upstream/` contains seven **unchanged** upstream files, including the original
+The native manifest selects seven **unchanged** upstream files, including the original
 Academic Free License 3.0, attribution headers, build variables, both library
 pragmas, type definitions, the Spec metadata schema, and API functions.
 [manifest.json](manifest.json) records their original repository paths, SHA-256
@@ -36,6 +37,7 @@ Verify all retained bytes and reproduce source selections locally:
 
 ```sh
 python3 haystack-core/xeto-profiles/read-by-id/verify.py
+python3 haystack-core/xeto-profiles/read-by-id/verify.py --http
 # Optionally materialize the selected sources for inspection:
 python3 haystack-core/xeto-profiles/read-by-id/verify.py --output /tmp/read-by-id-sources
 ```
@@ -87,8 +89,32 @@ bounded to 10 MiB and 64 delimiter nesting levels.
 The legacy generic parser/loader/fitter is a separate compatibility surface. The
 parser now retains augmentation syntax, while the legacy loader rejects it with
 an explicit admission-profile diagnostic. It does not acquire full H5 semantics.
-This slice adds no HTTP endpoint, Jeto codec, device behavior, or full-library
-schema support.
+The legacy loader gains no HTTP, Jeto or full-library semantics from this profile.
+
+## Executable HTTP closure
+
+`load_http_pinned()` uses `http-manifest.json`, verifying all nine retained files
+and their exact line selections. It adds the reachable API error types, ApiVersion,
+Number/Int/List carriers and `of`/`unitless` metadata. The ops extension adds only
+`sys::Grid` at sys/types.xeto:145-146, `sys.api::OpInfo` at sys.api/types.xeto:54-73
+and `sys.api::ops` at sys.api/funcs.xeto:88-95. The newly reachable
+AmbiguousFuncErr and MethodNotAllowedErr use errs.xeto:32-39 and :55-59.
+The raw originals, hashes, pin, license and `complete_libraries:false` stay intact.
+
+```xeto
+ops: Func <op, noSideEffects> { returns: Grid<of:OpInfo> }
+```
+
+The operation remains a `sys::Funcs` augmentation member with callable qname
+`sys.api::ops`. It accepts no arguments, including no `returns` argument.
+Native result fitting requires a Grid and validates every row against OpInfo:
+required qname/signature Str fields, optional doc Str and noSideEffects Marker.
+A generic Dict result remains unconstrained for readById. Legitimate structural
+row-spec information and extension fields are preserved. Missing closure members,
+unresolved `of` targets, duplicate declarations and unsupported signatures fail
+admission. The profile does not admit unrelated sibling operations or types.
+The [HTTP executable profile](../../../docs/typed-http-read.md) documents the
+application registry and transport policy, which are separate from core admission.
 
 ## Independent validation evidence
 

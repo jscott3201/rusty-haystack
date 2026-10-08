@@ -1,13 +1,35 @@
-# Typed HTTP read profile
+# Typed HTTP executable profile
 
 `GET` or `POST /api/readById` and `/api/sys.api::readById` execute the pinned
-`sys.api::readById` signature through the application's existing read service.
-The service loads the immutable profile at construction. The native signature
-profile remains separate from its HTTP error closure; neither admits complete
-`sys` or `sys.api` libraries. The shared [contextual Jeto codec](jeto.md) handles
-admitted native values. A unified executable function registry, broader catalog
-admission, generated clients, and complete H5 conformance remain outside this
-profile.
+`sys.api::readById` signature. Version-5 `/api/ops` and `/api/sys.api::ops`
+execute `sys.api::ops`, returning the caller-visible executable operations.
+One immutable application registry owns both production bindings, their admitted
+signature/profile, codec contexts, selected library version, source provenance,
+GET eligibility, and handler selection. Registration rejects duplicate
+qname/version bindings and unsupported handler/signature shapes before the
+registry becomes available. The native bootstrap profile and its expanded HTTP
+closure remain explicit subsets of `sys` and `sys.api`; neither claims complete
+library admission. The shared [contextual Jeto codec](jeto.md) handles admitted
+native values. Broader catalog admission, generated clients and complete H5
+conformance remain outside this profile.
+
+The preview exposes only supported, admitted, authorized functions with the exact
+`op` marker. Discovery and invocation use the same entry and visibility predicate:
+coarse read permission, catalog visibility and the explicit
+`PolicySnapshot::function(&FunctionIdentity)` execution decision must all allow it.
+`FunctionIdentity` binds qname, selected library version, catalog/revision and
+source path/hash. `AllowAll` explicitly permits the function decision; other
+policies must implement it. A fresh immutable policy snapshot is obtained once
+per invocation. A successful discovery does not grant later execution authority.
+Qualified names are unambiguous; simple names resolve only among visible
+executable entries, and visible collisions return `AmbiguousFuncErr` without
+including denied candidates. Non-op and unsupported declarations are not callable.
+
+This selected preview rule follows the pinned HTTP chapter's op boundary. It
+intentionally differs from the broader callable-function wording in `sys::Spec`
+and Haxall's resolver, which permit selected non-op functions. The pin defines no
+literal `allFuncs` endpoint; this implementation adds none. H4 capabilities and
+entity `invokeAction` remain in the legacy adapter.
 
 The declaration pin is Project-Haystack/xeto commit
 `873b922451d3ef4c0c9c08ef3daa542f352d69f3`. The raw error declarations and their
@@ -26,7 +48,8 @@ Errors report the current `Xeto-Version: 5`. Successful typed reads report the
 selected version. Existing H4 routes retain their compatibility behavior; this
 slice does not replace their dispatch or claim a complete version-5 route table.
 
-Only `id` and `checked` bind. Every `xeto-*` query name is reserved and excluded
+For `readById`, only `id` and `checked` bind; its existing compatibility behavior
+ignores additional well-formed argument fields after complete decoding. Every `xeto-*` query name is reserved and excluded
 from arguments. Other argument names and extra grid columns cannot confer
 projection, cursor, page, or policy authority. GET values beginning with `[` or
 `{` are parsed as JSON; other decoded values are contextual scalar text.
@@ -47,7 +70,10 @@ bare `application/json` as Hayson; version 5 interprets it as Jeto.
 `application/vnd.haystack+json` (optionally `version=4`) selects Hayson in either
 version. `text/zinc` accepts grid arguments. `text/jeto` is accepted in version 5.
 Grid input uses only the first row's declared arguments; null cells apply the
-parameter's own default just as absent cells do. The typed adapter
+parameter's own default just as absent cells do. `ops` has zero arguments:
+undeclared names, including `returns`, are rejected before null-to-absence
+normalization, for named JSON, GET parameters and the supported first-row grid
+representations. Reserved `xeto-*` query controls stay outside arguments. The typed adapter
 requires a Hayson grid envelope; unrelated legacy H4 decoders retain their
 existing behavior. Encoded request bodies are currently rejected with 415.
 
@@ -88,20 +114,35 @@ values only under an explicitly supplied matching catalog identity/revision.
 H4 output keeps its existing strict projection and rejects rich values it
 cannot preserve.
 
+`ops` returns an actual native `Grid<of:sys.api::OpInfo>`. Each row has a required
+`qname:Str` and human-readable `signature:Str`; `doc:Str?` and
+`noSideEffects:Marker?` are optional. Signatures are descriptive, not a client
+schema. Empty grids fit, while wrong native kinds, missing required row fields
+and incorrectly typed optional fields fail fitting. Structural row specifications
+remain compatible with contextual Jeto. The production entries are
+`sys.api::ops` and `sys.api::readById`, subject to caller policy.
+
 A null, missing or denied id is indistinguishable: `checked=false` returns null;
 `checked=true` produces the same UnknownEntity error for both. Version-4
 operation failure remains HTTP 200 with an error grid. Transport, fitting,
 media, admission and processing failures use terminal ApiErr JSON regardless
 of Accept. Terminal envelopes have fixed fields and no trace or request data;
-UnknownFuncErr may include a bounded function name of at most 256 bytes.
+UnknownFuncErr may include a bounded function name of at most 256 bytes;
+AmbiguousFuncErr includes only bounded visible candidates.
 This bounded error path remains available after a request budget or deadline
-is exhausted. Unsupported methods, including HEAD, return 501; readById has
-`noSideEffects` and permits GET. This slice introduces no side-effecting typed
-function and therefore no reachable typed GET-side-effect 405 path.
+is exhausted. Unsupported methods, including HEAD, return 501. GET requires the
+exact `noSideEffects` marker on the executable entry; absence of a side-effects
+flag or read permission cannot grant GET. Both production bindings permit GET;
+the dispatcher rejects GET with `MethodNotAllowedErr` before execution for a
+binding without that marker. No watchPoll or session-close binding is added.
 
 ## Authentication and ownership
 
-Authentication precedes version resolution. The existing H4 profile keeps its
+Authentication precedes version resolution. Version-5 `ops` enters this path
+before the legacy public bypass. Only GET `/api/ops` with absent or explicitly
+selected v4 controls retains public H4 `name`/`summary` discovery. Unsupported,
+duplicate and other version selections authenticate before their error response;
+query-over-header precedence includes percent-encoded control names. The existing H4 profile keeps its
 401 bearer rejection behavior. Explicit v5 typed requests use 403 for rejected
 or absent bearer credentials and 400 for malformed Authorization. SCRAM's
 existing `/api/about` challenge/continuation headers, empty handshake bodies,
@@ -110,8 +151,20 @@ Configured CORS origins stay unchanged; Xeto-Version is added only to the
 allowed and exposed header sets. Trusted custom routes and fallbacks retain their authority for both API and
 non-API paths. Authenticated custom fallbacks retain bearer enforcement.
 
+The transport retains the exact noncredential `SubscriptionSession` returned by
+its authentication lookup in private admitted invocation state. A replacement
+bearer binding cannot retarget an admitted request. The retained session is
+checked for revocation at invocation worker entry; principal/session mismatches
+are rejected. Session handles cannot be supplied by arguments. Session close
+and ongoing body, queue, and disclosure fencing are reserved for PR09.
+
 One admission owns raw URI/header/body reservation, contextual decode, signature
-fitting, the authorized read, result fitting, encoding and optional gzip. Input
+fitting, registry discovery or the authorized read, result fitting, encoding and
+optional gzip. No handler recursively admits another read. Every scanned registry
+entry, including a hidden entry, charges work/candidate limits before its policy
+decision. Generated metadata copies reserve their admitted source size before
+allocation; input body length does not stand in for generated result size. Row,
+retained-byte and output limits fail atomically without partial discovery rows. Input
 collection is cumulative and uses geometrically bounded buffer growth. Jeto
 parsing, contextual reconstruction, generated scalar boxes, escaped strings,
 structural wrappers, and output growth charge the original work, retained-byte,

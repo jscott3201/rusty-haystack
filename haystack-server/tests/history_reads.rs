@@ -46,6 +46,9 @@ impl ReadPolicy for Rules {
     }
 }
 impl PolicySnapshot for Rules {
+    fn function(&self, _: &haystack_app::FunctionIdentity) -> bool {
+        true
+    }
     fn scope_key(&self) -> &str {
         "history-fixture"
     }

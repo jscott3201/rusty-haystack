@@ -1,4 +1,4 @@
-//! One capability registry drives both built-in routing and `/api/ops`.
+//! Legacy H4 adapter capabilities. Typed executable bindings are app-owned.
 use crate::{ops, state::SharedState, ws};
 use axum::routing::{MethodRouter, get, post};
 
@@ -28,7 +28,6 @@ capabilities! {
     ("ops", "Operations supported by this server", true),
     ("formats", "Grid data formats supported by this server", true),
     ("read", "Read entity records by id or filter", true),
-    ("readById", "Read one authorized record (initial typed HTTP profile)", true),
     ("nav", "Navigate a project for discovery", true),
     ("defs", "Query the definitions namespace", true),
     ("libs", "Query the library namespace", true),
@@ -110,7 +109,6 @@ impl Capability {
             "hisRead" if scoped => post(ops::his::handle_scoped_read),
             "hisWrite" if scoped => post(ops::his::handle_scoped_write),
             "hisReceipt" => post(ops::his::handle_receipt),
-            "readById" => axum::routing::any(crate::typed_read::handle),
             "read" if scoped => post(ops::shared_read::read),
             "nav" if scoped => post(ops::shared_read::nav),
             "defs" if scoped => post(ops::shared_read::definitions),

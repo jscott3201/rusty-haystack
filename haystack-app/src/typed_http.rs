@@ -1,4 +1,4 @@
-//! Pinned readById HTTP profile using the core contextual Jeto codec.
+//! Pinned executable HTTP profile using the core contextual Jeto codec.
 //! Codec context is derived from the admitted signature at service setup;
 //! every allocating request stage shares the original read admission.
 use crate::{BudgetKind, H4Codec, OutputProfile, ReadError, ReadOutput, budget::Budget, output};
@@ -20,6 +20,11 @@ pub enum ApiError {
     NotImplemented,
     InvalidPath,
     UnknownFunction(String),
+    AmbiguousFunction {
+        name: String,
+        candidates: Vec<String>,
+    },
+    MethodNotAllowed,
     UnknownEntity,
     Permission,
     AuthRequired,
@@ -32,7 +37,11 @@ pub enum ApiError {
 impl ApiError {
     pub fn status(&self) -> u16 {
         match self {
-            Self::InvalidArgs | Self::UnsupportedVersion | Self::AuthMalformed => 400,
+            Self::InvalidArgs
+            | Self::UnsupportedVersion
+            | Self::AuthMalformed
+            | Self::AmbiguousFunction { .. } => 400,
+            Self::MethodNotAllowed => 405,
             Self::AuthRequired => 401,
             Self::AuthRejected | Self::Permission => 403,
             Self::InvalidPath | Self::UnknownEntity | Self::UnknownFunction(_) => 404,
@@ -53,6 +62,18 @@ impl ApiError {
                     return Self::InvalidPath.json();
                 }
                 return std::borrow::Cow::Owned(serde_json::json!({"spec":"sys.api::UnknownFuncErr","status":404,"dis":"Unknown function","funcName":name}).to_string());
+            }
+            Self::AmbiguousFunction { name, candidates } => {
+                if name.len() > 256
+                    || candidates.len() > 16
+                    || candidates.iter().any(|name| name.len() > 256)
+                {
+                    return Self::InvalidPath.json();
+                }
+                return std::borrow::Cow::Owned(serde_json::json!({"spec":"sys.api::AmbiguousFuncErr","status":400,"dis":"Ambiguous function","funcName":name,"candidates":candidates}).to_string());
+            }
+            Self::MethodNotAllowed => {
+                r#"{"spec":"sys.api::MethodNotAllowedErr","status":405,"dis":"Function requires POST","allow":["POST"]}"#
             }
             Self::InvalidArgs => {
                 r#"{"spec":"sys.api::InvalidArgsErr","status":400,"dis":"Invalid request arguments"}"#
@@ -119,7 +140,7 @@ impl From<ReadError> for ApiError {
 /// Raw transport data, reserved through `ReadAdmission::reserve_wire_input`
 /// before its buffers are allocated. The worker resolves all protocol controls.
 #[derive(Default)]
-pub struct TypedReadInput {
+pub struct TypedInvocationInput {
     pub operation: String,
     pub post: bool,
     pub query: String,
@@ -130,7 +151,7 @@ pub struct TypedReadInput {
     pub content_encoded: bool,
     pub body: Vec<u8>,
 }
-pub struct TypedReadResponse {
+pub struct TypedInvocationResponse {
     pub body: Vec<u8>,
     pub content_type: &'static str,
     pub version: &'static str,
@@ -226,7 +247,7 @@ fn media(value: &str, v5: bool) -> Option<Media> {
     }
 }
 fn response_media(
-    input: &TypedReadInput,
+    input: &TypedInvocationInput,
     filetype: Option<&str>,
     v5: bool,
 ) -> Result<Media, ApiError> {
@@ -319,21 +340,20 @@ fn response_media(
     selected.ok_or(ApiError::NotAcceptable)
 }
 
-const ARGUMENTS: &str = "rusty.http::ReadByIdArgs";
+const ARGUMENTS: &str = "rusty.http::Arguments";
 /// A codec-only argument container derived from the actual admitted function
 /// slots. It does not register a function or admit a broader Xeto catalog.
 pub(crate) struct WireProfile {
     context: jeto::Context,
     parameters: std::collections::BTreeMap<String, String>,
     result: String,
+    strict_arguments: bool,
 }
 impl WireProfile {
     pub(crate) fn new(
         profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
+        declaration: &haystack_core::xeto::read_by_id::AdmittedSpec,
     ) -> Result<Self, ReadError> {
-        let declaration = profile
-            .declaration("sys.api::readById")
-            .ok_or(ReadError::InvalidLimits)?;
         let mut parameters = std::collections::BTreeMap::new();
         let mut result = None;
         for slot in &declaration.spec.slots {
@@ -344,13 +364,43 @@ impl WireProfile {
                 parameters.insert(slot.name.clone(), name.clone());
             }
         }
+        let mut definitions = vec![jeto::Definition::Dict {
+            name: ARGUMENTS.into(),
+            members: parameters.clone(),
+        }];
+        if let Some(Kind::Ref(of)) = declaration
+            .spec
+            .slots
+            .iter()
+            .find(|slot| slot.name == "returns")
+            .and_then(|slot| slot.meta.get("of"))
+        {
+            let row = profile
+                .declaration(&of.val)
+                .ok_or(ReadError::InvalidLimits)?;
+            if row.spec.base.as_deref() != Some("sys::Dict") {
+                return Err(ReadError::InvalidLimits);
+            }
+            let members = row
+                .spec
+                .slots
+                .iter()
+                .map(|slot| {
+                    Ok((
+                        slot.name.clone(),
+                        slot.type_ref.clone().ok_or(ReadError::InvalidLimits)?,
+                    ))
+                })
+                .collect::<Result<_, ReadError>>()?;
+            definitions.push(jeto::Definition::Dict {
+                name: of.val.clone(),
+                members,
+            });
+        }
         let context = jeto::Context::new(
             &profile.provenance().repository,
             &profile.provenance().commit,
-            vec![jeto::Definition::Dict {
-                name: ARGUMENTS.into(),
-                members: parameters.clone(),
-            }],
+            definitions,
         )
         .map_err(|_| ReadError::InvalidLimits)?;
         let result = result.ok_or(ReadError::InvalidLimits)?;
@@ -361,6 +411,7 @@ impl WireProfile {
             context,
             parameters,
             result,
+            strict_arguments: declaration.spec.qname != "sys.api::readById",
         })
     }
 }
@@ -418,12 +469,17 @@ fn argument(
     }
 }
 
-pub(crate) fn decode(
-    input: &TypedReadInput,
-    profile: &WireProfile,
+pub(crate) struct Envelope {
+    pub operation: String,
+    version: &'static str,
+    output: Media,
+    gzip: bool,
+    query_args: Vec<(String, String)>,
+}
+pub(crate) fn envelope(
+    input: &TypedInvocationInput,
     budget: &mut Budget,
-) -> Result<Request, ApiError> {
-    let mut args = HDict::new();
+) -> Result<Envelope, ApiError> {
     let mut query_args = Vec::new();
     let mut version = None;
     let mut filetype = None;
@@ -443,14 +499,10 @@ pub(crate) fn decode(
                 }
             }
             key if key.starts_with("xeto-") => {}
-            name if !input.post && profile.parameters.contains_key(name) => {
-                if query_args.iter().any(|(name, _)| name == &key) {
-                    return Err(ApiError::InvalidArgs);
-                }
+            _ => {
                 budget.charge(BudgetKind::Retained, 128)?;
                 query_args.push((key, value));
             }
-            _ => {}
         }
     }
     if input.versions.len() > 1 {
@@ -466,21 +518,51 @@ pub(crate) fn decode(
         _ => return Err(ApiError::UnsupportedVersion),
     };
     let operation = percent(&input.operation, budget)?;
-    if !matches!(operation.as_str(), "readById" | "sys.api::readById") {
-        if operation.len() > 256
-            || operation.is_empty()
-            || !operation
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_:.".contains(&b))
-        {
-            return Err(ApiError::InvalidPath);
-        }
-        return Err(ApiError::UnknownFunction(operation));
+    if operation.len() > 256
+        || operation.is_empty()
+        || !operation
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_:.".contains(&b))
+    {
+        return Err(ApiError::InvalidPath);
     }
     let output = response_media(input, filetype.as_deref(), version == "5")?;
     let gzip = accepts_gzip(&input.accept_encodings)?;
+    Ok(Envelope {
+        operation,
+        version,
+        output,
+        gzip,
+        query_args,
+    })
+}
+pub(crate) fn decode(
+    input: &TypedInvocationInput,
+    profile: &WireProfile,
+    envelope: Envelope,
+    budget: &mut Budget,
+) -> Result<Request, ApiError> {
+    let Envelope {
+        version,
+        output,
+        gzip,
+        query_args,
+        ..
+    } = envelope;
+    let mut args = HDict::new();
     for (key, value) in query_args {
-        let expected = profile.parameters.get(&key).ok_or(ApiError::Internal)?;
+        let Some(expected) = profile.parameters.get(&key) else {
+            if profile.strict_arguments {
+                return Err(ApiError::InvalidArgs);
+            }
+            continue;
+        };
+        if input.post {
+            continue;
+        }
+        if args.has(&key) {
+            return Err(ApiError::InvalidArgs);
+        }
         let value = argument(&value, expected, profile, budget)?;
         if !matches!(value, Kind::Null) {
             args.set(key, value);
@@ -500,6 +582,25 @@ pub(crate) fn decode(
         if !text.trim().is_empty() {
             match input_media {
                 Media::Jeto(_) => {
+                    if profile.strict_arguments {
+                        // Jeto removes null dictionary members. Check declared
+                        // argument names before that absence normalization; the
+                        // extra parse is reserved before entering serde.
+                        budget.charge(
+                            BudgetKind::Retained,
+                            text.len().saturating_mul(512).saturating_add(2048),
+                        )?;
+                        budget.charge(BudgetKind::Work, text.len().saturating_add(1))?;
+                        let raw: Value =
+                            serde_json::from_str(text).map_err(|_| ApiError::InvalidArgs)?;
+                        let map = raw.as_object().ok_or(ApiError::InvalidArgs)?;
+                        if map
+                            .keys()
+                            .any(|name| name != "spec" && !profile.parameters.contains_key(name))
+                        {
+                            return Err(ApiError::InvalidArgs);
+                        }
+                    }
                     let decoded = jeto::decode_metered(
                         &input.body,
                         &profile.context,
@@ -534,6 +635,18 @@ pub(crate) fn decode(
                     if codec == H4Codec::Json {
                         let envelope: Value =
                             serde_json::from_str(text).map_err(|_| ApiError::InvalidArgs)?;
+                        if profile.strict_arguments
+                            && let Some(row) = envelope
+                                .get("rows")
+                                .and_then(Value::as_array)
+                                .and_then(|rows| rows.first())
+                                .and_then(Value::as_object)
+                            && row
+                                .keys()
+                                .any(|name| !profile.parameters.contains_key(name))
+                        {
+                            return Err(ApiError::InvalidArgs);
+                        }
                         if envelope.get("_kind").and_then(Value::as_str) != Some("grid")
                             || !envelope.get("meta").is_some_and(Value::is_object)
                             || !envelope.get("cols").is_some_and(Value::is_array)
@@ -546,7 +659,23 @@ pub(crate) fn decode(
                         .ok_or(ApiError::Internal)?
                         .decode_grid(text)
                         .map_err(|_| ApiError::InvalidArgs)?;
+                    if !grid.rows.is_empty()
+                        && profile.strict_arguments
+                        && grid
+                            .cols
+                            .iter()
+                            .any(|col| !profile.parameters.contains_key(&col.name))
+                    {
+                        return Err(ApiError::InvalidArgs);
+                    }
                     if let Some(row) = grid.rows.first() {
+                        if profile.strict_arguments
+                            && row
+                                .tag_names()
+                                .any(|name| !profile.parameters.contains_key(name))
+                        {
+                            return Err(ApiError::InvalidArgs);
+                        }
                         for name in profile.parameters.keys() {
                             if let Some(value) = row.get(name)
                                 && !matches!(value, Kind::Null)
@@ -573,7 +702,7 @@ pub(crate) fn encode(
     request: &Request,
     profile: &WireProfile,
     budget: &mut Budget,
-) -> Result<TypedReadResponse, ApiError> {
+) -> Result<TypedInvocationResponse, ApiError> {
     #[cfg(test)]
     if let Some(hook) = &budget.typed_encode_hook {
         hook();
@@ -595,12 +724,12 @@ pub(crate) fn encode(
             .map_err(|_| ApiError::NotAcceptable)?
         }
         Media::Grid(codec) => {
-            let rows = match value {
-                Kind::Dict(dict) => vec![*dict],
-                Kind::Null => vec![],
+            let mut grid = match value {
+                Kind::Grid(grid) => *grid,
+                Kind::Dict(dict) => output::grid(vec![*dict], true, None, budget)?,
+                Kind::Null => output::grid(vec![], true, None, budget)?,
                 _ => return Err(ApiError::Internal),
             };
-            let mut grid = output::grid(rows, true, None, budget)?;
             grid.meta.remove_tag("complete");
             let ReadOutput::H4 { body, .. } =
                 output::encode(grid, OutputProfile::H4(codec), budget)?
@@ -617,7 +746,7 @@ pub(crate) fn encode(
 pub(crate) fn missing(
     request: &Request,
     budget: &mut Budget,
-) -> Result<TypedReadResponse, ApiError> {
+) -> Result<TypedInvocationResponse, ApiError> {
     if request.version == "5" {
         return Err(ApiError::UnknownEntity);
     }
@@ -672,7 +801,7 @@ fn finish(
     request: &Request,
     budget: &mut Budget,
     version: &'static str,
-) -> Result<TypedReadResponse, ApiError> {
+) -> Result<TypedInvocationResponse, ApiError> {
     use std::io::Write;
     let body = if request.gzip {
         let bound = body.len().saturating_mul(2).saturating_add(1024);
@@ -700,7 +829,7 @@ fn finish(
         body
     };
     budget.check()?;
-    Ok(TypedReadResponse {
+    Ok(TypedInvocationResponse {
         body,
         content_type: request.output.content_type(),
         version,
@@ -720,8 +849,8 @@ mod tests {
         xeto::read_by_id::ReadByIdProfile,
     };
     use std::{future::Future, sync::Arc, task::Poll, time::Duration};
-    fn input() -> TypedReadInput {
-        TypedReadInput {
+    fn input() -> TypedInvocationInput {
+        TypedInvocationInput {
             operation: "readById".into(),
             versions: vec!["5".into()],
             query: "checked=false".into(),
@@ -739,6 +868,11 @@ mod tests {
             ApiError::NotImplemented,
             ApiError::InvalidPath,
             ApiError::UnknownFunction("absent".into()),
+            ApiError::AmbiguousFunction {
+                name: "same".into(),
+                candidates: vec!["a::same".into(), "b::same".into()],
+            },
+            ApiError::MethodNotAllowed,
             ApiError::UnknownEntity,
             ApiError::Permission,
             ApiError::AuthRequired,
@@ -791,10 +925,7 @@ mod tests {
         let controls = service(ReadLimits::default());
         let mut request = controls.begin(context()).await.unwrap();
         let observer = request.budget_mut().clone();
-        assert_eq!(
-            request.read_by_id_wire(input()).await.unwrap().body,
-            b"null"
-        );
+        assert_eq!(request.invoke_wire(input()).await.unwrap().body, b"null");
         let request_cost = observer.limits.max_retained_bytes - observer.retained_remaining();
         drop(observer);
         let mut transport = controls.begin(context()).await.unwrap();
@@ -816,7 +947,7 @@ mod tests {
                 .begin(context())
                 .await
                 .unwrap()
-                .read_by_id_wire(input())
+                .invoke_wire(input())
                 .await
                 .unwrap()
                 .body,
@@ -825,7 +956,7 @@ mod tests {
         let mut admission = reads.begin(context()).await.unwrap();
         admission.reserve_wire_input(512).unwrap();
         assert!(matches!(
-            admission.read_by_id_wire(input()).await,
+            admission.invoke_wire(input()).await,
             Err(ApiError::InvalidArgs)
         ));
         assert_eq!(reads.load().admitted, 0);
@@ -833,7 +964,9 @@ mod tests {
     #[test]
     fn core_codec_meter_preserves_original_interruptions_and_generated_output_limits() {
         use std::time::Instant;
-        let profile = WireProfile::new(&ReadByIdProfile::load_http_pinned().unwrap()).unwrap();
+        let catalog = ReadByIdProfile::load_http_pinned().unwrap();
+        let profile =
+            WireProfile::new(&catalog, catalog.declaration("sys.api::readById").unwrap()).unwrap();
         let fresh = |limits| {
             Budget::new(
                 Arc::new(limits),
@@ -948,7 +1081,80 @@ mod tests {
                     .recv_timeout(Duration::from_secs(2))
                     .unwrap();
             }));
-            let mut result = Box::pin(admission.read_by_id_wire(input()));
+            let mut result = Box::pin(admission.invoke_wire(input()));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(result.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            cancel.cancel();
+            assert!(matches!(result.await, Err(ApiError::Unavailable)));
+            assert_eq!(reads.load().admitted, 1);
+            let mut closing = Box::pin(owner.close());
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            assert_eq!(reads.load().admitted, 1);
+            release_tx.send(()).unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            closing.await.unwrap();
+            owner.terminated().await;
+            assert_eq!(reads.load().admitted, 0);
+        });
+    }
+    #[test]
+    fn cancelling_during_ops_encoding_keeps_the_slot_and_owner_registration_until_exit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let app = ApplicationBuilder::new(
+                SharedGraph::new(EntityGraph::new()),
+                Arc::new(AllowAll),
+                ReadLimits {
+                    max_concurrent: 1,
+                    max_queued: 0,
+                    ..ReadLimits::default()
+                },
+            )
+            .unwrap()
+            .shutdown_policy(ShutdownPolicy {
+                drain_timeout: Duration::ZERO,
+                stop_timeout: Duration::from_secs(1),
+            });
+            let reads = app.handle().read_service();
+            let owner = app.start(&tokio::runtime::Handle::current()).unwrap();
+            owner.ready().await.unwrap();
+            let cancel = CancellationToken::new();
+            let mut admission = reads
+                .begin(ReadContext::new(
+                    Principal::Anonymous,
+                    std::time::Instant::now() + Duration::from_secs(3),
+                    cancel.clone(),
+                ))
+                .await
+                .unwrap();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release = std::sync::Mutex::new(release_rx);
+            admission.budget_mut().typed_encode_hook = Some(Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            }));
+            let mut result = Box::pin(admission.invoke_wire(TypedInvocationInput {
+                operation: "ops".into(),
+                versions: vec!["5".into()],
+                ..Default::default()
+            }));
             assert!(
                 std::future::poll_fn(|cx| Poll::Ready(result.as_mut().poll(cx)))
                     .await

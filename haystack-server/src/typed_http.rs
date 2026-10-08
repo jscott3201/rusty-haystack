@@ -1,4 +1,4 @@
-//! Initial typed read HTTP adapter. Authentication precedes protocol resolution;
+//! Pinned executable HTTP adapter. Authentication precedes protocol resolution;
 //! raw collection, native binding, authorization and encoding share admission.
 use crate::{auth::AuthManager, state::SharedState};
 use axum::{
@@ -9,24 +9,48 @@ use axum::{
 };
 use futures_util::StreamExt;
 use haystack_app::{
-    ApiError, CancellationToken, Principal, ReadContext, ReadError, TypedReadInput,
+    ApiError, CancellationToken, Principal, ReadContext, ReadError, TypedInvocationInput,
 };
 use haystack_core::auth::{AuthHeader, parse_auth_header};
 use std::{sync::Arc, time::Instant};
 
-pub(crate) fn path(path: &str) -> bool {
-    matches!(path, "/api/readById" | "/api/sys.api::readById")
-}
 pub(crate) fn selected(request: &Request<Body>) -> bool {
-    path(request.uri().path())
-        || (request
-            .extensions()
-            .get::<axum::extract::MatchedPath>()
-            .is_none()
-            && request.uri().path().starts_with("/api/"))
+    let path = request.uri().path();
+    if path == "/api/ops" {
+        return !legacy_ops(request);
+    }
+    path.starts_with("/api/")
+        && !crate::capabilities::CAPABILITIES
+            .iter()
+            .any(|capability| capability.path == path)
+}
+// Only absent or one explicitly selected v4 control retains the public legacy
+// GET path. This is a routing hint, not version validation: every malformed,
+// duplicate or other selection goes through authentication first.
+fn legacy_ops(request: &Request<Body>) -> bool {
+    if request.method() != axum::http::Method::GET {
+        return false;
+    }
+    let mut query_version = None;
+    for pair in request.uri().query().unwrap_or("").split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if wire_equal(key, b"xeto-version") {
+            if query_version.is_some() {
+                return false;
+            }
+            query_version = Some(wire_equal(value, b"4"));
+        }
+    }
+    let mut headers = request.headers().get_all("xeto-version").iter();
+    let first = headers.next();
+    if headers.next().is_some() {
+        return false;
+    }
+    query_version.unwrap_or_else(|| first.is_none_or(|value| value == "4"))
 }
 pub(crate) fn error(error: ApiError) -> Response {
-    (
+    let post_only = matches!(error, ApiError::MethodNotAllowed);
+    let mut response = (
         StatusCode::from_u16(error.status()).expect("fixed status"),
         [
             (header::CONTENT_TYPE, "application/json"),
@@ -34,7 +58,13 @@ pub(crate) fn error(error: ApiError) -> Response {
         ],
         error.json(),
     )
-        .into_response()
+        .into_response();
+    if post_only {
+        response
+            .headers_mut()
+            .insert(header::ALLOW, "POST".parse().expect("fixed method"));
+    }
+    response
 }
 /// This hint affects only the documented auth-status compatibility choice. It
 /// does not validate or reject any protocol control before authentication.
@@ -146,7 +176,7 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
         else {
             return Err(malformed);
         };
-        let (user, _session) = state.auth.validate_session(&auth_token).ok_or(if v5 {
+        let (user, session) = state.auth.validate_session(&auth_token).ok_or(if v5 {
             ApiError::AuthRejected
         } else {
             ApiError::AuthRequired
@@ -154,7 +184,10 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
         if !AuthManager::check_permission(&user, "read") {
             return Err(ApiError::Permission);
         }
-        admission.bind_wire_principal(Principal::authenticated(user.username, user.permissions))?;
+        admission.bind_wire_session(
+            Principal::authenticated(user.username, user.permissions),
+            session,
+        )?;
     }
     if !matches!(
         *request.method(),
@@ -175,7 +208,7 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
                 })
                 .collect()
         };
-        TypedReadInput {
+        TypedInvocationInput {
             operation: request
                 .uri()
                 .path()
@@ -220,7 +253,7 @@ async fn execute(state: SharedState, request: Request<Body>) -> Result<Response,
         }
         input.body.extend_from_slice(&chunk);
     }
-    let response = admission.read_by_id_wire(input).await?;
+    let response = admission.invoke_wire(input).await?;
     let gzip = response.gzip;
     let mut response = (
         [

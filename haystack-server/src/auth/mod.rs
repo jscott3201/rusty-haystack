@@ -648,4 +648,75 @@ mod tests {
         assert!(!second.is_active());
         assert!(manager.validate_session("token").is_none());
     }
+    #[tokio::test]
+    async fn admitted_invocation_retains_validated_session_a_after_token_replacement_b() {
+        use haystack_app::{
+            AllowAll, ApiError, Principal, ReadContext, ReadLimits, ReadService,
+            TypedInvocationInput,
+        };
+        use std::sync::Arc;
+        let auth = manager();
+        let user = AuthUser {
+            username: "user".into(),
+            permissions: vec!["read".into()],
+        };
+        auth.inject_token("fixture".into(), user.clone());
+        let (validated, a) = auth.validate_session("fixture").unwrap();
+        let service = ReadService::new(
+            haystack_core::graph::SharedGraph::new(haystack_core::graph::EntityGraph::new()),
+            Arc::new(AllowAll),
+            ReadLimits::default(),
+        )
+        .unwrap();
+        let mut admitted = service
+            .begin(ReadContext::with_timeout(
+                Principal::Anonymous,
+                Duration::from_secs(1),
+            ))
+            .await
+            .unwrap();
+        admitted
+            .bind_wire_session(
+                Principal::authenticated(validated.username, validated.permissions),
+                a.clone(),
+            )
+            .unwrap();
+        auth.inject_token("fixture".into(), user);
+        let (validated, b) = auth.validate_session("fixture").unwrap();
+        assert!(!a.is_active() && b.is_active());
+        let input = || TypedInvocationInput {
+            operation: "ops".into(),
+            versions: vec!["5".into()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            admitted.invoke_wire(input()).await,
+            Err(ApiError::Permission)
+        ));
+        assert!(b.is_active());
+        let mut admitted = service
+            .begin(ReadContext::with_timeout(
+                Principal::Anonymous,
+                Duration::from_secs(1),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            admitted
+                .bind_wire_session(
+                    Principal::authenticated("someone-else", vec!["read".into()]),
+                    b.clone()
+                )
+                .is_err()
+        );
+        admitted
+            .bind_wire_session(
+                Principal::authenticated(validated.username, validated.permissions),
+                b.clone(),
+            )
+            .unwrap();
+        assert!(admitted.invoke_wire(input()).await.is_ok());
+        assert!(b.is_active());
+        assert_eq!(service.load().admitted, 0);
+    }
 }
