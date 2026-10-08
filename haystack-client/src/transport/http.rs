@@ -137,6 +137,15 @@ impl HttpTransport {
         self.entity_submission_safe = true;
         self
     }
+    pub(crate) fn check_history_read_policy(&self) -> Result<(), ClientError> {
+        if self.entity_submission_safe {
+            Ok(())
+        } else {
+            Err(ClientError::Connection(
+                "scoped history requires a first-party no-retry/no-redirect client".into(),
+            ))
+        }
+    }
     pub(crate) fn check_entity_submission_policy(&self) -> Result<(), ClientError> {
         if self.entity_submission_safe {
             Ok(())
@@ -178,6 +187,23 @@ impl Transport for HttpTransport {
         }
         let url = format!("{}/{}", self.base_url, op);
 
+        let history_request = if op == "hisRead" && req.meta.has("history") {
+            self.check_history_read_policy()?;
+            if !matches!(
+                self.format.as_str(),
+                "text/zinc" | "application/json" | "application/json;v=3"
+            ) {
+                return Err(ClientError::Codec(
+                    "unsupported scoped history format".into(),
+                ));
+            }
+            Some(
+                haystack_core::codecs::history::request_from_grid(req)
+                    .map_err(|_| ClientError::Codec("invalid scoped history request".into()))?,
+            )
+        } else {
+            None
+        };
         let entity_extension = matches!(op, "entityBatch" | "entityReceipt")
             || (op == "changes" && req.cols.len() == 1 && req.cols[0].name == "payload");
         let mut response = if GET_OPS.contains(&op) {
@@ -217,6 +243,43 @@ impl Transport for HttpTransport {
         }
         let codec = codec_for(&self.format)
             .ok_or_else(|| ClientError::Codec(format!("unsupported format: {}", self.format)))?;
+        if let Some(request) = history_request {
+            use haystack_core::codecs::history;
+            let response_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| ClientError::Codec("missing history response format".into()))?;
+            if response_type != codec.mime_type() {
+                return Err(ClientError::Codec(
+                    "unexpected history response format".into(),
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > history::MAX_GRID_BYTES as u64)
+            {
+                return Err(ClientError::Codec(
+                    "history response exceeds byte limit".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(crate::error::http_error)? {
+                if chunk.len() > history::MAX_GRID_BYTES.saturating_sub(bytes.len()) {
+                    return Err(ClientError::Codec(
+                        "history response exceeds byte limit".into(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let result = history::decode_result(&bytes, codec)
+                .map_err(|_| ClientError::Codec("invalid bounded history response".into()))?;
+            history::validate_for_request(&result, &request).map_err(|_| {
+                ClientError::Codec("history response does not match request".into())
+            })?;
+            return history::result_grid(&result)
+                .map_err(|_| ClientError::Codec("invalid bounded history response".into()));
+        }
         if entity_extension {
             use haystack_core::codecs::entity;
             if response

@@ -16,7 +16,7 @@ workspace = true
 name = "haystack_client"
 
 [dependencies]
-haystack-core.workspace = true
+haystack-core = { workspace = true, features = ["chrono-tz"] }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 rustls = { workspace = true, features = ["ring", "tls12", "std"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }

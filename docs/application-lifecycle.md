@@ -67,14 +67,19 @@ For legacy standalone setup, `HaystackServer::start()` constructs a convenience
 owner. `run()` and `run_reporting_addr()` are compatibility futures: dropping
 one requests cleanup, while explicit owner APIs let callers await its completion.
 
-An owned legacy history provider supplied through `with_history_provider(Box)`
-receives `HistoryProvider::initialize` and then `close`; a partial attempt
-receives `rollback_initialize`. The default in-memory provider uses no-op hooks.
-Custom hooks must release or invalidate the provider's operational resources
-independently of `Arc` lifetime. Providers supplied through
-`with_borrowed_history_provider(Arc)` must already be initialized by the caller
-and receive neither initialization nor cleanup hooks. Scoped reads disable
-history, so history-provider hooks are not selected in that profile.
+History is selected once on `ApplicationBuilder` with `owned_history(service)`
+or `borrowed_history(service)`, sharing its exact managed read authority. Owned
+history initializes before listener resources, independently of builder call
+order. A successful attempt receives `close` after actual work completion; a
+failed or cancelled attempt receives `rollback_initialize`. Borrowed providers
+receive no hooks. Provider resources must close independently of `Arc` lifetime.
+
+Managed listeners and external routers use that exact application selection;
+they reject an independently configured listener provider. Scoped history is
+opt-in. Legacy standalone `HaystackServer::start()` translates its
+`with_history_provider(Box)` or `with_borrowed_history_provider(Arc)` convenience
+configuration into the same application ownership path. See
+[bounded history reads](history-reads.md) for session and collector contracts.
 
 ## Seal, drain, stop and completion
 
@@ -130,15 +135,14 @@ APIs are unchanged by this Rust owner boundary.
 
 ## Externally hosted routers
 
-`into_external_router()` requires an application handle and explicitly borrowed
-configured providers. It gates built-in requests and tracks managed reads and
-upgrades, including when an old router is retained after close. The caller owns
-its listener, HTTP connection tasks, response transport, provider lifecycle and
-arbitrary tasks spawned by custom routes. Application termination does not
-claim those caller-owned resources stopped. The default in-memory store belongs
-to the router. Custom-route authentication and scoped-policy restrictions are
-documented in [shared reads](shared-reads.md).
+`into_external_router()` requires an application handle. History selection and
+owned/borrowed provider lifecycle remain with that application, as with its
+owned listeners; an independent adapter provider is rejected. The router gates
+built-in requests and tracks managed reads and upgrades even when retained
+after close. The caller owns its listener, HTTP connection tasks, response
+transport and arbitrary custom-route tasks. Application termination does not
+claim those caller-owned resources stopped. Custom-route authentication and
+scoped-policy restrictions are documented in [shared reads](shared-reads.md).
 
 `POST /api/close` is bearer-session logout. It does not request application
-shutdown. Persistent-store recovery and publication authority, scoped history,
-scoped watches, and Python lifecycle bridging are separate boundaries.
+shutdown. Persistent-store recovery and publication authority, scoped watches, and Python lifecycle bridging are separate boundaries.

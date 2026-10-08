@@ -104,6 +104,12 @@ impl HaystackClient<HttpTransport> {
     }
 }
 
+impl<T: crate::history::HistoryTransport> HaystackClient<T> {
+    pub(crate) fn transport_history_check(&self) -> Result<(), ClientError> {
+        self.transport.check_history_read()
+    }
+}
+
 impl HaystackClient<WsTransport> {
     /// Connect to a Haystack server via WebSocket.
     ///
@@ -317,7 +323,9 @@ impl<T: Transport> HaystackClient<T> {
         self.call("pointWrite", &grid).await
     }
 
-    /// Call the `hisRead` op to read time-series history for a point.
+    /// Explicit legacy `hisRead` grid call. It does not select bounded-history-v1
+    /// and cannot obtain scoped partial-result semantics. Use `his_read_scoped`
+    /// on a history-capable transport for terminal state and provenance.
     ///
     /// `id` is the point ref (e.g. `"@sensor-1"`). `range` is a Haystack range
     /// string: `"today"`, `"yesterday"`, a single date like `"2024-01-01"`, a

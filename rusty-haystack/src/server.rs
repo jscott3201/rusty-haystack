@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 
+use haystack_app::HisStore;
 use haystack_server::app::HaystackServer;
 use haystack_server::auth::AuthManager;
-use haystack_server::his_store::HisStore;
 
 use crate::exceptions;
 use crate::graph::PySharedGraph;

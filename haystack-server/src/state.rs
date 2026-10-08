@@ -7,8 +7,8 @@ use haystack_core::ontology::DefNamespace;
 
 use crate::actions::ActionRegistry;
 use crate::auth::AuthManager;
-use crate::his_provider::HistoryProvider;
 use crate::ws::WatchManager;
+use haystack_app::HistoryProvider;
 
 /// Type alias for the shared state used by Axum extractors.
 pub type SharedState = Arc<AppState>;
@@ -35,7 +35,9 @@ pub struct AppState {
     /// Action dispatch registry for the `invokeAction` op.
     pub actions: ActionRegistry,
     /// Pluggable time-series history store for hisRead/hisWrite.
-    pub his: Arc<dyn HistoryProvider>,
+    pub his: Option<Arc<dyn HistoryProvider>>,
+    /// Exact history selection captured from the owning application.
+    pub history_service: Option<haystack_app::HistoryService>,
     /// Instant when the server was started, used for uptime calculation.
     pub started_at: std::time::Instant,
 }

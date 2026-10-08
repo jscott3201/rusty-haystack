@@ -1959,6 +1959,7 @@ version = "0.9.0"
 dependencies = [
  "chrono",
  "pyo3",
+ "rusty-haystack-app",
  "rusty-haystack-client",
  "rusty-haystack-core",
  "rusty-haystack-server",
@@ -1970,6 +1971,7 @@ name = "rusty-haystack-app"
 version = "0.9.0"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "futures-util",
  "hmac",
  "parking_lot",

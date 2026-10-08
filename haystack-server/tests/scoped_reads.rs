@@ -1,5 +1,4 @@
 //! Actual HTTP consumers decode the same bounded H4 output as embedded callers.
-use chrono::{DateTime, FixedOffset};
 use haystack_app::*;
 use haystack_core::{
     codecs::codec_for,
@@ -9,18 +8,15 @@ use haystack_core::{
     ontology::DefNamespace,
 };
 use haystack_server::{
-    HaystackServer, HistoryProvider,
+    HaystackServer,
     actions::{ActionHandler, ActionRegistry},
     auth::{
         AuthManager, AuthUser,
         users::{UserRecord, parse_password_hash},
     },
-    his_store::HisItem,
 };
 use std::{
     collections::HashMap,
-    future::Future,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -336,22 +332,6 @@ async fn real_http_and_embedded_reads_share_identity_policy_refs_and_catalogs() 
         assert_eq!(errors[0], errors[1]);
     }
 }
-struct CountHistory(Arc<AtomicUsize>);
-impl HistoryProvider for CountHistory {
-    fn his_read(
-        &self,
-        _: &str,
-        _: Option<DateTime<FixedOffset>>,
-        _: Option<DateTime<FixedOffset>>,
-    ) -> Pin<Box<dyn Future<Output = Vec<HisItem>> + Send + '_>> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { vec![] })
-    }
-    fn his_write(&self, _: &str, _: Vec<HisItem>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async {})
-    }
-}
 struct CountAction(Arc<AtomicUsize>);
 impl ActionHandler for CountAction {
     fn name(&self) -> &str {
@@ -371,8 +351,7 @@ async fn scoped_capabilities_disable_every_bypass_before_decode_or_provider_invo
     let before = graph.read(|g| (g.version(), g.catalog_generation()));
     let server_builder = HaystackServer::new(graph.clone())
         .with_scoped_reads(application.handle())
-        .with_actions(actions)
-        .with_history_provider(Box::new(CountHistory(providers.clone())));
+        .with_actions(actions);
     let server = Server::start(application, server_builder);
     let client = haystack_client::ClientConfig::default()
         .build_reqwest_client()

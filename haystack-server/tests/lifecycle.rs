@@ -8,13 +8,10 @@ use haystack_core::{
     kinds::{HRef, Kind},
 };
 use haystack_server::{
-    HaystackServer, HistoryProvider,
+    HaystackServer,
     auth::{AuthManager, AuthUser},
-    his_store::HisItem,
 };
 use std::{
-    future::Future,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -104,46 +101,37 @@ impl HistoryProvider for Provider {
             Ok(())
         })
     }
-    fn his_read(
+    fn open(
         &self,
-        _: &str,
-        _: Option<DateTime<FixedOffset>>,
-        _: Option<DateTime<FixedOffset>>,
-    ) -> Pin<Box<dyn Future<Output = Vec<HisItem>> + Send + '_>> {
-        Box::pin(async { vec![] })
+        _: String,
+        _: DateTime<FixedOffset>,
+        _: DateTime<FixedOffset>,
+        _: HistoryPullBudget,
+    ) -> HistoryFuture<'_, Box<dyn HistorySession>> {
+        Box::pin(async { Err(HistoryProviderError::Failed) })
     }
-    fn his_write(&self, _: &str, _: Vec<HisItem>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    fn his_write(&self, _: &str, _: Vec<HisItem>) -> HistoryFuture<'_, ()> {
         Box::pin(async move {
             self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         })
     }
 }
-// The test retains observation of state while ownership of this wrapper is transferred.
-struct OwnedProvider(Arc<Provider>);
-impl HistoryProvider for OwnedProvider {
-    fn initialize(&self) -> ResourceFuture<'_> {
-        self.0.initialize()
-    }
-    fn rollback_initialize(&self) -> ResourceFuture<'_> {
-        self.0.rollback_initialize()
-    }
-    fn close(&self) -> ResourceFuture<'_> {
-        self.0.close()
-    }
-    fn his_read(
-        &self,
-        id: &str,
-        start: Option<DateTime<FixedOffset>>,
-        end: Option<DateTime<FixedOffset>>,
-    ) -> Pin<Box<dyn Future<Output = Vec<HisItem>> + Send + '_>> {
-        self.0.his_read(id, start, end)
-    }
-    fn his_write(
-        &self,
-        id: &str,
-        items: Vec<HisItem>,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        self.0.his_write(id, items)
+fn with_history(
+    builder: ApplicationBuilder,
+    provider: Arc<Provider>,
+    owned: bool,
+) -> ApplicationBuilder {
+    let history = HistoryService::new(
+        builder.handle().read_service(),
+        provider,
+        HistoryLimits::default(),
+    )
+    .unwrap();
+    if owned {
+        builder.owned_history(history).unwrap()
+    } else {
+        builder.borrowed_history(history).unwrap()
     }
 }
 
@@ -214,12 +202,7 @@ async fn owned_provider_initializes_and_closes_once_borrowed_provider_remains_us
         let graph = graph();
         let provider = Provider::new(Init::Ready);
         let server = HaystackServer::new(graph.clone()).port(0);
-        let server = if owned {
-            server.with_history_provider(Box::new(OwnedProvider(provider.clone())))
-        } else {
-            server.with_borrowed_history_provider(provider.clone())
-        };
-        let owner = builder(&graph)
+        let owner = with_history(builder(&graph), provider.clone(), owned)
             .owned_resource(server.into_listener())
             .start(&tokio::runtime::Handle::current())
             .unwrap();
@@ -235,7 +218,7 @@ async fn owned_provider_initializes_and_closes_once_borrowed_provider_remains_us
         assert_eq!(provider.rolled_back.load(Ordering::SeqCst), 0);
         assert_eq!(provider.held.load(Ordering::SeqCst), 0);
         if !owned {
-            provider.his_write("a", vec![]).await;
+            provider.his_write("a", vec![]).await.unwrap();
             assert_eq!(provider.writes.load(Ordering::SeqCst), 1);
         }
     }
@@ -246,10 +229,8 @@ async fn bind_failure_closes_initialized_owned_provider_before_termination() {
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let graph = graph();
     let provider = Provider::new(Init::Ready);
-    let server = HaystackServer::new(graph.clone())
-        .port(occupied.local_addr().unwrap().port())
-        .with_history_provider(Box::new(OwnedProvider(provider.clone())));
-    let owner = builder(&graph)
+    let server = HaystackServer::new(graph.clone()).port(occupied.local_addr().unwrap().port());
+    let owner = with_history(builder(&graph), provider.clone(), true)
         .owned_resource(server.into_listener())
         .start(&tokio::runtime::Handle::current())
         .unwrap();
@@ -269,10 +250,8 @@ async fn partial_provider_failure_and_cancellation_release_acquisitions() {
     for init in [Init::Fail, Init::Wait] {
         let graph = graph();
         let provider = Provider::new(init);
-        let server = HaystackServer::new(graph.clone())
-            .port(0)
-            .with_history_provider(Box::new(OwnedProvider(provider.clone())));
-        let owner = builder(&graph)
+        let server = HaystackServer::new(graph.clone()).port(0);
+        let owner = with_history(builder(&graph), provider.clone(), true)
             .owned_resource(server.into_listener())
             .start(&tokio::runtime::Handle::current())
             .unwrap();
@@ -298,9 +277,9 @@ async fn external_router_seals_builtins_without_closing_callers_listener_or_prov
     let graph = graph();
     let application = builder(&graph);
     let provider = Provider::new(Init::Ready);
+    let application = with_history(application, provider.clone(), false);
     let router = HaystackServer::new(graph)
         .with_application(application.handle())
-        .with_borrowed_history_provider(provider.clone())
         .into_external_router()
         .unwrap();
     let external_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -321,7 +300,7 @@ async fn external_router_seals_builtins_without_closing_callers_listener_or_prov
     owner.close().await.unwrap();
     assert_eq!(router.oneshot(request()).await.unwrap().status(), 503);
     assert!(external_listener.local_addr().is_ok());
-    provider.his_write("a", vec![]).await;
+    provider.his_write("a", vec![]).await.unwrap();
     assert_eq!(provider.writes.load(Ordering::SeqCst), 1);
     assert_eq!(provider.initialized.load(Ordering::SeqCst), 0);
     assert_eq!(provider.closed.load(Ordering::SeqCst), 0);
@@ -367,9 +346,8 @@ async fn legacy_websocket_connection_and_writer_finish_before_provider_close() {
     let server = HaystackServer::new(graph.clone())
         .with_application(handle.clone())
         .with_auth(auth)
-        .with_history_provider(Box::new(OwnedProvider(provider.clone())))
         .port(0);
-    let owner = application
+    let owner = with_history(application, provider.clone(), true)
         .owned_resource(server.into_listener())
         .start(&tokio::runtime::Handle::current())
         .unwrap();
@@ -493,10 +471,8 @@ async fn stalled_export_peer_does_not_hold_owned_connections_or_provider_open() 
         drain_timeout: Duration::from_millis(200),
         stop_timeout: Duration::from_secs(2),
     });
-    let server = HaystackServer::new(graph)
-        .with_history_provider(Box::new(OwnedProvider(provider.clone())))
-        .port(0);
-    let owner = application
+    let server = HaystackServer::new(graph).port(0);
+    let owner = with_history(application, provider.clone(), true)
         .owned_resource(server.into_listener())
         .start(&tokio::runtime::Handle::current())
         .unwrap();

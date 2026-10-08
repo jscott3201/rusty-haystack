@@ -36,6 +36,9 @@ impl Budget {
             inverse: 0,
         }
     }
+    pub fn work_remaining(&self) -> usize {
+        self.limits.max_work.saturating_sub(self.work)
+    }
     pub fn retained_remaining(&self) -> usize {
         self.limits.max_retained_bytes.saturating_sub(self.retained)
     }

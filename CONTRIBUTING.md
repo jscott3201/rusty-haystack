@@ -213,7 +213,7 @@ limit at all. Find them at their definitions:
 | Xeto file size | `haystack-core/src/xeto/loader.rs` |
 | SCRAM iteration ceiling | `haystack-core/src/auth.rs` |
 | Watches, watched IDs, encode cache | `haystack-server/src/ws.rs` |
-| History items and `hisWrite` rows | `haystack-server/src/his_store.rs`, `ops/his.rs` |
+| History items and `hisWrite` rows | `haystack-app/src/history_store.rs`, `haystack-server/src/ops/his.rs` |
 | `/api/changes` response rows | `haystack-server/src/ops/changes.rs` |
 | Legacy request body size | `haystack-server/src/app.rs` |
 | Scoped read admission, traversal, output and cursor limits | `haystack-app/src/types.rs`, `service.rs`, `budget.rs`; HTTP collection in `haystack-server/src/ops/shared_read.rs` |

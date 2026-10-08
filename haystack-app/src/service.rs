@@ -319,6 +319,38 @@ impl ReadAdmission {
     pub(crate) fn belongs_to(&self, service: &ReadService) -> bool {
         Arc::ptr_eq(&self.inner, &service.inner)
     }
+    /// Transfers the original registration into a long-lived bounded session.
+    pub(crate) fn into_session(mut self) -> Result<(Principal, Budget), ReadError> {
+        let mut budget = self.budget.take().expect("live admission");
+        budget.check()?;
+        if budget.lease.is_none() {
+            budget.lease = Some(Arc::new(WorkLease {
+                _permit: self.permit.take().expect("live admission"),
+                _guard: self.guard.take(),
+            }));
+        }
+        Ok((self.principal.take().expect("live admission"), budget))
+    }
+    pub(crate) fn budget_mut(&mut self) -> &mut Budget {
+        self.budget.as_mut().expect("live admission")
+    }
+    pub(crate) fn retain_work(&mut self) -> Result<Arc<WorkLease>, ReadError> {
+        let budget = self.budget.as_mut().expect("live admission");
+        budget.check()?;
+        if budget.lease.is_none() {
+            budget.lease = Some(Arc::new(WorkLease {
+                _permit: self.permit.take().expect("live admission"),
+                _guard: self.guard.take(),
+            }));
+        }
+        Ok(budget.lease.as_ref().expect("installed lease").clone())
+    }
+    pub(crate) fn runtime(&self) -> tokio::runtime::Handle {
+        self.inner
+            .lifecycle
+            .as_ref()
+            .map_or_else(tokio::runtime::Handle::current, |life| life.runtime())
+    }
     pub(crate) async fn run_task<T: Send + 'static>(
         mut self,
         task: impl FnOnce(Principal, &mut Budget) -> Result<T, ReadError> + Send + 'static,

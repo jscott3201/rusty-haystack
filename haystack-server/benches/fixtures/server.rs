@@ -1,18 +1,21 @@
 //! Real loopback fixture with bound-address readiness and owned task lifetime.
+use haystack_app::{
+    AllowAll, ApplicationBuilder, ApplicationOwner, HisStore, HistoryLimits, HistoryService,
+    ReadLimits,
+};
 use haystack_client::HaystackClient;
 use haystack_client::transport::http::HttpTransport;
 use haystack_core::graph::SharedGraph;
 use haystack_core::ontology::DefNamespace;
 use haystack_server::HaystackServer;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 
 pub struct TestServer {
     runtime: Runtime,
-    task: Option<JoinHandle<std::io::Result<()>>>,
+    owner: Option<ApplicationOwner>,
     address: SocketAddr,
 }
 
@@ -24,26 +27,46 @@ impl TestServer {
             .enable_all()
             .build()
             .expect("benchmark runtime");
-        let (ready, bound) = oneshot::channel();
+        let builder = ApplicationBuilder::new(
+            graph.clone(),
+            Arc::new(AllowAll),
+            ReadLimits {
+                max_rows: 10_000,
+                max_output_bytes: 8 * 1024 * 1024,
+                ..ReadLimits::default()
+            },
+        )
+        .unwrap();
+        let history = HistoryService::new(
+            builder.handle().read_service(),
+            Arc::new(HisStore::new()),
+            HistoryLimits {
+                total_rows: 10_000,
+                total_bytes: 8 * 1024 * 1024,
+                ..HistoryLimits::default()
+            },
+        )
+        .unwrap();
+        let builder = builder.owned_history(history).unwrap();
         let server = HaystackServer::new(graph)
+            .with_application(builder.handle())
             .with_namespace(DefNamespace::load_standard().expect("standard definitions"))
             .port(0);
-        let task = runtime.spawn(async move {
-            server
-                .run_reporting_addr(move |address| {
-                    ready.send(address).expect("benchmark startup receiver");
-                })
-                .await
-        });
+        let owner = builder
+            .owned_resource(server.into_listener())
+            .start(runtime.handle())
+            .unwrap();
         let address = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), bound)
+            tokio::time::timeout(Duration::from_secs(5), owner.ready())
                 .await
-                .expect("server bind deadline")
-                .expect("server bound successfully")
+                .expect("server readiness deadline")
+                .expect("server ready")
+                .listeners[0]
+                .address
         });
         let fixture = Self {
             runtime,
-            task: Some(task),
+            owner: Some(owner),
             address,
         };
         let client = fixture.connect_http();
@@ -71,19 +94,15 @@ impl TestServer {
 
 impl Drop for TestServer {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-            let outcome = self.runtime.block_on(task);
-            // Preserve an original fixture/test panic while still joining the
-            // cancelled task. On normal teardown, an unexpected server exit fails.
+        if let Some(owner) = self.owner.take() {
+            let report = self.runtime.block_on(async {
+                let _ = owner.close().await;
+                owner.terminated().await
+            });
             if !std::thread::panicking() {
-                assert!(
-                    matches!(outcome, Err(ref error) if error.is_cancelled()),
-                    "unexpected benchmark server exit: {outcome:?}"
-                );
+                assert!(report.close.is_ok(), "benchmark owner close: {report:?}");
             }
         }
-        // Dropping this owned runtime also stops Axum connection tasks. There is
-        // no detached server thread or process-global runtime retaining sockets.
+        // Runtime drops only after real application work and provider cleanup.
     }
 }
