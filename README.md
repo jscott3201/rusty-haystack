@@ -101,6 +101,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 | Crate | Description |
 |-------|-------------|
 | [`haystack-core`](haystack-core/) | Core library: kinds, data (HGrid/HDict/HCol), codecs (Zinc/Trio/JSON/CSV), filter engine, unit conversion, graph with RoaringBitmap/B-tree indexes and ref adjacency, ontology, Xeto, SCRAM auth |
+| [`haystack-app`](haystack-app/) | Shared authorized, bounded entity/catalog reads for embedded Rust and scoped HTTP consumers |
 | [`haystack-server`](haystack-server/) | Axum HTTP API server with 25 endpoints, Tower auth middleware, SCRAM auth, WebSocket watches |
 | [`haystack-client`](haystack-client/) | Async HTTP + WebSocket client with SCRAM handshake, mTLS, token zeroization |
 | [`haystack-cli`](haystack-cli/) | CLI binary (`haystack`): import, export, serve, validate, info, libs, specs, client, user management |
@@ -112,6 +113,7 @@ docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
 |----------|-------------|
 | [Architecture](docs/architecture.md) | System design, crate dependencies, core abstractions |
 | [Getting Started](docs/getting-started.md) | Build, run, first API call, Docker |
+| [Shared reads](docs/shared-reads.md) | Read policy, paging, budgets, wire profiles, and scoped HTTP setup |
 | [Server API](docs/server-api.md) | All HTTP endpoints, auth flow, WebSocket protocol |
 | [Client Library](docs/client.md) | HaystackClient API, transports, authentication |
 | [CLI Reference](docs/cli.md) | All commands, flags, and examples |

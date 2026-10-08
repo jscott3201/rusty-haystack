@@ -17,20 +17,12 @@ pub type SharedState = Arc<AppState>;
 pub struct AppState {
     /// Thread-safe entity graph.
     pub graph: SharedGraph,
-    /// Haystack 4 ontology namespace for def/spec operations.
-    pub namespace: parking_lot::RwLock<DefNamespace>,
-    /// Serializes library load/unload end to end.
-    ///
-    /// A lib mutation updates two things: this `namespace`, and the ontology
-    /// snapshot every graph holds. Those cannot be done under one lock — holding
-    /// `namespace` while taking the graph lock fixes a namespace-then-graph order
-    /// that a custom router can invert, which is an AB/BA deadlock. But updating
-    /// them independently lets two concurrent loads publish snapshots out of order,
-    /// leaving the graph permanently older than the namespace.
-    ///
-    /// This lock resolves both: mutations are serialized, so publishes are ordered,
-    /// while the namespace lock is still released before the graph lock is taken, so
-    /// the two are never held at once.
+    /// Application read authority, present only in the scoped service profile.
+    pub read_service: Option<haystack_app::ReadService>,
+    /// Built-in capability profile, also used by the ops advertisement.
+    pub profile: crate::capabilities::ServiceProfile,
+    /// Serializes legacy library updates. Catalog construction happens outside
+    /// the graph lock, and publication compares the captured catalog generation.
     pub lib_mutations: parking_lot::Mutex<()>,
     /// SCRAM authentication manager.
     pub auth: AuthManager,
@@ -42,4 +34,13 @@ pub struct AppState {
     pub his: Box<dyn HistoryProvider>,
     /// Instant when the server was started, used for uptime calculation.
     pub started_at: std::time::Instant,
+}
+
+impl AppState {
+    /// Capture the graph's sole immutable catalog authority.
+    pub fn namespace(&self) -> Arc<DefNamespace> {
+        self.graph
+            .read(|graph| graph.namespace_arc().cloned())
+            .unwrap_or_else(|| Arc::new(DefNamespace::new()))
+    }
 }

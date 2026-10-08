@@ -28,7 +28,7 @@ pub async fn handle_specs(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let ns = state.namespace.read();
+    let ns = state.namespace();
 
     let lib_filter: Option<String> = if body.trim().is_empty() {
         None
@@ -112,7 +112,7 @@ pub async fn handle_spec(
         _ => return Err(HaystackError::bad_request("qname column required")),
     };
 
-    let ns = state.namespace.read();
+    let ns = state.namespace();
     let spec = ns
         .get_spec(&qname)
         .ok_or_else(|| HaystackError::bad_request(format!("spec '{}' not found", qname)))?;
@@ -176,29 +176,35 @@ pub async fn handle_load_lib(
         _ => return Err(HaystackError::bad_request("source column required")),
     };
 
-    // Serialize lib mutations end to end. Without this, two concurrent loads can
-    // snapshot {A} and {A,B} and publish them to the graph in either order, leaving
-    // the graph permanently behind the namespace until the next mutation.
     let _serialized = state.lib_mutations.lock();
-
-    // Snapshot under the namespace lock, then release it BEFORE touching the graph.
-    // Holding both would establish a namespace-then-graph order here, and a custom
-    // router installed via with_router can legitimately take them graph-then-
-    // namespace — an AB/BA deadlock, and parking_lot has no deadlock detection in
-    // release builds. Nothing below needs the namespace lock held.
-    let (qnames, snapshot) = {
-        let mut ns = state.namespace.write();
-        let qnames = ns
-            .load_xeto_str(&source, &name)
-            .map_err(|e| HaystackError::bad_request(format!("load error: {e}")))?;
-        (qnames, Arc::new(ns.clone()))
-    };
-
-    // Push the new ontology into the graph, or loadLib would succeed and the spec
-    // would still be unfilterable: the server holds its own mutable namespace and
-    // every graph holds an Arc snapshot, so without this the two disagree about
-    // whether the lib exists.
-    state.graph.set_namespace(snapshot);
+    let (snapshot, incarnation, generation) = state.graph.read(|graph| {
+        (
+            graph
+                .namespace_arc()
+                .cloned()
+                .expect("server catalog initialized"),
+            graph.incarnation(),
+            graph.catalog_generation(),
+        )
+    });
+    let mut namespace = (*snapshot).clone();
+    let qnames = namespace
+        .load_xeto_str(&source, &name)
+        .map_err(|e| HaystackError::bad_request(format!("load error: {e}")))?;
+    state
+        .graph
+        .write(|graph| {
+            if graph.incarnation() != incarnation {
+                return Err(haystack_core::graph::entity_graph::CatalogChanged);
+            }
+            graph.compare_set_namespace(generation, Arc::new(namespace))
+        })
+        .map_err(|_| {
+            HaystackError::new(
+                "catalog changed; retry operation",
+                axum::http::StatusCode::CONFLICT,
+            )
+        })?;
 
     let cols = vec![HCol::new("loaded"), HCol::new("specs")];
     let mut result = HDict::new();
@@ -235,20 +241,35 @@ pub async fn handle_unload_lib(
         _ => return Err(HaystackError::bad_request("name column required")),
     };
 
-    // Same discipline as loadLib: serialize the mutation, then snapshot, release,
-    // and only then update the graph.
     let _serialized = state.lib_mutations.lock();
-
-    // Snapshot under the namespace lock, then release it before touching the graph.
-    let snapshot = {
-        let mut ns = state.namespace.write();
-        ns.unload_lib(&name).map_err(HaystackError::bad_request)?;
-        Arc::new(ns.clone())
-    };
-
-    // Without this the graph keeps answering filters from a namespace that still
-    // defines the unloaded lib.
-    state.graph.set_namespace(snapshot);
+    let (snapshot, incarnation, generation) = state.graph.read(|graph| {
+        (
+            graph
+                .namespace_arc()
+                .cloned()
+                .expect("server catalog initialized"),
+            graph.incarnation(),
+            graph.catalog_generation(),
+        )
+    });
+    let mut namespace = (*snapshot).clone();
+    namespace
+        .unload_lib(&name)
+        .map_err(HaystackError::bad_request)?;
+    state
+        .graph
+        .write(|graph| {
+            if graph.incarnation() != incarnation {
+                return Err(haystack_core::graph::entity_graph::CatalogChanged);
+            }
+            graph.compare_set_namespace(generation, Arc::new(namespace))
+        })
+        .map_err(|_| {
+            HaystackError::new(
+                "catalog changed; retry operation",
+                axum::http::StatusCode::CONFLICT,
+            )
+        })?;
 
     let cols = vec![HCol::new("unloaded")];
     let mut result = HDict::new();
@@ -284,7 +305,7 @@ pub async fn handle_export_lib(
         _ => return Err(HaystackError::bad_request("name column required")),
     };
 
-    let ns = state.namespace.read();
+    let ns = state.namespace();
     let xeto_text = ns
         .export_lib_xeto(&name)
         .map_err(HaystackError::bad_request)?;
@@ -317,7 +338,7 @@ pub async fn handle_validate(
     let grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("decode error: {e}")))?;
 
-    let ns = state.namespace.read();
+    let ns = state.namespace();
 
     let cols = vec![
         HCol::new("entity"),

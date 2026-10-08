@@ -31,6 +31,7 @@
 pub mod actions;
 pub mod app;
 pub mod auth;
+pub mod capabilities;
 pub mod content;
 pub mod cors;
 pub mod demo;
@@ -42,4 +43,5 @@ pub mod state;
 pub mod ws;
 
 pub use app::HaystackServer;
+pub use capabilities::ServiceProfile;
 pub use his_provider::HistoryProvider;

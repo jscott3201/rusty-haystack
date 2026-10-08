@@ -102,7 +102,7 @@ pub fn encode_response_grid(
 }
 
 /// Normalize a Content-Type header to a bare MIME type for codec lookup.
-fn normalize_content_type(content_type: &str) -> &str {
+pub(crate) fn normalize_content_type(content_type: &str) -> &str {
     let ct = content_type.trim();
     if ct.is_empty() {
         return DEFAULT_MIME;

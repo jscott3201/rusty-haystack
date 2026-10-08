@@ -1,5 +1,9 @@
 # Server API Reference
 
+This page describes the legacy compatibility profile. Embedders selecting
+`HaystackServer::with_scoped_reads` use the restricted operation set, policy,
+paging, and budget contracts documented in [shared reads](shared-reads.md).
+
 The Haystack server (built on Axum) exposes all endpoints under `/api`. All POST endpoints accept and return grids in the negotiated wire format.
 
 ## Content Negotiation

@@ -171,13 +171,10 @@ Two traps, both of which CI works around explicitly:
 
 ```
 haystack-core          types, codecs, graph, filter, ontology, xeto, auth
-  ↑
-haystack-client        async HTTP/WebSocket client
-  ↑
-haystack-server        Axum HTTP API, WebSocket watches  (also depends on core)
-  ↑
-haystack-cli           the `haystack` binary            (depends on all three)
-
+haystack-app           authorized bounded reads         (depends on core)
+haystack-client        async HTTP/WebSocket client      (depends on core)
+haystack-server        Axum HTTP API, WebSocket watches (depends on core/app/client)
+haystack-cli           the `haystack` binary            (depends on core/client/server)
 rusty-haystack         PyO3 bindings, cdylib            (depends on core/client/server)
 ```
 
@@ -218,7 +215,8 @@ limit at all. Find them at their definitions:
 | Watches, watched IDs, encode cache | `haystack-server/src/ws.rs` |
 | History items and `hisWrite` rows | `haystack-server/src/his_store.rs`, `ops/his.rs` |
 | `/api/changes` response rows | `haystack-server/src/ops/changes.rs` |
-| Request body size | `haystack-server/src/app.rs` |
+| Legacy request body size | `haystack-server/src/app.rs` |
+| Scoped read admission, traversal, output and cursor limits | `haystack-app/src/types.rs`, `service.rs`, `budget.rs`; HTTP collection in `haystack-server/src/ops/shared_read.rs` |
 | Graph changelog capacity | `haystack-core/src/graph/changelog.rs` |
 | Client in-flight requests, decompressed payload size | `haystack-client/src/transport/ws.rs` |
 

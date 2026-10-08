@@ -125,7 +125,7 @@ fn resolve_path<'a>(path: &Path, entity: &'a HDict, ctx: Ctx<'a>) -> Option<&'a 
 }
 
 /// Compare two Kind values using the given comparison operator.
-fn compare(actual: &Kind, op: &CmpOp, expected: &Kind) -> bool {
+pub(crate) fn compare(actual: &Kind, op: &CmpOp, expected: &Kind) -> bool {
     match op {
         CmpOp::Eq => match (actual, expected) {
             (Kind::Float(a), Kind::Float(b)) => a.value() == b.value(),

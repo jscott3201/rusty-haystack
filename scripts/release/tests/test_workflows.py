@@ -80,6 +80,21 @@ class WorkflowContracts(unittest.TestCase):
         self.assertNotRegex(manual,r'(?m)^  (push|pull_request|workflow_call):')
         self.assertNotRegex(manual,r'(secrets\.|id-token:|contents: write|gh-action-pypi-publish|action-gh-release|cargo publish)')
 
+    def test_crate_publication_order_includes_application_dependency(self):
+        publication=steps(jobs(self.workflows['release.yml'])['publish-crates'])
+        published=[]
+        for index,step in enumerate(publication):
+            match=re.search(r'run: cargo publish -p ([a-z-]+)',step)
+            if match:
+                published.append(match[1])
+                if match[1] != 'rusty-haystack-cli':
+                    self.assertIn('run: sleep 30',publication[index+1])
+        self.assertEqual(published,[
+            'rusty-haystack-core','rusty-haystack-client','rusty-haystack-app',
+            'rusty-haystack-server','rusty-haystack-cli',
+        ])
+        self.assertIn('COPY haystack-app/ haystack-app/',(ROOT/'Dockerfile').read_text())
+
     def test_live_authority_and_producer_identity_contract(self):
         self.check(self.workflows)
 

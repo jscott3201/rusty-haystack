@@ -6,6 +6,7 @@ RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY haystack-core/ haystack-core/
+COPY haystack-app/ haystack-app/
 COPY haystack-server/ haystack-server/
 COPY haystack-client/ haystack-client/
 COPY haystack-cli/ haystack-cli/

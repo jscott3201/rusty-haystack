@@ -192,6 +192,14 @@ jobs:
       - name: Wait for index
         run: sleep 30
 
+      - name: Publish rusty-haystack-app
+        run: cargo publish -p rusty-haystack-app
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for index
+        run: sleep 30
+
       - name: Publish rusty-haystack-server
         run: cargo publish -p rusty-haystack-server
         env:
