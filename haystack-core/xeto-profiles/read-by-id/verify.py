@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Verify retained bytes and reproduce the documented pinned source extraction.
 
-No network or third-party Python dependencies. With --output DIR, write the five
+No network or third-party Python dependencies. With --output DIR, write the
 selected sources for inspection; without it, only verify and report their hashes.
+A function source that names its selected declarations (the partial ph.api
+navigation selection) must reproduce exactly those Func members.
 The Rust admission loader reproduces these selections directly from embedded raw
 files, so generated snippets are not a second runtime authority.
 """
@@ -60,6 +62,10 @@ def main():
                 raise SystemExit(f"invalid extraction range: {entry['path']}")
             pieces.append("\n".join(lines[first - 1:last]) + "\n\n")
         text = re.sub(r'BuildVar\s+"([^"]+)"', expand, "".join(pieces))
+        if entry["role"] == "functions" and entry.get("declarations"):
+            members = sorted(f"{entry['library']}::{name}" for name in re.findall(r"^  (\w+): Func\b", text, re.M))
+            if members != sorted(entry["declarations"]):
+                raise SystemExit(f"function selection mismatch: {entry['path']}: {members}")
         digest = hashlib.sha256(text.encode()).hexdigest()
         name = f"{entry['library']}-{entry['role']}.xeto"
         if args.output:

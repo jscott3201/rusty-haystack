@@ -56,6 +56,7 @@ fn selected_system_functions_and_complete_keyed_timezone_are_admitted() {
             .map(|s| s.spec.qname.as_str())
             .collect::<Vec<_>>(),
         [
+            "ph.api::nav",
             "sys.api::about",
             "sys.api::close",
             "sys.api::filetypes",

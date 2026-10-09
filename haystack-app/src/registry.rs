@@ -26,6 +26,7 @@ pub(crate) const BINDINGS: &[(&str, Handler)] = &[
     ("sys.api::close", Handler::Close),
     ("sys.api::libs", Handler::Libs),
     ("sys.api::filetypes", Handler::Filetypes),
+    ("ph.api::nav", Handler::Nav),
 ];
 
 /// Stable identity supplied to the explicit per-function execution decision.
@@ -60,6 +61,17 @@ pub(crate) enum Handler {
     Libs,
     Filetypes,
     Ops,
+    Nav,
+}
+impl Handler {
+    /// Coarse operation permission a handler needs beyond `Read`, so the
+    /// shared read operation's denial also hides its typed binding.
+    fn operation(self) -> Option<ReadOperation> {
+        match self {
+            Self::Nav => Some(ReadOperation::Nav),
+            _ => None,
+        }
+    }
 }
 pub(crate) struct Entry {
     pub identity: FunctionIdentity,
@@ -75,6 +87,10 @@ impl Entry {
     fn visible(&self, policy: &dyn PolicySnapshot) -> bool {
         self.op
             && policy.operation(ReadOperation::Read)
+            && self
+                .handler
+                .operation()
+                .is_none_or(|operation| policy.operation(operation))
             && policy.catalog(CatalogKind::Spec, &self.identity.qname)
             && policy.function(&self.identity)
     }
@@ -434,6 +450,16 @@ fn validate_binding(declaration: &AdmittedSpec, handler: Handler) -> Result<(), 
                         Some("sys.api::FiletypeInfo"),
                     )])
             }
+            Handler::Nav => {
+                // ph.api::nav: the opGrid request grid is the single parameter.
+                declaration.spec.qname == "ph.api::nav"
+                    && declaration.spec.meta.get("opGrid") == Some(&Kind::Marker)
+                    && declaration.spec.meta.get("noSideEffects") == Some(&Kind::Marker)
+                    && shape(&[
+                        ("req", "sys::Grid", false, false, None),
+                        ("returns", "sys::Grid", false, false, None),
+                    ])
+            }
             Handler::Ops => {
                 slots.len() == 1
                     && slots[0].name == "returns"
@@ -659,6 +685,56 @@ mod tests {
             registry
                 .resolve("b::same", &catalog_hidden, &mut fresh())
                 .is_err()
+        );
+    }
+    #[test]
+    fn nav_binding_requires_op_grid_side_effect_free_grid_signature() {
+        let catalog = Catalog::load_http_pinned().unwrap();
+        let nav = catalog.declaration("ph.api::nav").unwrap();
+        validate_binding(nav, Handler::Nav).unwrap();
+        for marker in ["op", "opGrid", "noSideEffects"] {
+            let mut altered = nav.clone();
+            altered.spec.meta.remove(marker);
+            assert!(
+                validate_binding(&altered, Handler::Nav).is_err(),
+                "{marker}"
+            );
+        }
+        for (slot, ty) in [("req", "sys::Dict"), ("returns", "sys::Dict")] {
+            let mut altered = nav.clone();
+            altered
+                .spec
+                .slots
+                .iter_mut()
+                .find(|s| s.name == slot)
+                .unwrap()
+                .type_ref = Some(ty.into());
+            assert!(validate_binding(&altered, Handler::Nav).is_err(), "{slot}");
+        }
+        assert!(validate_binding(nav, Handler::ReadAll).is_err());
+        let read_all = catalog.declaration("sys.api::readAll").unwrap();
+        assert!(validate_binding(read_all, Handler::Nav).is_err());
+        // The tenth fixed binding is discoverable, GET-capable and whole-grid.
+        assert_eq!(BINDINGS.len(), 10);
+        assert!(
+            crate::ReadService::supported_functions().any(|pair| pair == ("nav", "ph.api::nav"))
+        );
+        let registry = Registry::pinned().unwrap();
+        let entry = registry
+            .entries
+            .iter()
+            .find(|entry| entry.handler == Handler::Nav)
+            .unwrap();
+        assert_eq!(entry.identity.source_path, "src/xeto/ph.api/funcs.xeto");
+        assert_eq!(entry.signature, "(req: Grid) -> Grid");
+        assert_eq!(entry.permits_method(false), Ok(()));
+        assert!(entry.wire.op_grid);
+        assert!(
+            registry
+                .entries
+                .iter()
+                .filter(|entry| entry.handler != Handler::Nav)
+                .all(|entry| !entry.wire.op_grid)
         );
     }
     #[test]

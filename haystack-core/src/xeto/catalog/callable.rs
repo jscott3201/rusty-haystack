@@ -27,6 +27,10 @@ pub struct CallableContext {
     pub result: String,
     pub strict_arguments: bool,
     pub function: String,
+    /// The declaration carries `opGrid`: a request arriving as a Haystack grid
+    /// is passed whole as the single Grid parameter instead of mapping its
+    /// first row's cells to arguments by name. Admission guarantees the shape.
+    pub op_grid: bool,
 }
 impl CallableContext {
     pub fn new(profile: &Catalog, declaration: &AdmittedSpec) -> Result<Self, ProfileError> {
@@ -209,12 +213,26 @@ impl CallableContext {
                 "result type is not representable",
             ));
         }
+        let op_grid = declaration.spec.meta.get("opGrid") == Some(&Kind::Marker);
+        if op_grid
+            && (parameters.len() != 1
+                || parameters.values().any(|ty| ty != "sys::Grid")
+                || declaration.spec.meta.get("op") != Some(&Kind::Marker))
+        {
+            return Err(unsupported(
+                profile,
+                function,
+                None,
+                "opGrid requires an op with one Grid parameter",
+            ));
+        }
         Ok(Self {
             context,
             function: declaration.spec.qname.clone(),
             parameters,
             result,
             strict_arguments: declaration.spec.qname != "sys.api::readById",
+            op_grid,
         })
     }
 }

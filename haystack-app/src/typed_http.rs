@@ -635,6 +635,7 @@ pub(crate) fn decode(
                         let envelope: Value =
                             serde_json::from_str(text).map_err(|_| ApiError::InvalidArgs)?;
                         if profile.strict_arguments
+                            && !profile.op_grid
                             && let Some(row) = envelope
                                 .get("rows")
                                 .and_then(Value::as_array)
@@ -658,43 +659,52 @@ pub(crate) fn decode(
                         .ok_or(ApiError::Internal)?
                         .decode_grid(text)
                         .map_err(|_| ApiError::InvalidArgs)?;
-                    if !grid.rows.is_empty()
-                        && profile.strict_arguments
-                        && grid
-                            .cols
-                            .iter()
-                            .any(|col| !profile.parameters.contains_key(&col.name))
-                    {
-                        return Err(ApiError::InvalidArgs);
-                    }
-                    if let Some(row) = grid.rows.first() {
-                        if profile.strict_arguments
-                            && row
-                                .tag_names()
-                                .any(|name| !profile.parameters.contains_key(name))
+                    if profile.op_grid {
+                        // sys::Spec `opGrid`: a grid body is the request grid
+                        // itself, passed whole as the single Grid parameter
+                        // (HttpApi "POST Requests"). Its rows, columns and
+                        // metadata are the argument, not named arguments.
+                        let name = profile.parameters.keys().next().ok_or(ApiError::Internal)?;
+                        args.set(name, Kind::Grid(Box::new(grid)));
+                    } else {
+                        if !grid.rows.is_empty()
+                            && profile.strict_arguments
+                            && grid
+                                .cols
+                                .iter()
+                                .any(|col| !profile.parameters.contains_key(&col.name))
                         {
                             return Err(ApiError::InvalidArgs);
                         }
-                        for (name, expected) in &profile.parameters {
-                            if let Some(value) = row.get(name)
-                                && !matches!(value, Kind::Null)
+                        if let Some(row) = grid.rows.first() {
+                            if profile.strict_arguments
+                                && row
+                                    .tag_names()
+                                    .any(|name| !profile.parameters.contains_key(name))
                             {
-                                // Legacy Grid codecs have no native Filter scalar.
-                                // Adapt only their text; Jeto's explicit boxed type
-                                // must survive decoding for native fitting.
-                                let value = match (expected.as_str(), value) {
-                                    ("sys::Filter", Kind::Str(text)) => {
-                                        jeto::decode_scalar_text_metered(
-                                            text,
-                                            &profile.context,
-                                            expected,
-                                            &mut JetoMeter(budget),
-                                        )
-                                        .map_err(|e| codec_error(e, false))?
-                                    }
-                                    _ => value.clone(),
-                                };
-                                args.set(name, value);
+                                return Err(ApiError::InvalidArgs);
+                            }
+                            for (name, expected) in &profile.parameters {
+                                if let Some(value) = row.get(name)
+                                    && !matches!(value, Kind::Null)
+                                {
+                                    // Legacy Grid codecs have no native Filter scalar.
+                                    // Adapt only their text; Jeto's explicit boxed type
+                                    // must survive decoding for native fitting.
+                                    let value = match (expected.as_str(), value) {
+                                        ("sys::Filter", Kind::Str(text)) => {
+                                            jeto::decode_scalar_text_metered(
+                                                text,
+                                                &profile.context,
+                                                expected,
+                                                &mut JetoMeter(budget),
+                                            )
+                                            .map_err(|e| codec_error(e, false))?
+                                        }
+                                        _ => value.clone(),
+                                    };
+                                    args.set(name, value);
+                                }
                             }
                         }
                     }
@@ -750,13 +760,22 @@ pub(crate) fn encode(
             .map_err(|_| ApiError::NotAcceptable)?
         }
         Media::Grid(codec) => {
-            let mut grid = match value {
+            // Only the bridge grid synthesized for a Dict/null/None result
+            // drops its generated page marker. A native Grid result keeps
+            // its own metadata, such as navigation's truncation `complete`.
+            let grid = match value {
                 Kind::Grid(grid) => *grid,
-                Kind::Dict(dict) => output::grid(vec![*dict], true, None, budget)?,
-                Kind::Null | Kind::None => output::grid(vec![], true, None, budget)?,
-                _ => return Err(ApiError::Internal),
+                other => {
+                    let rows = match other {
+                        Kind::Dict(dict) => vec![*dict],
+                        Kind::Null | Kind::None => vec![],
+                        _ => return Err(ApiError::Internal),
+                    };
+                    let mut grid = output::grid(rows, true, None, budget)?;
+                    grid.meta.remove_tag("complete");
+                    grid
+                }
             };
-            grid.meta.remove_tag("complete");
             let ReadOutput::H4 { body, .. } =
                 output::encode(grid, OutputProfile::H4(codec), budget)?
             else {
@@ -810,6 +829,9 @@ fn legacy_metadata(value: &mut Kind, function: &str, budget: &mut Budget) -> Res
         if matches!(function, "sys.api::libs" | "sys.api::filetypes") {
             grid.meta.remove_tag("of");
         }
+        // ph.api::nav needs no projection: its navId Str, id Ref and dis
+        // cells and its Bool `complete` page marker are already the H4 nav
+        // shape, so version 4 serves them unchanged.
     }
     Ok(())
 }

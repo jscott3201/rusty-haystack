@@ -3,8 +3,10 @@
 The installed `sys.api` functions are `readById`, `readByIds`, `read`, `readAll`,
 `about`, `close`, `ops`, `libs`, and `filetypes`. Each is available at its simple
 and qualified `/api/` name. Select version 5 to use typed dispatch on names
-shared with legacy H4 routes, or use the qualified name explicitly.
-The nine production handlers are a fixed application inventory; routes derive
+shared with legacy H4 routes, or use the qualified name explicitly. The tenth
+binding, [`ph.api::nav`](#navigation), is served only at `/api/ph.api::nav`:
+`/api/nav` remains the scoped H4 navigation route for every version.
+The ten production handlers are a fixed application inventory; routes derive
 from it, never from a parsed catalog. Their admitted signatures, codec contexts,
 selected library versions and source provenance come from the graph's current
 `ActivatedCatalog` observation. Binding rejects duplicate qname/version bindings
@@ -16,9 +18,13 @@ verifies that observation is still current before any graph evaluation and
 otherwise fails with `UnavailableErr`. An owned result already produced may
 encode with its retained context. `ReadService::typed_functions()` returns an
 owned retained view of the current bindings. The bootstrap profile and its
-expanded HTTP closure remain explicit subsets of `sys` and `sys.api`; neither
-claims complete library admission. The shared [contextual Jeto codec](jeto.md)
-handles admitted native values.
+expanded HTTP closure remain explicit subsets of `sys` and `sys.api`; the HTTP
+closure also admits `ph.api` as a partial library identity holding only `nav`,
+with `ph` and `sys.refs` as dependency-only identities. None claims complete
+library admission. Because the managed namespace is derived from the admitted
+selection, scoped H4 `specs`/`spec` reads now list `ph.api::nav` and typed `libs`
+lists `ph.api`; H4 `libs` (definition libraries) is unchanged. The shared
+[contextual Jeto codec](jeto.md) handles admitted native values.
 
 `ReadService::activate_catalog` (trusted embedding only) replaces the observation
 with a selected closure such as the [protocol-metadata
@@ -121,7 +127,9 @@ bare `application/json` as Hayson; version 5 interprets it as Jeto.
 `application/vnd.haystack+json` (optionally `version=4`) selects Hayson in either
 version. `text/zinc` accepts grid arguments. `text/jeto` is accepted in version 5.
 Grid input uses only the first row's declared arguments; null cells apply the
-parameter's own default just as absent cells do. `ops`, `about`, `close`, `libs`,
+parameter's own default just as absent cells do. The exception is an `opGrid`
+function (`ph.api::nav`), whose grid body binds whole as its single Grid
+parameter. `ops`, `about`, `close`, `libs`,
 and `filetypes` have zero arguments:
 undeclared names, including `returns`, are rejected before null-to-absence
 normalization, for named JSON, GET parameters and the supported first-row grid
@@ -172,7 +180,7 @@ cannot preserve.
 `noSideEffects:Marker?` are optional. Signatures are descriptive, not a client
 schema. Empty grids fit, while wrong native kinds, missing required row fields
 and incorrectly typed optional fields fail fitting. Structural row specifications
-remain compatible with contextual Jeto. The production entries are the nine functions listed above, subject to caller policy.
+remain compatible with contextual Jeto. The production entries are the ten functions listed above, subject to caller policy.
 
 A null, missing or denied id is indistinguishable: `checked=false` returns null;
 `checked=true` produces the same UnknownEntity error for both. Version-4
@@ -184,7 +192,7 @@ AmbiguousFuncErr includes only bounded visible candidates.
 This bounded error path remains available after a request budget or deadline
 is exhausted. Unsupported methods, including HEAD, return 501. GET requires the
 exact `noSideEffects` marker on the executable entry; absence of a side-effects
-flag or read permission cannot grant GET. `close` requires POST; the other eight
+flag or read permission cannot grant GET. `close` requires POST; the other nine
 bindings carry the marker. The dispatcher rejects GET with
 `MethodNotAllowedErr` before executing a binding without that marker. No typed
 watchPoll binding is installed.
@@ -239,6 +247,96 @@ nominal identities, so requesting legacy media for them returns 406 under this
 preview's exact-output restriction. This is narrower than the general pinned
 legacy-media bridge. Unqualified H4 about/read/libs retain their separate existing
 compatibility adapters.
+
+## Navigation
+
+`ph.api::nav` is the selected `Func <op, opGrid, noSideEffects> { req: Grid,
+returns: Grid }` from the pinned `ph.api` library, admitted as a [partial library
+identity](../haystack-core/xeto-profiles/read-by-id/README.md#selected-navigation-function-m2-pr05).
+It binds only when its admitted signature carries all three markers and exactly
+`req: Grid` and `returns: Grid`. Its typed route is the qualified
+`/api/ph.api::nav`; the shared simple name `/api/nav` is an existing H4 capability
+and keeps serving scoped H4 navigation unchanged, including for explicit
+version 5 requests. Typed `ops` lists the qualified binding, while H4 `ops`
+keeps its single `nav` capability row. Discovery and invocation additionally
+require the policy's `ReadOperation::Nav` decision, so a principal denied H4
+navigation neither sees nor calls the typed binding (`UnknownFuncErr`).
+
+The request follows the pinned HTTP chapter's `opGrid` rule. A Haystack grid
+body (Zinc, Hayson, or version 4 `application/json`) is the request grid itself
+and binds whole as `req`; its first row is not mapped to named arguments. A
+version 5 Jeto body is a named request whose `req` member is a Jeto grid, and a
+GET passes that grid as JSON query text. `req` is required: an empty body, `{}`
+or a GET without it is `InvalidArgsErr`, as are other names such as `navId`.
+The request grid is either empty (any placeholder columns, such as Zinc's
+`empty`) or one row whose only column is `navId`. An empty grid, a null or
+absent navId and an empty string select the root; a Str or Ref navId selects
+that entity. Other navId kinds, additional rows or columns, and the H4 paging
+and projection controls `limit`, `cursor` and `select` in grid metadata are
+rejected as `InvalidArgsErr` rather than ignored.
+
+Execution uses the request's retained catalog observation and verifies it is
+still the graph's current one before any graph read; a request that captured an
+observation replaced by an activation fails with `UnavailableErr` and returns no
+rows. The root lists the caller's visible sites: records the authorized View
+returns with a `site` tag after entity and tag masking. A child level is one
+inverse hop: the target must pass the entity and reference decisions, every
+inbound edge (including denied and duplicate ones) is charged before any record
+copy, each source is masked first, and its relation must survive masking as a
+top-level non-id Ref to the target. That is the scoped H4 relation, so nested
+references are not navigation edges. Traversal never recurses, so reference
+cycles and self references terminate; a source related through several tags
+appears once. Rows follow entity id (B-tree) order.
+
+Rows use the H4 `nav_row` shape: `navId` (the entity id as Str), `id` (the
+masked Ref, with display only when policy allows) and `dis`. The result grid
+always carries a `navId` column; `id` and `dis` columns appear only when rows
+carry them, and a row whose `id` tag is masked is a leaf with no navId. Grid
+metadata `complete` is a Bool. One request returns at most `ReadLimits::max_rows`
+rows: a larger level is truncated deterministically to its first rows in id
+order with `complete: false`. There is no typed continuation cursor; scoped H4
+`/api/nav` keeps its cursor paging, whose first page under the same bound has the
+same rows, and its cursors become stale when the catalog generation changes.
+A hidden, missing, reference-denied, unsupported (for example path-like) or
+childless target is the same empty complete page, so the response is not an
+existence oracle; version 4 receives an ordinary empty grid, not an error grid.
+Truncation applies to rows only; the request budgets still bind, and any
+budget failure is one atomic `InvalidArgsErr` with no partial rows. The root
+scans every entity in id order at one candidate each, from what remains of
+`max_candidates` after function resolution spends one per fixed binding (ten
+today, so 9,990 entities at the default 10,000), but copies a record through
+the masked View only when its raw form has `site` and the policy allows the
+entity and its `site` tag. Masking
+only removes tags, so this skip changes no result; it keeps non-site records
+from consuming the copy budgets. A child level charges every inbound edge,
+including denied and duplicate edges, against `max_inverse_edges` (default
+4,096) before copying any record, so a target with more inbound edges fails
+even though at most `max_rows` rows would return. The other budgets are
+conservative reservations computed from the charges, not heap measurements,
+and were observed on 9-tag point records under default limits:
+
+| Stage | Per row or record | Default budget |
+| --- | --- | --- |
+| Masked copy of a candidate | about 128 bytes plus 700 bytes retained per visible tag (about 6.4 KiB), 2 value nodes per tag | `max_retained_bytes` 16 MiB, `max_value_nodes` 100,000 |
+| Navigation row | about 1.7 KiB retained, about 260 work units including its masked copy | |
+| Exact Jeto output of a `navId`/`id`/`dis` row | about 3,800 work units and 5.9 KiB retained | `max_work` 4,000,000 |
+
+At these rates the work budget binds first for version 5 Jeto output: a level
+of about 980 or more such rows fails rather than truncating at the default
+`max_rows` of 1,000, while version 4 H4 output of the same level truncates at
+1,000 rows. Deployments that need full default-size Jeto pages raise `max_work`
+or lower `max_rows`. Records with more than about 13 visible tags (about 700
+bytes each per masked candidate) exhaust the retained budget before work, so
+raising `max_work` alone is not enough for them. Before the root skip, masking
+every non-site record exhausted the retained budget near 2,600 such records.
+
+Result fitting precedes encoding. Exact Jeto output boxes the `id` Ref, so
+`box=none` returns `NotAcceptableErr` (406) whenever a row carries one. The
+version 4 bridge needs no legacy projection: native Grid results now keep their
+own metadata through the H4 grid bridge, so nav's `complete` marker reaches
+H4 clients, while the bridge grid synthesized for Dict, null and None results
+still omits it. Watches, `pointWrite`, `hisRead` and `hisWrite` from the same
+pinned file are not admitted or bound.
 
 ## Authentication and ownership
 
