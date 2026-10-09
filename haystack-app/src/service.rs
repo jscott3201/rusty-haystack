@@ -1,4 +1,5 @@
 mod activation;
+mod nav;
 mod system;
 use crate::{
     budget::Budget,
@@ -780,6 +781,9 @@ impl Inner {
             crate::registry::Handler::About => self.about(&registry, &principal, budget)?,
             crate::registry::Handler::Libs => self.libraries(&registry, policy.as_ref(), budget)?,
             crate::registry::Handler::Filetypes => self.filetypes(request.version, budget)?,
+            crate::registry::Handler::Nav => {
+                self.nav(&registry, args.values(), policy.as_ref(), budget)?
+            }
             crate::registry::Handler::Close => {
                 if session.is_none() {
                     return Err(ApiError::AuthRequired);

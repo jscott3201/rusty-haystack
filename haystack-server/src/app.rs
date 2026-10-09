@@ -382,6 +382,9 @@ impl HaystackServer {
         // Routes come from the fixed supported-handler inventory; the
         // current catalog observation drives dispatch and discovery per
         // request, so a newly parsed declaration never creates a route.
+        // A simple name that is already an H4 capability path keeps that
+        // route: typed `ph.api::nav` is served only at its qualified path and
+        // `/api/nav` stays scoped H4 navigation for every protocol version.
         if state.application.is_some() {
             for (name, qname) in haystack_app::ReadService::supported_functions() {
                 for name in [name, qname] {

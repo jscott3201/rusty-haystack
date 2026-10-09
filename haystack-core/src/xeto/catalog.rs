@@ -33,7 +33,11 @@ const HTTP_PROFILE: &str = "pinned-xeto-readById-http";
 const PROTOCOL_PROFILE: &str = "pinned-xeto-protocol-metadata";
 const PROTOCOL_MANIFEST: &str =
     include_str!("../../xeto-profiles/read-by-id/protocol-manifest.json");
-const PROTOCOL_RAW: &[(&str, &str)] = &[
+/// The selected `ph.api` navigation closure shared by the HTTP and protocol
+/// profiles: its library metadata, the dependency-only `ph`/`sys.refs`
+/// identities it requires, and the unchanged function source. Only `nav` is
+/// selected from that file; watches, pointWrite and history stay unadmitted.
+const NAV_RAW: &[(&str, &str)] = &[
     (
         "src/xeto/ph/lib.xeto",
         include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph/lib.xeto"),
@@ -42,6 +46,19 @@ const PROTOCOL_RAW: &[(&str, &str)] = &[
         "src/xeto/sys.refs/lib.xeto",
         include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/sys.refs/lib.xeto"),
     ),
+    (
+        "src/xeto/ph.api/lib.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph.api/lib.xeto"),
+    ),
+    (
+        "src/xeto/ph.api/funcs.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph.api/funcs.xeto"),
+    ),
+];
+/// Function members admitted from `ph.api`; the rest of that augmentation is
+/// outside every selection.
+const PH_API_FUNCTIONS: &[&str] = &["nav"];
+const PROTOCOL_RAW: &[(&str, &str)] = &[
     (
         "src/xeto/ph.protocols/lib.xeto",
         include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph.protocols/lib.xeto"),
@@ -106,7 +123,7 @@ const HTTP_ERRORS: &[&str] = &[
     "UnsupportedMediaTypeErr",
     "UnsupportedVersionErr",
 ];
-const HTTP_META: &[&str] = &["of", "unitless", "key"];
+const HTTP_META: &[&str] = &["of", "unitless", "key", "opGrid"];
 const HTTP_MANIFEST: &str = include_str!("../../xeto-profiles/read-by-id/http-manifest.json");
 const HTTP_RAW: &[(&str, &str)] = &[
     (
@@ -320,12 +337,7 @@ impl Catalog {
     pub fn load_protocol_pinned() -> Result<Self, ProfileError> {
         let provenance = serde_json::from_str(PROTOCOL_MANIFEST)
             .map_err(|e| source_error("protocol-manifest.json", e.to_string()))?;
-        let raw: Vec<_> = RAW
-            .iter()
-            .chain(HTTP_RAW)
-            .chain(PROTOCOL_RAW)
-            .copied()
-            .collect();
+        let raw: Vec<_> = http_raw().chain(PROTOCOL_RAW.iter().copied()).collect();
         let sources = extract_sources(&provenance, &raw)?;
         Self::admit(provenance, sources)
     }
@@ -340,11 +352,13 @@ impl Catalog {
         Self::admit(provenance, sources)
     }
 
-    /// Admit the reachable HTTP error and ops closures alongside readById. This remains an explicit subset of both libraries.
+    /// Admit the reachable HTTP error and ops closures alongside readById, plus
+    /// the selected `ph.api::nav` declaration. Every library remains an explicit
+    /// subset; `ph` and `sys.refs` are dependency-only identities here.
     pub fn load_http_pinned() -> Result<Self, ProfileError> {
         let provenance = serde_json::from_str(HTTP_MANIFEST)
             .map_err(|e| source_error("http-manifest.json", e.to_string()))?;
-        let raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+        let raw: Vec<_> = http_raw().collect();
         let sources = extract_sources(&provenance, &raw)?;
         Self::admit(provenance, sources)
     }
@@ -920,7 +934,8 @@ impl Catalog {
                         ));
                     }
                     let def = &ast.specs[0];
-                    if identity.library != "sys.api"
+                    let ph_api = http && identity.library == "ph.api";
+                    if !(identity.library == "sys.api" || ph_api)
                         || !def.is_augmentation
                         || def.name != "Funcs"
                         || def.base.is_some()
@@ -933,11 +948,35 @@ impl Catalog {
                             "only the selected +Funcs augmentation is admitted",
                         ));
                     }
+                    // An explicit manifest selection must name exactly the
+                    // parsed members; the ph.api selection must name one.
+                    let found: BTreeSet<_> = def
+                        .slots
+                        .iter()
+                        .map(|member| format!("{}::{}", identity.library, member.name))
+                        .collect();
+                    let expected: BTreeSet<_> = identity.declarations.iter().cloned().collect();
+                    if (ph_api || !identity.declarations.is_empty())
+                        && (expected.len() != identity.declarations.len()
+                            || found != expected
+                            || def.slots.len() != found.len())
+                    {
+                        return Err(resolve_error(
+                            identity,
+                            "selection",
+                            "complete function selection differs from manifest",
+                        ));
+                    }
                     let mut members = Vec::new();
                     validate_slot_syntax(&def.slots, identity, "+Funcs")?;
                     for member in &def.slots {
-                        if !(member.name == "readById"
-                            || http && HTTP_FUNCTIONS.contains(&member.name.as_str()))
+                        let admitted = if ph_api {
+                            PH_API_FUNCTIONS.contains(&member.name.as_str())
+                        } else {
+                            member.name == "readById"
+                                || http && HTTP_FUNCTIONS.contains(&member.name.as_str())
+                        };
+                        if !admitted
                             || member.is_global
                             || member.is_query
                             || member.is_marker
@@ -986,7 +1025,16 @@ impl Catalog {
                 });
             }
         }
-        if pragmas.len() != if protocol { 5 } else { 2 } {
+        // sys, sys.api; HTTP adds ph.api with its dependency-only ph and
+        // sys.refs identities; the protocol profile adds ph.protocols.
+        let expected_libraries = if protocol {
+            6
+        } else if http {
+            5
+        } else {
+            2
+        };
+        if pragmas.len() != expected_libraries {
             return Err(source_error(PROFILE, "unadmitted library"));
         }
         for (name, (pragma, source)) in &pragmas {
@@ -1222,6 +1270,11 @@ impl Catalog {
     }
 }
 
+/// Raw inventory of the HTTP profile; the protocol profile extends it.
+fn http_raw() -> impl Iterator<Item = (&'static str, &'static str)> {
+    RAW.iter().chain(HTTP_RAW).chain(NAV_RAW).copied()
+}
+
 fn source_error(path: impl Into<String>, message: impl Into<String>) -> ProfileError {
     ProfileError::Source {
         path: path.into(),
@@ -1419,7 +1472,7 @@ type Pragmas = BTreeMap<String, (LibPragma, ProfileSource)>;
 fn validate_pragma(source: &ProfileSource, pragma: &LibPragma) -> Result<(), ProfileError> {
     if !matches!(
         source.library.as_str(),
-        "sys" | "sys.api" | "ph" | "ph.protocols" | "sys.refs"
+        "sys" | "sys.api" | "ph" | "ph.api" | "ph.protocols" | "sys.refs"
     ) || !pragma.name.is_empty()
         || pragma.version != "5.0.0"
         || pragma.meta.get("maturity") != Some(&Kind::Str("alpha".into()))
@@ -1684,6 +1737,7 @@ fn validate_closure(
                 &["returns"]
             }
             "sys.api::readByIds" if http => &["ids", "checked", "returns"],
+            "ph.api::nav" if http => &["req", "returns"],
             "sys.api::read" if http => &["filter", "checked", "returns"],
             "sys.api::readAll" if http => &["filter", "opts", "returns"],
             "sys.api::AboutInfo" if http => &[
@@ -1725,6 +1779,31 @@ fn validate_closure(
                     "nested constraints or additional members are not admitted",
                 ));
             }
+        }
+    }
+    // sys::Spec `opGrid`: the request grid is passed whole as the op's single
+    // parameter. Any marked declaration must be an op with exactly that shape.
+    for entry in specs.values() {
+        if !entry.spec.meta.contains_key("opGrid") {
+            continue;
+        }
+        let parameters: Vec<_> = entry
+            .spec
+            .slots
+            .iter()
+            .filter(|slot| slot.name != "returns")
+            .collect();
+        if entry.member_of.as_deref() != Some("sys::Funcs")
+            || entry.spec.base.as_deref() != Some("sys::Func")
+            || !entry.spec.meta.contains_key("op")
+            || parameters.len() != 1
+            || parameters[0].type_ref.as_deref() != Some("sys::Grid")
+        {
+            return Err(resolve_error(
+                &entry.source,
+                &entry.spec.qname,
+                "opGrid requires an op with one Grid parameter",
+            ));
         }
     }
     if http {
@@ -2311,7 +2390,7 @@ mod tests {
     fn ops_http_closure_rejects_missing_duplicate_unknown_and_unsupported_declarations() {
         let inputs = || {
             let provenance: ProfileProvenance = serde_json::from_str(HTTP_MANIFEST).unwrap();
-            let raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+            let raw: Vec<_> = http_raw().collect();
             let sources = extract_sources(&provenance, &raw).unwrap();
             (provenance, sources)
         };
@@ -2346,7 +2425,7 @@ mod tests {
             );
         }
         let provenance = serde_json::from_str(HTTP_MANIFEST).unwrap();
-        let mut raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+        let mut raw: Vec<_> = http_raw().collect();
         raw.iter_mut()
             .find(|(path, _)| path.ends_with("sys.api/types.xeto"))
             .unwrap()
@@ -2395,7 +2474,7 @@ mod tests {
             }
         }
         let provenance = serde_json::from_str(HTTP_MANIFEST).unwrap();
-        let raw: Vec<_> = RAW.iter().chain(HTTP_RAW).copied().collect();
+        let raw: Vec<_> = http_raw().collect();
         let mut sources = extract_sources(&provenance, &raw).unwrap();
         let source = sources
             .iter_mut()
@@ -2405,5 +2484,72 @@ mod tests {
         assert!(
             matches!(Catalog::admit(provenance, sources), Err(ProfileError::Resolve { message, .. }) if message.contains("enums cannot be extended"))
         );
+    }
+
+    /// Admit the HTTP closure after rewriting the selected ph.api function
+    /// source; mutations model an upstream or manifest drift.
+    fn nav_altered(before: &str, after: &str) -> Result<Catalog, ProfileError> {
+        let provenance: ProfileProvenance = serde_json::from_str(HTTP_MANIFEST).unwrap();
+        let raw: Vec<_> = http_raw().collect();
+        let mut sources = extract_sources(&provenance, &raw).unwrap();
+        let source = sources
+            .iter_mut()
+            .find(|s| s.identity.role == "functions" && s.identity.library == "ph.api")
+            .unwrap();
+        assert!(source.text.contains(before), "test mutation target");
+        source.text = source.text.replacen(before, after, 1);
+        Catalog::admit(provenance, sources)
+    }
+
+    #[test]
+    fn nav_selection_is_exact_and_excludes_the_rest_of_ph_api() {
+        // The retained selection admits exactly nav from the unchanged file.
+        let nav = nav_altered("nav:", "nav:").unwrap();
+        let declaration = nav.declaration("ph.api::nav").unwrap();
+        assert_eq!(declaration.source.declarations, ["ph.api::nav"]);
+        for unadmitted in [
+            "watchSub",
+            "watchUnsub",
+            "watchPoll",
+            "pointWrite",
+            "hisRead",
+        ] {
+            assert!(nav.declaration(&format!("ph.api::{unadmitted}")).is_none());
+        }
+        // A renamed or additional member no longer matches the manifest
+        // selection, even when that member exists upstream.
+        for (before, after) in [
+            ("nav:", "watchSub:"),
+            (
+                "{ req: Grid, returns: Grid }",
+                "{ req: Grid, returns: Grid }\n  hisRead: Func <op, opGrid, noSideEffects> { req: Grid, returns: Grid }",
+            ),
+        ] {
+            assert!(
+                matches!(nav_altered(before, after), Err(ProfileError::Resolve { message, .. })
+                    if message == "complete function selection differs from manifest"),
+                "{after}"
+            );
+        }
+    }
+
+    #[test]
+    fn op_grid_requires_an_op_with_one_grid_parameter() {
+        for (before, after) in [
+            ("req: Grid,", "req: Dict,"),
+            ("req: Grid, ", ""),
+            ("<op, opGrid,", "<opGrid,"),
+        ] {
+            assert!(
+                matches!(nav_altered(before, after), Err(ProfileError::Resolve { declaration, message, .. })
+                    if declaration == "ph.api::nav" && message.contains("opGrid requires")),
+                "{after}"
+            );
+        }
+        // opGrid is admitted metadata: a non-Marker value is rejected.
+        assert!(matches!(
+            nav_altered("opGrid,", "opGrid: \"yes\","),
+            Err(ProfileError::Resolve { message, .. }) if message.contains("opGrid")
+        ));
     }
 }

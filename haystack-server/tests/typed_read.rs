@@ -1134,6 +1134,7 @@ async fn v5_ops_discovers_the_executable_profile_and_rejects_arguments() {
                 .map(|row| row["qname"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             [
+                "ph.api::nav",
                 "sys.api::about",
                 "sys.api::close",
                 "sys.api::filetypes",
@@ -1203,7 +1204,7 @@ async fn v5_ops_authentication_precedes_protocol_validation_and_h4_stays_public(
         200,
     )
     .await;
-    assert_eq!(value["rows"].as_array().unwrap().len(), 9);
+    assert_eq!(value["rows"].as_array().unwrap().len(), 10);
     f.close().await;
 }
 
@@ -1241,7 +1242,11 @@ impl PolicySnapshot for FunctionRules {
             function.revision,
             "873b922451d3ef4c0c9c08ef3daa542f352d69f3"
         );
-        assert_eq!(function.source_path, "src/xeto/sys.api/funcs.xeto");
+        let library = function.qname.split("::").next().unwrap();
+        assert_eq!(
+            function.source_path,
+            format!("src/xeto/{library}/funcs.xeto")
+        );
         (self.ops && function.qname == "sys.api::ops")
             || (self.read_by_id && function.qname == "sys.api::readById")
     }
@@ -1365,7 +1370,7 @@ async fn ops_zero_arguments_accept_supported_containers_and_preserve_null_key_re
             200,
         )
         .await;
-        assert_eq!(value["rows"].as_array().unwrap().len(), 9);
+        assert_eq!(value["rows"].as_array().unwrap().len(), 10);
     }
     for (media, body) in [
         (
@@ -1490,7 +1495,7 @@ impl ReadPolicy for ReadByIdOnly {
 
 #[tokio::test]
 async fn resolver_candidate_limit_counts_hidden_entries_before_a_null_read() {
-    for max_candidates in [1, 9] {
+    for max_candidates in [1, 10] {
         let f = Fixture::with_policy(
             true,
             ReadLimits {
@@ -1501,7 +1506,7 @@ async fn resolver_candidate_limit_counts_hidden_entries_before_a_null_read() {
         )
         .await;
         // An absent nullable id with checked=false does no graph lookup. Only
-        // all nine registry entries, including policy-hidden entries, spend candidates.
+        // all ten registry entries, including policy-hidden entries, spend candidates.
         let response = f
             .get("/readById?checked=false")
             .header("Xeto-Version", "5")
@@ -1966,7 +1971,7 @@ async fn system_metadata_is_typed_truthful_and_legacy_mapping_is_deliberate() {
             .iter()
             .map(|row| row["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["sys", "sys.api"]
+        ["ph.api", "sys", "sys.api"]
     );
     assert_eq!(libs["rows"][0]["version"], "5.0.0");
     for path in ["/about", "/libs"] {
@@ -2111,14 +2116,30 @@ async fn system_limits_charge_positions_and_selected_rows_without_partial_result
         .await;
     }
     f.close().await;
+    // Resolution spends one candidate per fixed binding, then the read spends
+    // one per requested position. Derive the bound from the inventory so the
+    // single-position control fits exactly and only the duplicate exceeds it.
+    let bindings = ReadService::supported_functions().count();
     let f = Fixture::start(
         false,
         ReadLimits {
-            max_candidates: 10,
+            max_candidates: bindings + 1,
             ..ReadLimits::default()
         },
     )
     .await;
+    let control = json_response(
+        f.post("/readByIds")
+            .header("Xeto-Version", "5")
+            .header("Content-Type", "application/json")
+            .body(r#"{"ids":["a"]}"#)
+            .send()
+            .await
+            .unwrap(),
+        200,
+    )
+    .await;
+    assert_eq!(control["rows"].as_array().unwrap().len(), 1);
     api_error(
         f.post("/readByIds")
             .header("Xeto-Version", "5")

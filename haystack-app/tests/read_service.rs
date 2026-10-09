@@ -527,17 +527,24 @@ async fn catalog_hidden_unknown_and_budgets_have_consistent_outcomes() {
         .rows
         .iter()
         .filter_map(|row| match row.get("qname") {
-            Some(Kind::Str(qname)) if !qname.starts_with("sys") => Some(qname.as_str()),
+            Some(Kind::Str(qname))
+                if !qname.starts_with("sys") && !qname.starts_with("ph.api::") =>
+            {
+                Some(qname.as_str())
+            }
             _ => None,
         })
         .collect();
     assert_eq!(listed, ["demo::Visible"]);
-    assert!(
-        visible
-            .rows
-            .iter()
-            .any(|row| row.get("qname") == Some(&Kind::Str("sys.api::readById".into())))
-    );
+    for admitted in ["sys.api::readById", "ph.api::nav"] {
+        assert!(
+            visible
+                .rows
+                .iter()
+                .any(|row| row.get("qname") == Some(&Kind::Str(admitted.into()))),
+            "{admitted}"
+        );
+    }
     let bounded = service(
         graph,
         ReadLimits {

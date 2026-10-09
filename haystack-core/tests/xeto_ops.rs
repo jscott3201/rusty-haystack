@@ -44,6 +44,8 @@ fn pinned_ops_closure_retains_identity_and_zero_argument_contract() {
             .map(|op| op.spec.qname.as_str())
             .collect::<Vec<_>>(),
         [
+            // Selected from ph.api/funcs.xeto:33 (M2-PR05); see xeto_nav.rs.
+            "ph.api::nav",
             "sys.api::about",
             "sys.api::close",
             "sys.api::filetypes",

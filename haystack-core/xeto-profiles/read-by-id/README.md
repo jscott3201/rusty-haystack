@@ -1,9 +1,10 @@
 # Pinned Xeto readById admission profile
 
 The native bootstrap profile admits readById and its required type/metadata
-closure; the HTTP profile adds the selected nine read/system functions and their reachable types/errors from
+closure; the HTTP profile adds the selected nine read/system functions and their reachable types/errors,
+plus the `ph.api` navigation function (M2-PR05), from
 [Project-Haystack/xeto at 873b922451d3ef4c0c9c08ef3daa542f352d69f3](https://github.com/Project-Haystack/xeto/tree/873b922451d3ef4c0c9c08ef3daa542f352d69f3).
-It is a bootstrap subset of `sys` and `sys.api`, **not complete upstream libraries**.
+It is a bootstrap subset of `sys`, `sys.api` and `ph.api`, **not complete upstream libraries**.
 The pinned build properties say version `5.0.0`, maturity `alpha`, and dependency
 version `5.0.0`. This profile does not claim that the official public v4 Xeto
 documentation describes every construct at this newer source pin.
@@ -34,6 +35,9 @@ No selected declaration is renamed or rewritten. Metadata selection retains the
 original Spec wrapper only to parse its chosen fields; it does not admit `Spec`.
 
 Verify all retained bytes and reproduce source selections locally:
+
+The script also checks that a function source naming its selected declarations
+(the `ph.api` navigation selection) reproduces exactly those `Func` members.
 
 ```sh
 python3 haystack-core/xeto-profiles/read-by-id/verify.py
@@ -94,10 +98,11 @@ The legacy loader gains no HTTP, Jeto or full-library semantics from this profil
 
 ## Executable HTTP closure
 
-`load_http_pinned()` uses `http-manifest.json`, verifying all eleven retained
+`load_http_pinned()` uses `http-manifest.json`, verifying all fifteen retained
 files and their exact line selections. The function augmentation selects
 sys.api/funcs.xeto:1-110: readById, readByIds, read, readAll, about, close, ops,
-libs and filetypes. The API result closure adds AboutInfo, OpInfo, LibInfo and
+libs and filetypes; the [navigation selection](#selected-navigation-function-m2-pr05)
+adds `ph.api::nav`. The API result closure adds AboutInfo, OpInfo, LibInfo and
 FiletypeInfo with explicit scalar and collection fitting. `sys::Filter` and
 `sys::Version` retain nominal catalog/revision/qname identity. DateTime, Uri and
 None fit their concrete native variants. ApiVersion remains native digit-only
@@ -126,6 +131,39 @@ preserved. Missing closure members, unresolved `of` targets, duplicate declarati
 and unsupported signatures fail admission. The [HTTP executable
 profile](../../../docs/typed-http-read.md) documents the application registry and
 transport policy separately from core admission.
+
+## Selected navigation function (M2-PR05)
+
+Both `http-manifest.json` and `protocol-manifest.json` select one declaration
+from the unchanged `src/xeto/ph.api/funcs.xeto` (230 lines, SHA-256
+`15a30e0c…3c1b`), lines 1-33 and the closing brace at 229:
+
+```xeto
++Funcs {
+  nav: Func <op, opGrid, noSideEffects> { req: Grid, returns: Grid }
+}
+```
+
+The manifest entry names that selection (`declarations: ["ph.api::nav"]`).
+Admission requires the parsed `+Funcs` members to equal it exactly, so
+`watchSub`, `watchUnsub`, `watchPoll`, `pointWrite`, `hisRead` and `hisWrite`
+from the same file stay unadmitted and unadvertised. The declaring
+`ph.api/lib.xeto` (SHA-256 `061cb812…9b21`) is admitted as a **partial library
+identity**: its library view reports `complete: false`, version `5.0.0`,
+dependencies `sys`, `sys.api` and `ph`, and the single declaration
+`ph.api::nav`. In the HTTP closure `ph` and its own `sys.refs` dependency are
+dependency-only identities (verified bytes, no declarations, not advertised);
+the protocol closure already admits `ph` as a library.
+
+The referenced declarations are already admitted: `sys::Func`, `sys::Funcs` and
+`sys::Grid`. The `opGrid: Marker?` metadata field is selected from
+`sys/spec.xeto:149-153`. Any declaration carrying `opGrid` must be a
+`sys::Funcs` op deriving from `sys::Func` with exactly one parameter of type
+`sys::Grid`; its callable codec context reports `op_grid`, which tells the HTTP
+adapter to pass a request grid whole as that parameter. `fit_arguments`
+requires `req` (no default, not nullable) and rejects every other name,
+including `navId`; `fit_result` accepts any native Grid. The native readById
+profile is unchanged.
 
 ## Selected protocol-metadata closure (M2-PR07)
 

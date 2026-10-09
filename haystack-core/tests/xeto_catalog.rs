@@ -226,7 +226,7 @@ fn selected_protocol_closure_preserves_complete_declarations_and_provenance() {
             .libraries()
             .map(|library| library.name.as_str())
             .collect::<Vec<_>>(),
-        ["ph", "ph.protocols", "sys", "sys.api"]
+        ["ph", "ph.api", "ph.protocols", "sys", "sys.api"]
     );
     let selected: Vec<_> = catalog
         .provenance()
