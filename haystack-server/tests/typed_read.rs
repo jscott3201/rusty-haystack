@@ -1890,6 +1890,7 @@ async fn system_opts_malformed_spec_and_unknown_null_remain_invalid() {
         r#"{"spec":"sys::Grid","limit":1}"#,
         r#"{"spec":"missing::Dict","limit":1}"#,
         r#"{"spec":"rusty.http::Arguments","limit":1}"#,
+        r#"{"spec":"rusty.call::Arguments","limit":1}"#,
         r#"{"spec":{"spec":"sys::Ref","val":"sys::Dict"},"limit":1}"#,
         r#"{"spec":"sys::Dict","unknown":null}"#,
     ] {

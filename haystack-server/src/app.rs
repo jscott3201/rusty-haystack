@@ -379,10 +379,12 @@ impl HaystackServer {
             core_router = core_router.route(capability.path, capability.router(profile));
         }
 
-        if let Some(application) = &state.application {
-            let service = application.read_service();
-            for function in service.typed_functions() {
-                for name in [function.name, function.identity.qname.as_str()] {
+        // Routes come from the fixed supported-handler inventory; the
+        // current catalog observation drives dispatch and discovery per
+        // request, so a newly parsed declaration never creates a route.
+        if state.application.is_some() {
+            for (name, qname) in haystack_app::ReadService::supported_functions() {
+                for name in [name, qname] {
                     let path = format!("/api/{name}");
                     if !CAPABILITIES
                         .iter()

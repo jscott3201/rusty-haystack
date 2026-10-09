@@ -13,15 +13,60 @@ use sha2::{Digest, Sha256};
 use crate::data::HDict;
 use crate::kinds::{HRef, Kind};
 
+mod activation;
+mod callable;
+mod project;
+mod strict;
+pub use activation::{ActivatedCatalog, ActivationControl, ActivationError, ActivationRejection};
+pub use callable::{ARGUMENTS, CallableContext};
+pub use strict::{FitEnvironment, FitError, FitRecord};
+
 use super::XetoError;
 use super::ast::{LibPragma, SlotDef, XetoFile};
 use super::parser::parse_xeto;
 use super::spec::{Slot, Spec, spec_from_def};
 
 /// The compatibility pin; updating it requires a reviewed profile update.
-pub const READ_BY_ID_UPSTREAM_COMMIT: &str = "873b922451d3ef4c0c9c08ef3daa542f352d69f3";
+pub const PINNED_XETO_REVISION: &str = "873b922451d3ef4c0c9c08ef3daa542f352d69f3";
 const PROFILE: &str = "pinned-xeto-readById";
 const HTTP_PROFILE: &str = "pinned-xeto-readById-http";
+const PROTOCOL_PROFILE: &str = "pinned-xeto-protocol-metadata";
+const PROTOCOL_MANIFEST: &str =
+    include_str!("../../xeto-profiles/read-by-id/protocol-manifest.json");
+const PROTOCOL_RAW: &[(&str, &str)] = &[
+    (
+        "src/xeto/ph/lib.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph/lib.xeto"),
+    ),
+    (
+        "src/xeto/sys.refs/lib.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/sys.refs/lib.xeto"),
+    ),
+    (
+        "src/xeto/ph.protocols/lib.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph.protocols/lib.xeto"),
+    ),
+    (
+        "src/xeto/ph/kinds.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph/kinds.xeto"),
+    ),
+    (
+        "src/xeto/ph.protocols/base.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph.protocols/base.xeto"),
+    ),
+    (
+        "src/xeto/ph.protocols/modbus.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/ph.protocols/modbus.xeto"),
+    ),
+    (
+        "src/xeto/doc.xeto/Specs.md",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/doc.xeto/Specs.md"),
+    ),
+    (
+        "src/xeto/sys/validation.xeto",
+        include_str!("../../xeto-profiles/read-by-id/upstream/src/xeto/sys/validation.xeto"),
+    ),
+];
 const HTTP_TYPES: &[&str] = &[
     "Number", "Int", "List", "Grid", "None", "Uri", "Version", "DateTime", "Enum", "TimeZone",
     "Filter",
@@ -147,6 +192,9 @@ pub struct ProfileSource {
     pub role: String,
     pub library: String,
     pub lines: Vec<[usize; 2]>,
+    /// Complete declaration identities selected from this source, when explicit.
+    #[serde(default)]
+    pub declarations: Vec<String>,
 }
 
 /// Provenance of this bootstrap subset. No field claims full-library support.
@@ -253,18 +301,35 @@ impl BoundArguments {
     }
 }
 
-/// Immutable, checksum-verified catalog for the pinned readById admission profile.
-#[derive(Debug)]
-pub struct ReadByIdProfile {
+/// Immutable, checksum-verified catalog for an explicitly selected closure.
+#[derive(Debug, Clone)]
+pub struct Catalog {
     provenance: ProfileProvenance,
     libraries: BTreeMap<String, AdmittedLibrary>,
     specs: BTreeMap<String, AdmittedSpec>,
     metadata: BTreeMap<String, AdmittedMetadata>,
     augmentations: Vec<AdmittedAugmentation>,
     enums: BTreeMap<String, Vec<String>>,
+    pragmas: Pragmas,
+    marker_bindings: BTreeMap<String, String>,
+    compiled: BTreeMap<String, strict::CompiledType>,
 }
 
-impl ReadByIdProfile {
+impl Catalog {
+    /// Admit the complete selected protocol-metadata declarations.
+    pub fn load_protocol_pinned() -> Result<Self, ProfileError> {
+        let provenance = serde_json::from_str(PROTOCOL_MANIFEST)
+            .map_err(|e| source_error("protocol-manifest.json", e.to_string()))?;
+        let raw: Vec<_> = RAW
+            .iter()
+            .chain(HTTP_RAW)
+            .chain(PROTOCOL_RAW)
+            .copied()
+            .collect();
+        let sources = extract_sources(&provenance, &raw)?;
+        Self::admit(provenance, sources)
+    }
+
     /// Verify the retained upstream bytes, reproduce the selected source slices,
     /// expand their pinned build variables, parse and resolve the entire closure.
     /// No network access, Python process or mutable global namespace is involved.
@@ -634,7 +699,8 @@ impl ReadByIdProfile {
         provenance: ProfileProvenance,
         sources: Vec<ExtractedSource>,
     ) -> Result<Self, ProfileError> {
-        let http = provenance.profile == HTTP_PROFILE;
+        let protocol = provenance.profile == PROTOCOL_PROFILE;
+        let http = protocol || provenance.profile == HTTP_PROFILE;
         let parsed = sources
             .iter()
             .map(|s| s.parse().map(|ast| (s, ast)))
@@ -647,7 +713,7 @@ impl ReadByIdProfile {
         for (source, ast) in parsed {
             let identity = &source.identity;
             match identity.role.as_str() {
-                "library" => {
+                "library" | "dependency" => {
                     if !ast.specs.is_empty() {
                         return Err(resolve_error(
                             identity,
@@ -672,7 +738,8 @@ impl ReadByIdProfile {
                         if identity.library != "sys"
                             || def.is_augmentation
                             || !(TYPES.contains(&def.name.as_str())
-                                || http && HTTP_TYPES.contains(&def.name.as_str()))
+                                || http && HTTP_TYPES.contains(&def.name.as_str())
+                                || protocol && ["Entity", "This"].contains(&def.name.as_str()))
                         {
                             return Err(resolve_error(
                                 identity,
@@ -682,6 +749,49 @@ impl ReadByIdProfile {
                         }
                         validate_slot_syntax(&def.slots, identity, &def.name)?;
                         let spec = spec_from_def(&def, &identity.library);
+                        insert_spec(
+                            &mut specs,
+                            AdmittedSpec {
+                                spec,
+                                source: identity.clone(),
+                                member_of: None,
+                            },
+                        )?;
+                    }
+                }
+                "selected-types" if protocol => {
+                    reject_pragma(identity, &ast)?;
+                    let found: BTreeSet<_> = ast
+                        .specs
+                        .iter()
+                        .map(|def| format!("{}::{}", identity.library, def.name))
+                        .collect();
+                    let expected: BTreeSet<_> = identity.declarations.iter().cloned().collect();
+                    if expected.is_empty()
+                        || expected.len() != identity.declarations.len()
+                        || found != expected
+                        || ast.specs.len() != found.len()
+                    {
+                        return Err(resolve_error(
+                            identity,
+                            "selection",
+                            "complete declaration selection differs from manifest",
+                        ));
+                    }
+                    for def in ast.specs {
+                        if def.is_augmentation {
+                            return Err(resolve_error(
+                                identity,
+                                &def.name,
+                                "augmentations are not admitted",
+                            ));
+                        }
+                        let spec = spec_from_def(&def, &identity.library);
+                        if matches!(def.base.as_deref(), Some("Enum" | "sys::Enum")) {
+                            enums.insert(spec.qname.clone(), enum_keys(&def, identity)?);
+                        } else {
+                            validate_slot_syntax(&def.slots, identity, &def.name)?;
+                        }
                         insert_spec(
                             &mut specs,
                             AdmittedSpec {
@@ -770,7 +880,8 @@ impl ReadByIdProfile {
                     }
                     for field in &def.slots {
                         if !(META.contains(&field.name.as_str())
-                            || http && HTTP_META.contains(&field.name.as_str()))
+                            || http && HTTP_META.contains(&field.name.as_str())
+                            || protocol && ["minVal", "maxVal"].contains(&field.name.as_str()))
                             || !field.children.is_empty()
                             || field.is_global
                             || field.is_query
@@ -875,7 +986,7 @@ impl ReadByIdProfile {
                 });
             }
         }
-        if pragmas.len() != 2 {
+        if pragmas.len() != if protocol { 5 } else { 2 } {
             return Err(source_error(PROFILE, "unadmitted library"));
         }
         for (name, (pragma, source)) in &pragmas {
@@ -1008,7 +1119,7 @@ impl ReadByIdProfile {
                 )?;
             }
         }
-        validate_closure(&specs, &metadata, http)?;
+        validate_closure(&specs, &metadata, http, protocol)?;
         validate_cycles(&specs)?;
         // Decode declarations only after names and the complete base graph resolve.
         let type_graph = specs.clone();
@@ -1024,6 +1135,7 @@ impl ReadByIdProfile {
                     raw,
                     &entry.spec.qname,
                     &type_graph,
+                    &enums,
                     &entry.source,
                     &entry.spec.qname,
                 )?;
@@ -1032,6 +1144,7 @@ impl ReadByIdProfile {
             decode_slots(
                 &mut entry.spec.slots,
                 &type_graph,
+                &enums,
                 &metadata,
                 &entry.source,
                 &entry.spec.qname,
@@ -1040,8 +1153,12 @@ impl ReadByIdProfile {
         for field in metadata.values() {
             validate_meta(&field.slot.meta, &metadata, &field.source, &field.slot.name)?;
         }
+        let retained_pragmas = pragmas.clone();
         let mut libraries = BTreeMap::new();
-        for (name, (pragma, _)) in pragmas {
+        for (name, (pragma, source)) in pragmas {
+            if source.role == "dependency" {
+                continue;
+            }
             libraries.insert(
                 name.clone(),
                 AdmittedLibrary {
@@ -1067,14 +1184,18 @@ impl ReadByIdProfile {
                 },
             );
         }
-        let profile = Self {
+        let mut profile = Self {
             provenance,
             libraries,
             specs,
             metadata,
             augmentations,
             enums,
+            pragmas: retained_pragmas,
+            marker_bindings: BTreeMap::new(),
+            compiled: BTreeMap::new(),
         };
+        profile.compiled = profile.compile()?;
         for entry in profile.specs.values() {
             if let Some(value) = entry.spec.meta.get("val")
                 && !profile.fits_type(&entry.spec.qname, value)
@@ -1158,8 +1279,11 @@ fn extract_sources(
     provenance: &ProfileProvenance,
     raw: &[(&str, &str)],
 ) -> Result<Vec<ExtractedSource>, ProfileError> {
-    if provenance.commit != READ_BY_ID_UPSTREAM_COMMIT
-        || !matches!(provenance.profile.as_str(), PROFILE | HTTP_PROFILE)
+    if provenance.commit != PINNED_XETO_REVISION
+        || !matches!(
+            provenance.profile.as_str(),
+            PROFILE | HTTP_PROFILE | PROTOCOL_PROFILE
+        )
         || provenance.repository != "https://github.com/Project-Haystack/xeto"
         || provenance.complete_libraries
     {
@@ -1293,8 +1417,10 @@ fn insert_spec(
 
 type Pragmas = BTreeMap<String, (LibPragma, ProfileSource)>;
 fn validate_pragma(source: &ProfileSource, pragma: &LibPragma) -> Result<(), ProfileError> {
-    if !matches!(source.library.as_str(), "sys" | "sys.api")
-        || !pragma.name.is_empty()
+    if !matches!(
+        source.library.as_str(),
+        "sys" | "sys.api" | "ph" | "ph.protocols" | "sys.refs"
+    ) || !pragma.name.is_empty()
         || pragma.version != "5.0.0"
         || pragma.meta.get("maturity") != Some(&Kind::Str("alpha".into()))
     {
@@ -1476,7 +1602,7 @@ fn resolve_of(
                 "of requires a type reference",
             ));
         };
-        let qname = if schema && name == "Spec" {
+        let qname = if schema && matches!(name.as_str(), "Spec" | "sys::Spec") {
             "sys::Spec".into()
         } else {
             resolve_name(name, library, pragmas, names, source, declaration)?
@@ -1502,7 +1628,7 @@ fn resolve_slot_of(
             names,
             source,
             &qname,
-            false,
+            slot.type_ref.as_deref() == Some("sys::Ref"),
         )?;
         resolve_slot_of(&mut slot.children, library, pragmas, names, source, &qname)?;
     }
@@ -1512,6 +1638,7 @@ fn validate_closure(
     specs: &BTreeMap<String, AdmittedSpec>,
     metadata: &BTreeMap<String, AdmittedMetadata>,
     http: bool,
+    protocol: bool,
 ) -> Result<(), ProfileError> {
     for name in TYPES {
         if !specs.contains_key(&format!("sys::{name}")) {
@@ -1587,7 +1714,9 @@ fn validate_closure(
         };
         for slot in &entry.spec.slots {
             if !(allowed.contains(&slot.name.as_str())
-                || http && entry.spec.qname == "sys::TimeZone")
+                || http && entry.spec.qname == "sys::TimeZone"
+                || protocol
+                    && (entry.source.role == "selected-types" || entry.spec.qname == "sys::Entity"))
                 || !slot.children.is_empty()
             {
                 return Err(resolve_error(
@@ -1684,6 +1813,9 @@ fn validate_meta(
             "sys::Marker" => matches!(value, Kind::Marker),
             "sys::Str" => matches!(value, Kind::Str(_)),
             "sys::Obj" => true,
+            "sys::This" => {
+                matches!(value, Kind::Number(number) if number.unit.is_none() && number.val.is_finite())
+            }
             "sys::Ref" => matches!(value, Kind::Ref(_)),
             _ => false,
         };
@@ -1708,6 +1840,7 @@ fn decode_default(
     raw: &Kind,
     type_name: &str,
     specs: &BTreeMap<String, AdmittedSpec>,
+    enums: &BTreeMap<String, Vec<String>>,
     source: &ProfileSource,
     declaration: &str,
 ) -> Result<Kind, ProfileError> {
@@ -1718,6 +1851,23 @@ fn decode_default(
             "default must use the admitted quoted scalar encoding",
         ));
     };
+    if let Some(keys) = enums.get(type_name) {
+        if keys.binary_search(text).is_err() {
+            return Err(resolve_error(
+                source,
+                declaration,
+                "default is not an enum key",
+            ));
+        }
+        return crate::kinds::NominalScalar::new(
+            type_name,
+            "https://github.com/Project-Haystack/xeto",
+            PINNED_XETO_REVISION,
+            text,
+        )
+        .map(Kind::Nominal)
+        .map_err(|_| resolve_error(source, declaration, "invalid enum default"));
+    }
     let mut next = Some(type_name);
     while let Some(name) = next {
         let value = match name {
@@ -1739,7 +1889,7 @@ fn decode_default(
                 crate::kinds::NominalScalar::new(
                     name,
                     "https://github.com/Project-Haystack/xeto",
-                    READ_BY_ID_UPSTREAM_COMMIT,
+                    PINNED_XETO_REVISION,
                     text,
                 )
                 .map_err(|_| resolve_error(source, declaration, "invalid Version default"))?,
@@ -1774,6 +1924,7 @@ fn decode_default(
 fn decode_slots(
     slots: &mut [Slot],
     types: &BTreeMap<String, AdmittedSpec>,
+    enums: &BTreeMap<String, Vec<String>>,
     schema: &BTreeMap<String, AdmittedMetadata>,
     source: &ProfileSource,
     parent: &str,
@@ -1789,11 +1940,11 @@ fn decode_slots(
             ));
         }
         if let Some(default) = slot.default.as_ref().or_else(|| slot.meta.get("val")) {
-            let value = decode_default(default, slot_type(slot), types, source, &qname)?;
+            let value = decode_default(default, slot_type(slot), types, enums, source, &qname)?;
             slot.default = Some(value.clone());
             slot.meta.insert("val".into(), value);
         }
-        decode_slots(&mut slot.children, types, schema, source, &qname)?;
+        decode_slots(&mut slot.children, types, enums, schema, source, &qname)?;
     }
     Ok(())
 }
@@ -1899,7 +2050,7 @@ mod tests {
             "test mutation target must exist"
         );
         source.text = source.text.replacen(before, after, 1);
-        ReadByIdProfile::admit(provenance, sources).unwrap_err()
+        Catalog::admit(provenance, sources).unwrap_err()
     }
 
     #[test]
@@ -1964,7 +2115,7 @@ mod tests {
             .text
             .replace("id: Ref?", "id: sys::Ref?")
             .replace("checked: Bool", "checked: sys::Bool");
-        let profile = ReadByIdProfile::admit(provenance, sources).unwrap();
+        let profile = Catalog::admit(provenance, sources).unwrap();
         assert_eq!(
             profile
                 .fit_arguments(FUNCTION, &HDict::new())
@@ -2064,7 +2215,7 @@ mod tests {
         let (provenance, mut sources) = inputs();
         sources.retain(|s| !(s.identity.role == "library" && s.identity.library == "sys"));
         assert!(
-            matches!(ReadByIdProfile::admit(provenance, sources), Err(ProfileError::Resolve { message, .. })
+            matches!(Catalog::admit(provenance, sources), Err(ProfileError::Resolve { message, .. })
             if message.contains("missing required library dependency"))
         );
         assert!(
@@ -2080,7 +2231,7 @@ mod tests {
             .text
             .replace("versions: \"5.0.0\"", "versions: \"6.0.0\"");
         assert!(
-            matches!(ReadByIdProfile::admit(provenance, sources), Err(ProfileError::Resolve { message, .. })
+            matches!(Catalog::admit(provenance, sources), Err(ProfileError::Resolve { message, .. })
             if message.contains("dependency version"))
         );
     }
@@ -2119,7 +2270,7 @@ mod tests {
         source.text = source
             .text
             .replace("checked: Bool \"true\"", "checked: Bool");
-        let profile = ReadByIdProfile::admit(provenance, sources).unwrap();
+        let profile = Catalog::admit(provenance, sources).unwrap();
         assert!(
             matches!(profile.fit_arguments(FUNCTION, &HDict::new()), Err(ProfileError::Fit { slot, message, .. })
             if slot.ends_with(".checked") && message == "missing required argument")
@@ -2136,7 +2287,7 @@ mod tests {
         source.text = source
             .text
             .replace("checked: Bool \"true\"", "checked: Bool <val: \"true\">");
-        let profile = ReadByIdProfile::admit(provenance, sources).unwrap();
+        let profile = Catalog::admit(provenance, sources).unwrap();
         assert_eq!(
             profile
                 .fit_arguments(FUNCTION, &HDict::new())
@@ -2188,7 +2339,7 @@ mod tests {
             }
             assert!(
                 matches!(
-                    ReadByIdProfile::admit(provenance, sources),
+                    Catalog::admit(provenance, sources),
                     Err(ProfileError::Resolve { .. })
                 ),
                 "case {case}"
@@ -2213,6 +2364,7 @@ mod tests {
             role: "enum".into(),
             library: "test".into(),
             lines: vec![],
+            declarations: vec![],
         };
         for (text, expected) in [
             ("Suit: Enum { clubs, diamonds }", vec!["clubs", "diamonds"]),
@@ -2251,7 +2403,7 @@ mod tests {
             .unwrap();
         source.text = source.text.replace("Str: Scalar", "Str: TimeZone");
         assert!(
-            matches!(ReadByIdProfile::admit(provenance, sources), Err(ProfileError::Resolve { message, .. }) if message.contains("enums cannot be extended"))
+            matches!(Catalog::admit(provenance, sources), Err(ProfileError::Resolve { message, .. }) if message.contains("enums cannot be extended"))
         );
     }
 }

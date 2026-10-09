@@ -41,6 +41,7 @@ impl ReadService {
 impl Inner {
     pub(super) fn system_read(
         &self,
+        registry: &crate::registry::Registry,
         handler: Handler,
         args: &HDict,
         policy: &dyn PolicySnapshot,
@@ -60,6 +61,7 @@ impl Inner {
             budget.charge(BudgetKind::Retained, ids.len().saturating_mul(128))?;
             loop {
                 if let Some(result) = self.graph.read_for(budget.wait_quantum()?, |graph| {
+                    current_observation(graph, registry)?;
                     let mut view = View {
                         graph,
                         policy,
@@ -162,6 +164,7 @@ impl Inner {
         }
         loop {
             if let Some(result) = self.graph.read_for(budget.wait_quantum()?, |graph| {
+                current_observation(graph, registry)?;
                 let mut view = View {
                     graph,
                     policy,
@@ -223,8 +226,13 @@ impl Inner {
             }
         }
     }
-    fn nominal(&self, spec: &str, text: &str, budget: &mut Budget) -> Result<Kind, ApiError> {
-        let provenance = self.registry.profile.provenance();
+    fn nominal(
+        registry: &crate::registry::Registry,
+        spec: &str,
+        text: &str,
+        budget: &mut Budget,
+    ) -> Result<Kind, ApiError> {
+        let provenance = registry.catalog().provenance();
         budget.charge(BudgetKind::Retained, 512)?;
         Ok(Kind::Nominal(
             NominalScalar::new(
@@ -238,6 +246,7 @@ impl Inner {
     }
     pub(super) fn about(
         &self,
+        registry: &crate::registry::Registry,
         principal: &Principal,
         budget: &mut Budget,
     ) -> Result<Kind, ApiError> {
@@ -253,7 +262,10 @@ impl Inner {
             "serverBootTime",
             Kind::DateTime(self.system.boot.get().ok_or(ApiError::Unavailable)?.clone()),
         );
-        info.set("tz", self.nominal("sys::TimeZone", "UTC", budget)?);
+        info.set(
+            "tz",
+            Self::nominal(registry, "sys::TimeZone", "UTC", budget)?,
+        );
         info.set(
             "protocolVersions",
             Kind::List(vec![Kind::Str("4".into()), Kind::Str("5".into())]),
@@ -272,11 +284,13 @@ impl Inner {
     }
     pub(super) fn libraries(
         &self,
+        registry: &crate::registry::Registry,
         policy: &dyn PolicySnapshot,
         budget: &mut Budget,
     ) -> Result<Kind, ApiError> {
         let mut rows = Vec::new();
-        for library in self.registry.profile.libraries() {
+        // Only libraries admitted by the retained observation are advertised.
+        for library in registry.catalog().libraries() {
             budget.charge(BudgetKind::Candidates, 1)?;
             budget.charge(BudgetKind::Work, library.name.len().saturating_add(1))?;
             if !policy.catalog(CatalogKind::Library, &library.name) {
@@ -291,7 +305,7 @@ impl Inner {
             row.set("name", Kind::Str(budget.copy_string(&library.name)?));
             row.set(
                 "version",
-                self.nominal("sys::Version", &library.version, budget)?,
+                Self::nominal(registry, "sys::Version", &library.version, budget)?,
             );
             if !library.doc.is_empty() {
                 row.set(

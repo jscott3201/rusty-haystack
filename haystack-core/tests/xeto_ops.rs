@@ -3,13 +3,13 @@
 //! and sys.api/types.xeto:54-73. No complete-library claim.
 use haystack_core::data::{HDict, HGrid};
 use haystack_core::kinds::{HRef, Kind};
-use haystack_core::xeto::read_by_id::ReadByIdProfile;
+use haystack_core::xeto::catalog::Catalog;
 
 const OPS: &str = "sys.api::ops";
 
 #[test]
 fn pinned_ops_closure_retains_identity_and_zero_argument_contract() {
-    let profile = ReadByIdProfile::load_http_pinned().unwrap();
+    let profile = Catalog::load_http_pinned().unwrap();
     let ops = profile
         .declaration(OPS)
         .expect("pinned ops must be admitted");
@@ -100,7 +100,7 @@ fn valid_row() -> HDict {
 
 #[test]
 fn ops_result_fits_actual_grid_and_each_op_info_row() {
-    let profile = ReadByIdProfile::load_http_pinned().unwrap();
+    let profile = Catalog::load_http_pinned().unwrap();
     profile
         .fit_result(OPS, &Kind::Grid(Box::default()))
         .unwrap();

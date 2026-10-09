@@ -557,3 +557,59 @@ async fn wire_metadata_continuations_can_move_between_http_and_embedding() {
         assert!(third.meta.missing("cursor"));
     }
 }
+
+#[tokio::test]
+async fn namespace_override_rederives_the_managed_selection_without_stale_pairing() {
+    let (graph, application, _) = fixture();
+    // The shared fixture rows carry a null member, which exact Jeto output
+    // deliberately refuses; use a plain row for the typed dispatch witness.
+    let mut clean = HDict::new();
+    clean.set("id", Kind::Ref(HRef::from_val("clean")));
+    clean.set("site", Kind::Marker);
+    graph.add(clean).unwrap();
+    let original = graph.read(|g| g.activated_catalog().cloned()).unwrap();
+    let mut ns = DefNamespace::new();
+    ns.load_xeto_str("Widget: Dict {\n  site\n}\n", "override")
+        .unwrap();
+    let server_builder = HaystackServer::new(graph.clone())
+        .with_namespace(ns)
+        .with_scoped_reads(application.handle());
+    let server = Server::start(application, server_builder);
+    // The trusted override re-derives the namespace view of the same strict
+    // selection; it never pairs a new namespace with the old observation.
+    let current = graph.read(|g| g.activated_catalog().cloned()).unwrap();
+    assert!(!Arc::ptr_eq(&current, &original));
+    assert_eq!(current.selection_identity(), original.selection_identity());
+    graph.read(|g| {
+        assert!(Arc::ptr_eq(g.namespace_arc().unwrap(), current.namespace()));
+        let ns = g.namespace().unwrap();
+        assert!(ns.get_spec("override::Widget").is_some());
+        assert!(ns.get_spec("sys.api::readById").is_some());
+    });
+    let client = haystack_client::ClientConfig::default()
+        .build_reqwest_client()
+        .unwrap();
+    let response = client
+        .post(format!("{}/readById", server.url))
+        .header("Xeto-Version", "5")
+        .header("Content-Type", "application/json")
+        .body(r#"{"id":"clean"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    // Legacy library mutation stays outside the managed activation authority.
+    for endpoint in ["loadLib", "unloadLib"] {
+        let response = client
+            .post(format!("{}/{endpoint}", server.url))
+            .body("ver:\"3.0\"\nname\n\"override\"\n")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404, "{endpoint}");
+    }
+    assert!(Arc::ptr_eq(
+        &graph.read(|g| g.activated_catalog().cloned()).unwrap(),
+        &current
+    ));
+}

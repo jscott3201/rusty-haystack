@@ -1,0 +1,403 @@
+{
+  "profile": "pinned-xeto-protocol-metadata",
+  "repository": "https://github.com/Project-Haystack/xeto",
+  "commit": "873b922451d3ef4c0c9c08ef3daa542f352d69f3",
+  "license": "AFL-3.0",
+  "complete_libraries": false,
+  "extraction": "Concatenate inclusive 1-based line ranges in order, adding a blank line between ranges. Expand BuildVar quoted names using the pinned xeto-build.props; unknown variables are errors. Metadata is a bootstrap subset of Spec, never an admitted complete Spec declaration. Preserve +Funcs membership. Complete selected protocol declarations and contextual numeric metadata; sys.refs is dependency metadata only.",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "f75c46802a91d13e060f6ea50390353ba44640a4d0709d0a4ba38a9d1c820aa0",
+      "role": "license",
+      "library": "",
+      "lines": []
+    },
+    {
+      "path": "src/xeto/xeto-build.props",
+      "sha256": "4052a489e858e225644aa93fc5807b93063c6957cfb586f4c8ffa647f57279f8",
+      "role": "build",
+      "library": "",
+      "lines": []
+    },
+    {
+      "path": "src/xeto/sys/lib.xeto",
+      "sha256": "850161d4f59f8dde029db961e4697782dba36a3e3bdb475a6bb47b1b820f27a2",
+      "role": "library",
+      "library": "sys",
+      "lines": [
+        [
+          1,
+          24
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys.api/lib.xeto",
+      "sha256": "d2c68736334d4e085f72f418d486b6e1e96393154ebd4b717696342e97bbe224",
+      "role": "library",
+      "library": "sys.api",
+      "lines": [
+        [
+          1,
+          27
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys/types.xeto",
+      "sha256": "9ddb122ce44545ceb5b5f576f73b90b20c84ac24f00089da2f345f542086cad0",
+      "role": "types",
+      "library": "sys",
+      "lines": [
+        [
+          9,
+          10
+        ],
+        [
+          15,
+          16
+        ],
+        [
+          21,
+          22
+        ],
+        [
+          27,
+          28
+        ],
+        [
+          30,
+          31
+        ],
+        [
+          61,
+          77
+        ],
+        [
+          136,
+          137
+        ],
+        [
+          139,
+          140
+        ],
+        [
+          167,
+          173
+        ],
+        [
+          175,
+          176
+        ],
+        [
+          184,
+          186
+        ],
+        [
+          33,
+          50
+        ],
+        [
+          142,
+          143
+        ],
+        [
+          145,
+          146
+        ],
+        [
+          18,
+          19
+        ],
+        [
+          58,
+          59
+        ],
+        [
+          83,
+          84
+        ],
+        [
+          92,
+          100
+        ],
+        [
+          130,
+          131
+        ],
+        [
+          161,
+          162
+        ],
+        [
+          12,
+          13
+        ],
+        [
+          178,
+          182
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys/spec.xeto",
+      "sha256": "d06322bec6c72026ea2abfd0f9204fcc8948b6cd154aedcedb073de93f1b75b9",
+      "role": "metadata",
+      "library": "sys",
+      "lines": [
+        [
+          1,
+          11
+        ],
+        [
+          72,
+          73
+        ],
+        [
+          81,
+          82
+        ],
+        [
+          102,
+          103
+        ],
+        [
+          111,
+          112
+        ],
+        [
+          126,
+          130
+        ],
+        [
+          132,
+          133
+        ],
+        [
+          144,
+          147
+        ],
+        [
+          155,
+          156
+        ],
+        [
+          164,
+          166
+        ],
+        [
+          194,
+          195
+        ],
+        [
+          138,
+          139
+        ],
+        [
+          191,
+          192
+        ],
+        [
+          93,
+          94
+        ],
+        [
+          99,
+          100
+        ],
+        [
+          108,
+          109
+        ],
+        [
+          216,
+          216
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys.api/funcs.xeto",
+      "sha256": "e1930a35a9a9c5e15d2ad04456a396319ac88b16d3902ac432a500d2505bba0e",
+      "role": "functions",
+      "library": "sys.api",
+      "lines": [
+        [
+          1,
+          110
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys.api/errs.xeto",
+      "sha256": "708ccd755c9d200dae7b3a6d66b1948542354c031950901ee8f594075f42d842",
+      "role": "errors",
+      "library": "sys.api",
+      "lines": [
+        [
+          1,
+          26
+        ],
+        [
+          32,
+          39
+        ],
+        [
+          41,
+          53
+        ],
+        [
+          55,
+          59
+        ],
+        [
+          61,
+          68
+        ],
+        [
+          79,
+          98
+        ],
+        [
+          106,
+          113
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys.api/types.xeto",
+      "sha256": "63aaa16533cdc173ac2bf535261ee5dd031f7722e9ed3646b609fc4200bc3a33",
+      "role": "api-types",
+      "library": "sys.api",
+      "lines": [
+        [
+          1,
+          111
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys/timezones.xeto",
+      "sha256": "60ace34ae6b9ceb55cd19a0582c49b2129de0a4e775341b4b5455d4de7f82ab7",
+      "role": "enum",
+      "library": "sys",
+      "lines": [
+        [
+          1,
+          352
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/doc.xeto/Enums.md",
+      "sha256": "8f04283247c9054399b4b9b8b8da8cabfeb4b28bfb0e0b30de9b2e9f0370c0b6",
+      "role": "evidence",
+      "library": "",
+      "lines": []
+    },
+    {
+      "path": "src/xeto/ph/lib.xeto",
+      "sha256": "be87fc37b60dbe9680ddbfce10aead5852495dae01c229e232e0c712a905eae9",
+      "role": "library",
+      "library": "ph",
+      "lines": [
+        [
+          1,
+          28
+        ]
+      ],
+      "declarations": []
+    },
+    {
+      "path": "src/xeto/sys.refs/lib.xeto",
+      "sha256": "33ef7470efd40fe528ab10c6e54bc64b1f3ceb1a6543061fd38617aa3f490742",
+      "role": "dependency",
+      "library": "sys.refs",
+      "lines": [
+        [
+          1,
+          26
+        ]
+      ],
+      "declarations": []
+    },
+    {
+      "path": "src/xeto/ph.protocols/lib.xeto",
+      "sha256": "49dc82850d78c5ddf8b4ffd74866a6ab62a61b5c93fcfe75d95ba4e182468596",
+      "role": "library",
+      "library": "ph.protocols",
+      "lines": [
+        [
+          1,
+          28
+        ]
+      ],
+      "declarations": []
+    },
+    {
+      "path": "src/xeto/ph/kinds.xeto",
+      "sha256": "d06bc47799fa37f021ff959030d49d189e9bb8da352e39c5ad55bf743c00f103",
+      "role": "selected-types",
+      "library": "ph",
+      "lines": [
+        [
+          21,
+          22
+        ]
+      ],
+      "declarations": [
+        "ph::Feature"
+      ]
+    },
+    {
+      "path": "src/xeto/ph.protocols/base.xeto",
+      "sha256": "4150c4ef5a7fe77c8797c3bc3780c25049a09ded81a89f0fc599c1175a83be4a",
+      "role": "selected-types",
+      "library": "ph.protocols",
+      "lines": [
+        [
+          9,
+          15
+        ]
+      ],
+      "declarations": [
+        "ph.protocols::ProtocolAddr"
+      ]
+    },
+    {
+      "path": "src/xeto/ph.protocols/modbus.xeto",
+      "sha256": "55e9df4663dd403f46796cb430910c3d33bad3cb38ec3cf8a56286a6493a1814",
+      "role": "selected-types",
+      "library": "ph.protocols",
+      "lines": [
+        [
+          8,
+          96
+        ]
+      ],
+      "declarations": [
+        "ph.protocols::ModbusAddr",
+        "ph.protocols::ModbusAccess",
+        "ph.protocols::ModbusEncoding",
+        "ph.protocols::ModbusByteOrder",
+        "ph.protocols::ModbusScaleExpr"
+      ]
+    },
+    {
+      "path": "src/xeto/doc.xeto/Specs.md",
+      "sha256": "810f95d5d84d8c08985b6224cf29e0322f1651b9bfb24a5675b517193f1aa174",
+      "role": "evidence",
+      "library": "",
+      "lines": [],
+      "declarations": []
+    },
+    {
+      "path": "src/xeto/sys/validation.xeto",
+      "sha256": "9856b5429bf9609e6c3152eb1da3b375b84e3fd39fbcb703d37a5f9bc1ae0c2f",
+      "role": "evidence",
+      "library": "",
+      "lines": [],
+      "declarations": []
+    }
+  ]
+}

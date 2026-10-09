@@ -445,6 +445,9 @@ fn mismatched_lifecycle_attachment_is_rejected_in_both_configuration_orders() {
         let graph = graph();
         let first = builder(&graph);
         let second = builder(&graph);
+        // Services install the graph-owned catalog observation at
+        // construction; a rejected router must not change it afterwards.
+        let before = graph.read(|graph| (graph.state(), graph.namespace_arc().cloned()));
         let server = HaystackServer::new(graph.clone());
         let server = if scoped_first {
             server
@@ -461,7 +464,12 @@ fn mismatched_lifecycle_attachment_is_rejected_in_both_configuration_orders() {
         };
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("exact application service"));
-        assert!(graph.read(|graph| graph.namespace_arc().is_none()));
+        let after = graph.read(|graph| (graph.state(), graph.namespace_arc().cloned()));
+        assert_eq!(after.0, before.0);
+        assert!(std::sync::Arc::ptr_eq(
+            after.1.as_ref().unwrap(),
+            before.1.as_ref().unwrap()
+        ));
     }
 }
 

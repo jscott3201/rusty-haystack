@@ -3,7 +3,7 @@
 use haystack_core::{
     data::{HDict, HGrid},
     kinds::{HDateTime, HRef, Kind, NominalScalar, Uri},
-    xeto::{parse_xeto, read_by_id::ReadByIdProfile},
+    xeto::{catalog::Catalog, parse_xeto},
 };
 use std::collections::BTreeSet;
 
@@ -18,7 +18,7 @@ fn bare_keyed_enum_members_preserve_metadata_without_becoming_typed_members() {
     assert!(slots[1].meta.is_empty());
 }
 
-fn nominal(profile: &ReadByIdProfile, name: &str, text: &str) -> Kind {
+fn nominal(profile: &Catalog, name: &str, text: &str) -> Kind {
     Kind::Nominal(
         NominalScalar::new(
             name,
@@ -29,7 +29,7 @@ fn nominal(profile: &ReadByIdProfile, name: &str, text: &str) -> Kind {
         .unwrap(),
     )
 }
-fn about(profile: &ReadByIdProfile) -> HDict {
+fn about(profile: &Catalog) -> HDict {
     let mut row = HDict::new();
     row.set("serverName", Kind::Str("test server".into()));
     let time = Kind::DateTime(HDateTime::new(
@@ -50,7 +50,7 @@ fn about(profile: &ReadByIdProfile) -> HDict {
 
 #[test]
 fn selected_system_functions_and_complete_keyed_timezone_are_admitted() {
-    let p = ReadByIdProfile::load_http_pinned().unwrap();
+    let p = Catalog::load_http_pinned().unwrap();
     assert_eq!(
         p.operations()
             .map(|s| s.spec.qname.as_str())
@@ -116,7 +116,7 @@ fn selected_system_functions_and_complete_keyed_timezone_are_admitted() {
 
 #[test]
 fn about_requires_real_typed_fields_and_exact_timezone_membership() {
-    let p = ReadByIdProfile::load_http_pinned().unwrap();
+    let p = Catalog::load_http_pinned().unwrap();
     let row = about(&p);
     p.fit_result("sys.api::about", &Kind::Dict(Box::new(row.clone())))
         .unwrap();
@@ -196,7 +196,7 @@ fn about_requires_real_typed_fields_and_exact_timezone_membership() {
 
 #[test]
 fn selected_read_arguments_and_library_filetype_rows_fit_concrete_types() {
-    let p = ReadByIdProfile::load_http_pinned().unwrap();
+    let p = Catalog::load_http_pinned().unwrap();
     let mut args = HDict::new();
     args.set(
         "ids",

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::kinds::Kind;
 
 /// A resolved slot within a Spec.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Slot {
     /// Slot name.
     pub name: String,
@@ -31,7 +31,7 @@ impl Slot {
 }
 
 /// A resolved Xeto spec (type definition).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
     /// Fully qualified name (`"lib::Name"`).
     pub qname: String,

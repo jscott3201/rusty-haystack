@@ -1,3 +1,4 @@
+mod activation;
 mod system;
 use crate::{
     budget::Budget,
@@ -8,6 +9,7 @@ use crate::{
     types::*,
     wire,
 };
+pub use activation::{CatalogActivation, CatalogActivationError, CatalogActivationLimits};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use haystack_core::{
     data::HDict,
@@ -39,7 +41,9 @@ pub struct ReadService {
     inner: Arc<Inner>,
 }
 struct Inner {
-    registry: crate::registry::Registry,
+    /// Binding of the fixed handler inventory to the most recently observed
+    /// graph catalog. Requests retain their own `Arc`; this is only a cache.
+    registry: Mutex<Arc<crate::registry::Registry>>,
     system: system::SystemInfo,
     lifecycle: Option<Arc<Lifecycle>>,
     graph: SharedGraph,
@@ -106,10 +110,11 @@ impl ReadService {
         limits: ReadLimits,
     ) -> Result<Self, ReadError> {
         limits.validate()?;
-        let registry = crate::registry::Registry::pinned()?;
+        let observation = bootstrap(&graph)?;
+        let registry = Arc::new(crate::registry::Registry::bind(observation)?);
         Ok(Self {
             inner: Arc::new(Inner {
-                registry,
+                registry: Mutex::new(registry),
                 system: system::SystemInfo::new(false),
                 lifecycle: None,
                 graph,
@@ -152,10 +157,24 @@ impl ReadService {
     ) -> Result<Arc<dyn PolicySnapshot>, ReadError> {
         self.inner.policy.snapshot(principal)
     }
-    /// Installed typed HTTP bindings for trusted transport configuration. Caller
-    /// discovery uses the same entries after the request's policy snapshot.
-    pub fn typed_functions(&self) -> impl Iterator<Item = crate::FunctionDescriptor<'_>> {
-        self.inner.registry.descriptors()
+    /// Retained view of the typed bindings for the graph's current catalog
+    /// observation, for trusted transport configuration. Caller discovery
+    /// uses the same per-observation entries after the request's policy
+    /// snapshot. An unmanaged (replaced) graph has no executable functions.
+    pub fn typed_functions(&self) -> crate::TypedFunctions {
+        let observation = self
+            .inner
+            .graph
+            .read(|graph| graph.activated_catalog().cloned());
+        crate::TypedFunctions::new(observation.and_then(|o| self.inner.bound(o).ok()))
+    }
+    /// The fixed supported handler inventory as `(name, qname)` pairs. Routing
+    /// derives from this bounded list, never from a parsed catalog; dispatch
+    /// and discovery still consult each request's retained observation.
+    pub fn supported_functions() -> impl Iterator<Item = (&'static str, &'static str)> {
+        crate::registry::BINDINGS
+            .iter()
+            .map(|(qname, _)| (qname.rsplit("::").next().unwrap_or(qname), *qname))
     }
     pub fn limits(&self) -> &ReadLimits {
         &self.inner.limits
@@ -203,7 +222,8 @@ impl ReadService {
             .as_ref()
             .map(|life| life.admit().map_err(application_read_error))
             .transpose()?;
-        self.begin_with_guard(context, guard, None).await
+        self.begin_with_guard(context, guard, None, self.inner.limits.max_duration)
+            .await
     }
     /// Continue an operation already admitted by this application's transport.
     /// The guard must belong to the exact application; no fresh admission is
@@ -221,7 +241,8 @@ impl ReadService {
         {
             return Err(ReadError::Forbidden);
         }
-        self.begin_with_guard(context, Some(guard), None).await
+        self.begin_with_guard(context, Some(guard), None, self.inner.limits.max_duration)
+            .await
     }
     /// Capture authenticated authority before waiting for an execution slot.
     /// The handle is validated once; body/queue/worker/disclosure share it.
@@ -239,14 +260,20 @@ impl ReadService {
         {
             return Err(ReadError::Forbidden);
         }
-        self.begin_with_guard(context, Some(guard), Some(session))
-            .await
+        self.begin_with_guard(
+            context,
+            Some(guard),
+            Some(session),
+            self.inner.limits.max_duration,
+        )
+        .await
     }
     async fn begin_with_guard(
         &self,
         context: ReadContext,
         guard: Option<WorkGuard>,
         session: Option<crate::SubscriptionSession>,
+        max_duration: std::time::Duration,
     ) -> Result<ReadAdmission, ReadError> {
         if session
             .as_ref()
@@ -255,7 +282,11 @@ impl ReadService {
             return Err(ReadError::Forbidden);
         }
         let now = Instant::now();
-        let deadline = context.deadline.min(now + self.inner.limits.max_duration);
+        // Callers' limits are validated, but an unrepresentable instant must
+        // never panic: it simply cannot tighten the caller's own deadline.
+        let deadline = now
+            .checked_add(max_duration)
+            .map_or(context.deadline, |end| context.deadline.min(end));
         let cancel = context.cancellation.child_token();
         let mut budget = Budget::new(self.inner.limits.clone(), deadline, cancel);
         budget.owner_cancel = guard.as_ref().map(WorkGuard::cancellation);
@@ -455,9 +486,27 @@ impl ReadAdmission {
             .map_or_else(tokio::runtime::Handle::current, |life| life.runtime())
     }
     pub(crate) async fn run_task<T: Send + 'static>(
-        mut self,
+        self,
         task: impl FnOnce(Principal, &mut Budget) -> Result<T, ReadError> + Send + 'static,
     ) -> Result<T, ReadError> {
+        self.run_task_fenced(None, task).await
+    }
+    /// As `run_task`, with an optional commit fence shared with the worker. A
+    /// caller stop (deadline, cancellation, session revocation, owner stop)
+    /// wins only if it abandons the fence before the worker commits. Once the
+    /// worker has committed an effect, the caller awaits its actual outcome,
+    /// so a published effect is never reported as a stop.
+    pub(crate) async fn run_task_fenced<T: Send + 'static>(
+        mut self,
+        fence: Option<Arc<activation::CommitFence>>,
+        task: impl FnOnce(Principal, &mut Budget) -> Result<T, ReadError> + Send + 'static,
+    ) -> Result<T, ReadError> {
+        enum Stop {
+            Deadline,
+            Cancelled,
+            Forbidden,
+            Owner,
+        }
         let mut budget = self.budget.take().expect("live admission");
         let principal = self.principal.take().expect("live admission");
         let permit = self.permit.take().expect("live admission");
@@ -482,31 +531,38 @@ impl ReadAdmission {
         // capture still owns any queued or running work until actual exit.
         let _completion_lease = budget.lease.as_ref().expect("installed lease").clone();
         let mut job = spawn_worker(inner, principal, task, budget);
-        let result = tokio::select! {
+        let stopped = tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                cancel.cancel();
-                job.abort();
-                Err(ReadError::Deadline)
-            },
-            _ = cancel.cancelled() => {
-                job.abort();
-                Err(ReadError::Cancelled)
-            },
-            _ = async { match &session { Some(session) => session.cancelled().await, None => std::future::pending::<()>().await } } => {
-                cancel.cancel(); job.abort(); Err(ReadError::Forbidden)
-            },
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Err(Stop::Deadline),
+            _ = cancel.cancelled() => Err(Stop::Cancelled),
+            _ = async { match &session { Some(session) => session.cancelled().await, None => std::future::pending::<()>().await } } => Err(Stop::Forbidden),
             // A completed result wins an owner stop racing delivery. The
             // caller's cancellation and absolute deadline keep their priority;
             // an in-flight worker still takes the prompt owner-stop branch.
-            result = &mut job => result.map_err(|_| ReadError::Unavailable)?,
+            result = &mut job => Ok(result),
             _ = async {
                 match owner_cancel { Some(token) => token.cancelled().await, None => std::future::pending::<()>().await }
-            } => {
-                cancel.cancel();
-                job.abort();
-                Err(ReadError::Cancelled)
+            } => Err(Stop::Owner),
+        };
+        let result = match stopped {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => return Err(ReadError::Unavailable),
+            // The worker passed its commit point: report what it actually did.
+            Err(_) if fence.as_ref().is_some_and(|fence| !fence.abandon()) => match job.await {
+                Ok(result) => result,
+                Err(_) => return Err(ReadError::Unavailable),
             },
+            Err(stop) => {
+                if !matches!(stop, Stop::Cancelled) {
+                    cancel.cancel();
+                }
+                job.abort();
+                Err(match stop {
+                    Stop::Deadline => ReadError::Deadline,
+                    Stop::Cancelled | Stop::Owner => ReadError::Cancelled,
+                    Stop::Forbidden => ReadError::Forbidden,
+                })
+            }
         };
         // A stop is a prompt request outcome, not proof that the worker exited.
         // Awaiting an aborted spawn_blocking job can wait indefinitely behind
@@ -538,7 +594,112 @@ fn spawn_worker<T: Send + 'static>(
     }
 }
 
+/// Install the pinned bootstrap observation on an unmanaged graph, deriving its
+/// namespace from the graph's current one off-lock, or reuse the graph's
+/// existing observation. Construction only: a graph later replaced by a raw
+/// unmanaged graph is never silently re-bootstrapped by running services.
+///
+/// The pinned closure is admitted once. Publication compares only the inputs
+/// the observation was derived from (incarnation, catalog generation, base
+/// namespace identity), so concurrent entity writes never force a retry.
+/// Installing it deliberately advances the graph's catalog generation once and
+/// emits one catalog wake: the namespace gains the admitted declarations.
+fn bootstrap(
+    graph: &SharedGraph,
+) -> Result<Arc<haystack_core::xeto::catalog::ActivatedCatalog>, ReadError> {
+    bootstrap_with(graph, || {})
+}
+fn bootstrap_with(
+    graph: &SharedGraph,
+    mut before_publish: impl FnMut(),
+) -> Result<Arc<haystack_core::xeto::catalog::ActivatedCatalog>, ReadError> {
+    use haystack_core::xeto::catalog::{ActivatedCatalog, Catalog};
+    let mut prepared: Option<(Option<Arc<DefNamespace>>, Arc<ActivatedCatalog>)> = None;
+    // Only a concurrent catalog change (namespace replacement or another
+    // initializer) can force another attempt.
+    for _ in 0..8 {
+        let (state, current, base) = graph.read(|g| {
+            (
+                g.state(),
+                g.activated_catalog().cloned(),
+                g.namespace_arc().cloned(),
+            )
+        });
+        if let Some(current) = current {
+            return Ok(current);
+        }
+        let reusable = prepared
+            .as_ref()
+            .is_some_and(|(prior, _)| match (prior, &base) {
+                (None, None) => true,
+                (Some(prior), Some(base)) => Arc::ptr_eq(prior, base),
+                _ => false,
+            });
+        // Admit and compile only when the derivation base differs from the
+        // prepared one (the first attempt, or after a namespace replacement).
+        if !reusable {
+            let catalog = Catalog::load_http_pinned().map_err(|_| ReadError::InvalidLimits)?;
+            let candidate = ActivatedCatalog::new(catalog, base.as_deref())
+                .map_err(|_| ReadError::InvalidLimits)?;
+            prepared = Some((base.clone(), Arc::new(candidate)));
+        }
+        let candidate = prepared.as_ref().expect("prepared candidate").1.clone();
+        before_publish();
+        if graph
+            .write(|g| g.compare_initialize_catalog(state, base.as_ref(), candidate.clone()))
+            .is_ok()
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(ReadError::Unavailable)
+}
+
+/// The retained observation must still be the graph's current one before any
+/// graph evaluation; otherwise discovery, fitting and data could mix versions.
+fn current_observation(
+    graph: &haystack_core::graph::EntityGraph,
+    registry: &crate::registry::Registry,
+) -> Result<(), crate::ApiError> {
+    match graph.activated_catalog() {
+        Some(current) if Arc::ptr_eq(current, registry.observation()) => Ok(()),
+        _ => Err(crate::ApiError::Unavailable),
+    }
+}
+
 impl Inner {
+    /// Bind (or reuse the cached binding of) one observation. Binding happens
+    /// outside the cache lock; a stale overwrite only costs a later rebind.
+    pub(crate) fn bound(
+        &self,
+        observation: Arc<haystack_core::xeto::catalog::ActivatedCatalog>,
+    ) -> Result<Arc<crate::registry::Registry>, ReadError> {
+        {
+            let cached = self.registry.lock();
+            if Arc::ptr_eq(cached.observation(), &observation) {
+                return Ok(cached.clone());
+            }
+        }
+        let registry = Arc::new(crate::registry::Registry::bind(observation)?);
+        *self.registry.lock() = registry.clone();
+        Ok(registry)
+    }
+    /// Capture the graph's current observation once per typed request.
+    fn capture_registry(
+        &self,
+        budget: &mut Budget,
+    ) -> Result<Arc<crate::registry::Registry>, crate::ApiError> {
+        let observation = loop {
+            if let Some(observation) = self.graph.read_for(budget.wait_quantum()?, |graph| {
+                graph.activated_catalog().cloned()
+            }) {
+                break observation;
+            }
+        };
+        let observation = observation.ok_or(crate::ApiError::Unavailable)?;
+        self.bound(observation)
+            .map_err(|_| crate::ApiError::Unavailable)
+    }
     fn execute_typed(
         &self,
         principal: Principal,
@@ -564,9 +725,15 @@ impl Inner {
         if !policy.operation(ReadOperation::Read) {
             return Err(ApiError::Permission);
         }
-        let entry = self
-            .registry
-            .resolve(&envelope.operation, policy.as_ref(), budget)?;
+        // One retained observation serves resolution, discovery, argument
+        // decoding/defaults/fitting, metadata and result encoding. Graph
+        // evaluation below first verifies it is still the graph's current one.
+        let registry = self.capture_registry(budget)?;
+        #[cfg(test)]
+        if let Some(hook) = &budget.typed_lookup_hook {
+            hook();
+        }
+        let entry = registry.resolve(&envelope.operation, policy.as_ref(), budget)?;
         entry.permits_method(input.post)?;
         let request = typed_http::decode(&input, &entry.wire, envelope, budget)?;
         // Reserve native binding copies before the binder constructs immutable
@@ -584,15 +751,14 @@ impl Inner {
                 })
                 .saturating_add(4096),
         )?;
-        let args = self
-            .registry
-            .profile
+        let args = registry
+            .catalog()
             .fit_arguments(&entry.identity.qname, &request.args)
             .map_err(|_| ApiError::InvalidArgs)?;
         let value = match entry.handler {
-            crate::registry::Handler::Ops => self.registry.ops(policy.as_ref(), budget)?,
-            crate::registry::Handler::About => self.about(&principal, budget)?,
-            crate::registry::Handler::Libs => self.libraries(policy.as_ref(), budget)?,
+            crate::registry::Handler::Ops => registry.ops(policy.as_ref(), budget)?,
+            crate::registry::Handler::About => self.about(&registry, &principal, budget)?,
+            crate::registry::Handler::Libs => self.libraries(&registry, policy.as_ref(), budget)?,
             crate::registry::Handler::Filetypes => self.filetypes(request.version, budget)?,
             crate::registry::Handler::Close => {
                 if session.is_none() {
@@ -603,7 +769,7 @@ impl Inner {
             handler @ (crate::registry::Handler::ReadByIds
             | crate::registry::Handler::Read
             | crate::registry::Handler::ReadAll) => {
-                match self.system_read(handler, args.values(), policy.as_ref(), budget) {
+                match self.system_read(&registry, handler, args.values(), policy.as_ref(), budget) {
                     Err(ApiError::UnknownEntity) => return typed_http::missing(&request, budget),
                     value => value?,
                 }
@@ -616,13 +782,14 @@ impl Inner {
                     Some(Kind::Ref(id)) => loop {
                         let wait = budget.wait_quantum()?;
                         if let Some(result) = self.graph.read_for(wait, |graph| {
+                            current_observation(graph, &registry)?;
                             budget.charge(BudgetKind::Candidates, 1)?;
                             let mut view = View {
                                 graph,
                                 policy: policy.as_ref(),
                                 budget,
                             };
-                            view.entity(&id.val)
+                            Ok::<_, ApiError>(view.entity(&id.val)?)
                         }) {
                             match result? {
                                 Some(row) => {
@@ -639,8 +806,8 @@ impl Inner {
                 }
             }
         };
-        self.registry
-            .profile
+        registry
+            .catalog()
             .fit_result(&entry.identity.qname, &value)
             .map_err(|_| ApiError::Internal)?;
         let response = typed_http::encode(value, &request, &entry.wire, budget)?;
@@ -1465,9 +1632,8 @@ mod registry_dispatch_tests {
             ReadLimits::default(),
         )
         .unwrap();
-        Arc::get_mut(&mut service.inner)
+        Arc::get_mut(Arc::get_mut(&mut service.inner).unwrap().registry.get_mut())
             .unwrap()
-            .registry
             .disable_read_get_for_test();
         let context =
             || ReadContext::with_timeout(Principal::Anonymous, std::time::Duration::from_secs(1));

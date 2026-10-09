@@ -15,6 +15,7 @@ use crate::data::{HCol, HDict, HGrid};
 use crate::filter::{CmpOp, FilterNode, matches_with_ns, parse_filter};
 use crate::kinds::{HRef, Kind};
 use crate::ontology::{DefNamespace, ValidationIssue};
+use crate::xeto::catalog::ActivatedCatalog;
 
 use super::adjacency::RefAdjacency;
 use super::bitmap::TagBitmapIndex;
@@ -68,6 +69,8 @@ pub struct EntityGraph {
     adjacency: RefAdjacency,
     /// Optional ontology namespace for spec-aware operations.
     namespace: Option<Arc<DefNamespace>>,
+    /// Managed selected-catalog observation; `namespace` is derived from it.
+    activated: Option<Arc<ActivatedCatalog>>,
     /// Changes when the catalog is replaced, independently of entity revision.
     catalog_generation: u64,
     /// Distinguishes replacement graphs even when their revisions coincide.
@@ -177,6 +180,7 @@ impl EntityGraph {
             tag_index: TagBitmapIndex::new(),
             adjacency: RefAdjacency::new(),
             namespace: None,
+            activated: None,
             catalog_generation: 0,
             incarnation: rand::random(),
             version: 0,
@@ -227,6 +231,75 @@ impl EntityGraph {
     /// ontology to another graph.
     pub fn namespace_arc(&self) -> Option<&Arc<DefNamespace>> {
         self.namespace.as_ref()
+    }
+
+    /// Immutable selected schema, namespace, callable and codec observation.
+    /// `None` means this graph is unmanaged (or was replaced by a raw graph).
+    pub fn activated_catalog(&self) -> Option<&Arc<ActivatedCatalog>> {
+        self.activated.as_ref()
+    }
+
+    /// Install the first managed observation, built off-lock over `base`, the
+    /// namespace captured with `expected`. Only the inputs the observation was
+    /// derived from are compared: incarnation, catalog generation and the base
+    /// namespace identity. Initialization validates no entity data, so
+    /// concurrent entity writes do not invalidate it. A managed graph is never
+    /// re-bootstrapped: a replacement graph without an observation stays
+    /// unmanaged until its owner explicitly initializes it.
+    pub fn compare_initialize_catalog(
+        &mut self,
+        expected: super::changelog::GraphState,
+        base: Option<&Arc<DefNamespace>>,
+        catalog: Arc<ActivatedCatalog>,
+    ) -> Result<u64, CatalogChanged> {
+        let same_base = match (self.namespace.as_ref(), base) {
+            (None, None) => true,
+            (Some(current), Some(base)) => Arc::ptr_eq(current, base),
+            _ => false,
+        };
+        if self.activated.is_some()
+            || self.incarnation != expected.incarnation
+            || self.catalog_generation != expected.catalog_generation
+            || !same_base
+        {
+            return Err(CatalogChanged);
+        }
+        self.publish_catalog(catalog)
+    }
+
+    /// Publish a fully prepared observation under exact graph and observation
+    /// identity. Validation, parsing and allocation belong to preparation; this
+    /// critical section only replaces the retained handles. Entity revision
+    /// and incarnation are unchanged; the catalog generation advances once.
+    pub fn compare_activate_catalog(
+        &mut self,
+        expected: super::changelog::GraphState,
+        old: &Arc<ActivatedCatalog>,
+        next: Arc<ActivatedCatalog>,
+    ) -> Result<u64, CatalogChanged> {
+        if self.state() != expected
+            || Arc::ptr_eq(old, &next)
+            || !self
+                .activated
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, old))
+        {
+            return Err(CatalogChanged);
+        }
+        self.publish_catalog(next)
+    }
+
+    fn publish_catalog(&mut self, next: Arc<ActivatedCatalog>) -> Result<u64, CatalogChanged> {
+        let generation = self
+            .catalog_generation
+            .checked_add(1)
+            .ok_or(CatalogChanged)?;
+        self.namespace = Some(next.namespace().clone());
+        self.activated = Some(next);
+        self.catalog_generation = generation;
+        // Spec-match results depend on the observation as much as on entities.
+        self.query_cache.lock().clear();
+        Ok(generation)
     }
 
     /// Catalog revision captured under the same graph guard as entity revision.
@@ -299,12 +372,26 @@ impl EntityGraph {
     ///
     /// Callers that must not have the ontology shift under them should keep their
     /// own `namespace_arc()` handle instead.
+    ///
+    /// On a managed graph the namespace is a derived view of the activated
+    /// selection, so a trusted replacement re-derives a new observation of the
+    /// same selection over `ns` rather than pairing it with stale strict state.
+    /// Retained observations become non-current through the new identity and
+    /// generation; strict declarations, fitting and callables are unchanged.
     pub fn set_namespace(&mut self, ns: impl Into<Arc<DefNamespace>>) {
         self.catalog_generation = self
             .catalog_generation
             .checked_add(1)
             .expect("catalog generation exhausted");
-        self.namespace = Some(ns.into());
+        let ns = ns.into();
+        if let Some(current) = self.activated.take() {
+            let rebased = Arc::new(current.rebase(Arc::unwrap_or_clone(ns)));
+            self.namespace = Some(rebased.namespace().clone());
+            self.activated = Some(rebased);
+            self.query_cache.lock().clear();
+            return;
+        }
+        self.namespace = Some(ns);
         // The query cache is keyed on (filter, version), and this does not bump the
         // version — no entity changed, so waking every watcher would be noise. But
         // `version` has a second consumer: a spec-match result depends on the

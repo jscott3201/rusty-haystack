@@ -17,16 +17,14 @@ fn pinned_read_by_id_signature_parses() {
 
 use haystack_core::data::HDict;
 use haystack_core::kinds::{Float, HRef, Kind};
-use haystack_core::xeto::read_by_id::{
-    ArgumentOrigin, ProfileError, READ_BY_ID_UPSTREAM_COMMIT, ReadByIdProfile,
-};
+use haystack_core::xeto::catalog::{ArgumentOrigin, Catalog, PINNED_XETO_REVISION, ProfileError};
 use std::collections::BTreeSet;
 
 const OP: &str = "sys.api::readById";
 
 #[test]
 fn catalog_matches_independent_pinned_declaration_oracle() {
-    let profile = ReadByIdProfile::load_pinned().unwrap();
+    let profile = Catalog::load_pinned().unwrap();
     // These expectations were transcribed from upstream, not generated from the
     // extraction manifest or this implementation's resolution output.
     let expected = [
@@ -111,7 +109,7 @@ fn catalog_matches_independent_pinned_declaration_oracle() {
 
 #[test]
 fn discovery_reports_only_the_same_admitted_subset() {
-    let profile = ReadByIdProfile::load_pinned().unwrap();
+    let profile = Catalog::load_pinned().unwrap();
     assert_eq!(
         profile
             .operations()
@@ -172,7 +170,7 @@ fn discovery_reports_only_the_same_admitted_subset() {
             "val"
         ]
     );
-    assert_eq!(profile.provenance().commit, READ_BY_ID_UPSTREAM_COMMIT);
+    assert_eq!(profile.provenance().commit, PINNED_XETO_REVISION);
     assert_eq!(profile.provenance().files.len(), 7);
     assert!(!profile.provenance().complete_libraries);
     let funcs = profile
@@ -189,7 +187,7 @@ fn discovery_reports_only_the_same_admitted_subset() {
 
 #[test]
 fn no_inherit_metadata_is_applied_from_the_selected_schema() {
-    let profile = ReadByIdProfile::load_pinned().unwrap();
+    let profile = Catalog::load_pinned().unwrap();
     let scalar = profile.effective_metadata("sys::Scalar").unwrap();
     assert!(scalar.contains_key("abstract"));
     assert!(!scalar.contains_key("sealed"));
@@ -201,7 +199,7 @@ fn no_inherit_metadata_is_applied_from_the_selected_schema() {
 
 #[test]
 fn native_binding_retains_presence_and_parameter_default_origins() {
-    let profile = ReadByIdProfile::load_pinned().unwrap();
+    let profile = Catalog::load_pinned().unwrap();
     // Independent behavior oracle: Haxall Api5Test.fan at
     // aded27993c2d4834eca4b44ca55671417a1a7ea2, lines 70-71 and 228-231.
     // Omitted id binds null, never the Ref construction default @x.
@@ -229,7 +227,7 @@ fn native_binding_retains_presence_and_parameter_default_origins() {
 
 #[test]
 fn present_wrong_kinds_do_not_fit_nullable_or_defaulted_parameters() {
-    let profile = ReadByIdProfile::load_pinned().unwrap();
+    let profile = Catalog::load_pinned().unwrap();
     for (name, value) in [
         ("id", Kind::Str("site-1".into())),
         ("id", Kind::Bool(false)),
@@ -261,7 +259,7 @@ fn present_wrong_kinds_do_not_fit_nullable_or_defaulted_parameters() {
 
 #[test]
 fn nullable_result_is_dict_or_null_and_keeps_rich_dict_contents() {
-    let profile = ReadByIdProfile::load_pinned().unwrap();
+    let profile = Catalog::load_pinned().unwrap();
     let mut entity = HDict::new();
     entity.set("id", Kind::Ref(HRef::from_val("site-1")));
     entity.set("count", Kind::Int(i64::MAX));
@@ -330,9 +328,9 @@ fn parser_preserves_augmentation_qualified_member_refs_and_type_defaults() {
 
 #[test]
 fn pinned_http_closure_is_reachable_and_error_fields_fit_their_declared_types() {
-    let profile = ReadByIdProfile::load_http_pinned().unwrap();
+    let profile = Catalog::load_http_pinned().unwrap();
     assert_eq!(profile.provenance().profile, "pinned-xeto-readById-http");
-    assert_eq!(profile.provenance().commit, READ_BY_ID_UPSTREAM_COMMIT);
+    assert_eq!(profile.provenance().commit, PINNED_XETO_REVISION);
     for name in [
         "sys::Number",
         "sys::Int",
