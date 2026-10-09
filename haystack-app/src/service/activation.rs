@@ -943,6 +943,17 @@ Tag: sys::Dict { note:Str? }
         .unwrap();
         assert_eq!(attempts, 2);
         assert!(graph.read(|g| Arc::ptr_eq(g.activated_catalog().unwrap(), &observation)));
+        // The admitted pinned selection is shared process-wide, but every
+        // installation is its own observation with its own derived namespace.
+        let other = bootstrap(&self::graph(&[])).unwrap();
+        assert!(!Arc::ptr_eq(&other, &observation));
+        assert!(!Arc::ptr_eq(other.namespace(), observation.namespace()));
+        assert!(std::ptr::eq(other.catalog(), observation.catalog()));
+        assert!(std::ptr::eq(
+            other.catalog(),
+            pinned_bootstrap().unwrap().catalog()
+        ));
+        assert_eq!(other.selection_identity(), observation.selection_identity());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

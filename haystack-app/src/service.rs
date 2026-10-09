@@ -604,16 +604,37 @@ fn spawn_worker<T: Send + 'static>(
 /// namespace identity), so concurrent entity writes never force a retry.
 /// Installing it deliberately advances the graph's catalog generation once and
 /// emits one catalog wake: the namespace gains the admitted declarations.
+///
+/// The pinned selection (embedded sources, strict compilation and callable
+/// codec contexts) is admitted once per process and shared. Each installation
+/// still derives its own namespace over the graph's base and is a distinct
+/// observation, so identity-based currency checks stay per installation.
 fn bootstrap(
     graph: &SharedGraph,
 ) -> Result<Arc<haystack_core::xeto::catalog::ActivatedCatalog>, ReadError> {
     bootstrap_with(graph, || {})
 }
+/// The process-wide admitted pinned bootstrap. Its inputs are embedded
+/// sources, so the result never varies; a failure is a build defect and is
+/// reported on every construction rather than retried.
+fn pinned_bootstrap() -> Result<&'static haystack_core::xeto::catalog::ActivatedCatalog, ReadError>
+{
+    use haystack_core::xeto::catalog::{ActivatedCatalog, Catalog};
+    static PINNED: std::sync::OnceLock<Option<ActivatedCatalog>> = std::sync::OnceLock::new();
+    PINNED
+        .get_or_init(|| {
+            Catalog::load_http_pinned()
+                .ok()
+                .and_then(|catalog| ActivatedCatalog::new(catalog, None).ok())
+        })
+        .as_ref()
+        .ok_or(ReadError::InvalidLimits)
+}
 fn bootstrap_with(
     graph: &SharedGraph,
     mut before_publish: impl FnMut(),
 ) -> Result<Arc<haystack_core::xeto::catalog::ActivatedCatalog>, ReadError> {
-    use haystack_core::xeto::catalog::{ActivatedCatalog, Catalog};
+    use haystack_core::xeto::catalog::ActivatedCatalog;
     let mut prepared: Option<(Option<Arc<DefNamespace>>, Arc<ActivatedCatalog>)> = None;
     // Only a concurrent catalog change (namespace replacement or another
     // initializer) can force another attempt.
@@ -635,12 +656,11 @@ fn bootstrap_with(
                 (Some(prior), Some(base)) => Arc::ptr_eq(prior, base),
                 _ => false,
             });
-        // Admit and compile only when the derivation base differs from the
-        // prepared one (the first attempt, or after a namespace replacement).
+        // Derive only when the base differs from the prepared one (the first
+        // attempt, or after a namespace replacement).
         if !reusable {
-            let catalog = Catalog::load_http_pinned().map_err(|_| ReadError::InvalidLimits)?;
-            let candidate = ActivatedCatalog::new(catalog, base.as_deref())
-                .map_err(|_| ReadError::InvalidLimits)?;
+            let candidate =
+                pinned_bootstrap()?.rebase(base.as_deref().cloned().unwrap_or_default());
             prepared = Some((base.clone(), Arc::new(candidate)));
         }
         let candidate = prepared.as_ref().expect("prepared candidate").1.clone();
