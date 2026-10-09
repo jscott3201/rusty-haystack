@@ -38,6 +38,7 @@ Verify all retained bytes and reproduce source selections locally:
 ```sh
 python3 haystack-core/xeto-profiles/read-by-id/verify.py
 python3 haystack-core/xeto-profiles/read-by-id/verify.py --http
+python3 haystack-core/xeto-profiles/read-by-id/verify.py --protocol
 # Optionally materialize the selected sources for inspection:
 python3 haystack-core/xeto-profiles/read-by-id/verify.py --output /tmp/read-by-id-sources
 ```
@@ -50,7 +51,7 @@ admitted handle. Library views explicitly report `complete: false`.
 
 ## Admitted semantics and native API
 
-`haystack_core::xeto::read_by_id::ReadByIdProfile::load_pinned()` produces an
+`haystack_core::xeto::catalog::Catalog::load_pinned()` produces an
 immutable catalog. Its 11 types are `Obj`, `Scalar`, `Marker`, `Str`, `Bool`, `Ref`,
 `Collection`, `Dict`, `Interface`, `Func`, and `Funcs`; its sole function is
 `sys.api::readById`. Metadata fields admitted from the Spec schema are `abstract`,
@@ -125,6 +126,64 @@ preserved. Missing closure members, unresolved `of` targets, duplicate declarati
 and unsupported signatures fail admission. The [HTTP executable
 profile](../../../docs/typed-http-read.md) documents the application registry and
 transport policy separately from core admission.
+
+## Selected protocol-metadata closure (M2-PR07)
+
+`Catalog::load_protocol_pinned()` uses `protocol-manifest.json`: the HTTP closure plus
+eight complete selected declarations, each retained with its full body, source file
+checksum and line range, and its declaring library's dependency metadata:
+
+| Declaration | Pinned source | Admitted semantics |
+|---|---|---|
+| `sys::Entity` | sys/types.xeto:178-182 | abstract Dict; required `id: Ref`; nullable `spec: Ref?<of:Spec>` resolved against catalog declarations only |
+| `ph::Feature` | ph/kinds.xeto:21-22 | abstract Dict |
+| `ph.protocols::ProtocolAddr` | ph.protocols/base.xeto:9-15 | abstract Dict; required `addr: Str` |
+| `ph.protocols::ModbusAddr` | ph.protocols/modbus.xeto:17 | inherited `addr` with its literal `pattern`; required `encoding`; `bitIndex: Int?` bounded by `minVal: 0`/`maxVal: 15`; `access` declaration default nominal `r`; nullable `scale`, `byteOrder`, `dis` |
+| `ModbusAccess`, `ModbusEncoding`, `ModbusByteOrder` | modbus.xeto:50/57/71 | finite enums with exact keys and nominal identity |
+| `ModbusScaleExpr` | modbus.xeto:96 | nominal Scalar identity only; the prose grammar is not enforced or evaluated |
+
+`sys::This` is admitted as the metadata dependency used by `minVal`/`maxVal`; the
+unitless source literals bind contextually to the Int constraint without coercing
+stored values. `ph` declares `sys.refs`, retained as a dependency-only identity
+(583 bytes, SHA-256 `33ef7470…0742`) with no admitted declarations. Every library
+reports `complete: false`. `sys::Spec`, `ph::PhEntity` and its global augmentations,
+Site/Device, `ph.protocols/globals.xeto`, Query/inverse/transitive traversal and
+every other upstream declaration remain unsupported and are not advertised.
+
+`Catalog::with_project(lib, source, markers)` adds one project-owned Dict library
+identified by its own digest, never attributed to upstream. Explicit marker
+bindings (for example `pump -> fixture::Pump`) are part of the selection.
+Strict fitting (`fit_entity`) compiles inherited slots and constraints, checks
+nested structural specs, nullable slots, exact enum/nominal provenance and
+target-constrained entity references through a caller-controlled record view. It
+never inserts declaration defaults or rewrites values; `slot_default` constructs
+defaults separately for callers building new data.
+
+Unresolved bases, query and global slots, augmentations, replacement of pinned
+libraries and unknown references are resolution errors (issue #21: no selected
+type silently matches every entity). The bundled issue #46 `VavZoneAhu` inverse
+Query snippet remains an explicit unsupported rejection; no rename is implied.
+
+### Activation
+
+`ActivatedCatalog` binds one selection, its derived compatibility namespace,
+declaration provenance and callable codec contexts. A managed graph publishes
+exactly one at a time. `SharedGraph::activate_catalog` is reject-on-invalid-
+affected-data: the candidate is compiled off-lock, the union of old and candidate
+associations (explicit `spec` references into admitted libraries and marker
+bindings) is validated over borrowed records, including records an application
+hides, in bounded chunks that must all observe the same `GraphState`, and
+publication compares the full `GraphState` and observation identity before the
+caller's commit point. Entity-only changes restart validation a bounded number
+of times, then report `Conflict`. Every attempt scans the whole graph;
+incremental revalidation is a follow-up. Unloading cannot discard an existing
+obligation. Selection admission (`with_project`) compiles the callable codec
+contexts, so selections beyond the codec bounds (256 context definitions,
+1024-byte patterns) fail there with the function and declaration named.
+Failures publish nothing and emit no wake; success emits one catalog wake after
+unlocking. Rejections display without entity ids, values or schema names; the
+privileged detail is read explicitly. Runtime catalog generation, the selection
+digest and the pinned source revision stored in nominal values remain distinct.
 
 ## Independent validation evidence
 

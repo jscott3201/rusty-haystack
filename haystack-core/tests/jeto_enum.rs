@@ -2,10 +2,10 @@
 use haystack_core::{
     codecs::jeto::{self, Boxing, Context, Definition, Encoding, Limits},
     kinds::{Kind, NominalScalar},
-    xeto::read_by_id::ReadByIdProfile,
+    xeto::catalog::Catalog,
 };
 fn context() -> Context {
-    let p = ReadByIdProfile::load_http_pinned().unwrap();
+    let p = Catalog::load_http_pinned().unwrap();
     Context::new(
         &p.provenance().repository,
         &p.provenance().commit,
@@ -145,7 +145,7 @@ fn finite_enum_tables_are_bounded_and_reject_duplicate_effective_keys() {
             .is_err()
         );
     }
-    let p = ReadByIdProfile::load_http_pinned().unwrap();
+    let p = Catalog::load_http_pinned().unwrap();
     let context = context();
     for key in p.enum_keys("sys::TimeZone").unwrap() {
         let actual = jeto::decode(

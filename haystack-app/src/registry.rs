@@ -1,5 +1,7 @@
-//! Executable support is an application decision made once at construction.
-//! The admitted catalog supplies signatures; immutable bindings supply handlers.
+//! Executable support is a fixed application inventory of native handlers.
+//! Each graph-published catalog observation supplies the signatures, metadata
+//! and codec contexts those handlers are bound to; a binding never outlives or
+//! mixes observations.
 use crate::{
     ApiError, BudgetKind, CatalogKind, PolicySnapshot, ReadError, ReadOperation, budget::Budget,
     typed_http::WireProfile,
@@ -7,9 +9,24 @@ use crate::{
 use haystack_core::{
     data::{HDict, HGrid},
     kinds::{HRef, Kind},
-    xeto::read_by_id::{AdmittedSpec, ReadByIdProfile},
+    xeto::catalog::{ActivatedCatalog, AdmittedSpec, Catalog},
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
+
+/// The bounded supported-handler inventory. Routing is derived from this list,
+/// never from a parsed catalog, so a newly admitted declaration cannot create
+/// an executable route.
+pub(crate) const BINDINGS: &[(&str, Handler)] = &[
+    ("sys.api::readById", Handler::ReadById),
+    ("sys.api::ops", Handler::Ops),
+    ("sys.api::readByIds", Handler::ReadByIds),
+    ("sys.api::read", Handler::Read),
+    ("sys.api::readAll", Handler::ReadAll),
+    ("sys.api::about", Handler::About),
+    ("sys.api::close", Handler::Close),
+    ("sys.api::libs", Handler::Libs),
+    ("sys.api::filetypes", Handler::Filetypes),
+];
 
 /// Stable identity supplied to the explicit per-function execution decision.
 /// Catalog visibility and coarse read permission do not grant this decision.
@@ -80,40 +97,93 @@ impl Entry {
 }
 
 pub(crate) struct Registry {
-    pub profile: ReadByIdProfile,
+    observation: Arc<ActivatedCatalog>,
     entries: Vec<Entry>,
 }
-impl Registry {
-    pub fn pinned() -> Result<Self, ReadError> {
-        let profile = ReadByIdProfile::load_http_pinned().map_err(|_| ReadError::InvalidLimits)?;
-        Self::bind(
-            profile,
-            &[
-                ("sys.api::readById", Handler::ReadById),
-                ("sys.api::ops", Handler::Ops),
-                ("sys.api::readByIds", Handler::ReadByIds),
-                ("sys.api::read", Handler::Read),
-                ("sys.api::readAll", Handler::ReadAll),
-                ("sys.api::about", Handler::About),
-                ("sys.api::close", Handler::Close),
-                ("sys.api::libs", Handler::Libs),
-                ("sys.api::filetypes", Handler::Filetypes),
-            ],
-        )
+
+/// Retained, owned view of typed bindings for one catalog observation. The
+/// descriptors borrow this view, never a temporary or permanent registry.
+pub struct TypedFunctions(Option<Arc<Registry>>);
+impl TypedFunctions {
+    pub(crate) fn new(registry: Option<Arc<Registry>>) -> Self {
+        Self(registry)
     }
-    fn bind(profile: ReadByIdProfile, bindings: &[(&str, Handler)]) -> Result<Self, ReadError> {
+    pub fn iter(&self) -> impl Iterator<Item = FunctionDescriptor<'_>> {
+        self.0.iter().flat_map(|registry| registry.descriptors())
+    }
+    /// Digest of the observation these descriptors were bound to, if any.
+    pub fn selection_identity(&self) -> Option<&str> {
+        self.0
+            .as_ref()
+            .map(|registry| registry.observation.selection_identity())
+    }
+}
+/// Why the fixed handler inventory cannot bind to an observation. Carries the
+/// declaration identity rather than a generic service-limits error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BindError {
+    pub declaration: String,
+    pub reason: &'static str,
+}
+impl BindError {
+    fn new(declaration: &str, reason: &'static str) -> Self {
+        Self {
+            declaration: declaration.into(),
+            reason,
+        }
+    }
+}
+impl Registry {
+    /// Bind the complete fixed inventory to one observation. Any missing or
+    /// incompatible handler signature rejects the whole observation. Service
+    /// construction keeps reporting this as `InvalidLimits`; activation uses
+    /// [`Registry::bind_checked`] and reports the declaration.
+    pub fn bind(observation: Arc<ActivatedCatalog>) -> Result<Self, ReadError> {
+        Self::bind_checked(observation).map_err(|_| ReadError::InvalidLimits)
+    }
+    pub fn bind_checked(observation: Arc<ActivatedCatalog>) -> Result<Self, BindError> {
+        Self::bind_with(observation, BINDINGS)
+    }
+    pub fn observation(&self) -> &Arc<ActivatedCatalog> {
+        &self.observation
+    }
+    pub fn catalog(&self) -> &Catalog {
+        self.observation.catalog()
+    }
+    fn bind_with(
+        observation: Arc<ActivatedCatalog>,
+        bindings: &[(&str, Handler)],
+    ) -> Result<Self, BindError> {
+        let entries = Self::entries(&observation, bindings)?;
+        Ok(Self {
+            observation,
+            entries,
+        })
+    }
+    fn entries(
+        observation: &ActivatedCatalog,
+        bindings: &[(&str, Handler)],
+    ) -> Result<Vec<Entry>, BindError> {
+        let profile = observation.catalog();
         let mut identities = BTreeSet::new();
         let mut entries = Vec::new();
         for &(qname, handler) in bindings {
-            let declaration = profile.declaration(qname).ok_or(ReadError::InvalidLimits)?;
-            validate_binding(declaration, handler)?;
+            let declaration = profile.declaration(qname).ok_or_else(|| {
+                BindError::new(qname, "supported handler declaration is not admitted")
+            })?;
+            if validate_binding(declaration, handler).is_err() {
+                return Err(BindError::new(
+                    qname,
+                    "admitted signature does not match the supported handler",
+                ));
+            }
             let version = &profile
                 .libraries()
                 .find(|lib| lib.name == declaration.spec.lib)
-                .ok_or(ReadError::InvalidLimits)?
+                .ok_or_else(|| BindError::new(qname, "declaring library is not admitted"))?
                 .version;
             if !identities.insert((qname, version.clone())) {
-                return Err(ReadError::InvalidLimits);
+                return Err(BindError::new(qname, "duplicate handler binding"));
             }
             let signature = signature(declaration);
             entries.push(Entry {
@@ -141,11 +211,21 @@ impl Registry {
                 op: declaration.spec.meta.get("op") == Some(&Kind::Marker),
                 no_side_effects: declaration.spec.meta.get("noSideEffects") == Some(&Kind::Marker),
                 handler,
-                wire: WireProfile::new(&profile, declaration)?,
+                wire: observation
+                    .callable(qname)
+                    .ok_or_else(|| BindError::new(qname, "no compiled callable context"))?
+                    .clone(),
             });
         }
         entries.sort_by(|a, b| a.identity.qname.cmp(&b.identity.qname));
-        Ok(Self { profile, entries })
+        Ok(entries)
+    }
+    #[cfg(test)]
+    pub(crate) fn pinned() -> Result<Self, ReadError> {
+        let catalog = Catalog::load_http_pinned().map_err(|_| ReadError::InvalidLimits)?;
+        let observation =
+            ActivatedCatalog::new(catalog, None).map_err(|_| ReadError::InvalidLimits)?;
+        Self::bind(Arc::new(observation))
     }
     #[cfg(test)]
     pub(crate) fn disable_read_get_for_test(&mut self) {
@@ -467,10 +547,10 @@ mod tests {
     }
     #[test]
     fn duplicate_bindings_and_handler_shape_mismatch_fail_before_publication() {
-        let profile = || ReadByIdProfile::load_http_pinned().unwrap();
+        let observation = || Registry::pinned().unwrap().observation.clone();
         assert!(
-            Registry::bind(
-                profile(),
+            Registry::bind_with(
+                observation(),
                 &[
                     ("sys.api::ops", Handler::Ops),
                     ("sys.api::ops", Handler::Ops)
@@ -478,10 +558,36 @@ mod tests {
             )
             .is_err()
         );
-        assert!(Registry::bind(profile(), &[("sys.api::ops", Handler::ReadById)]).is_err());
-        assert!(Registry::bind(profile(), &[("sys.api::readById", Handler::Ops)]).is_err());
-        assert!(Registry::bind(profile(), &[("sys.api::close", Handler::Ops)]).is_err());
-        let mut declaration = profile().declaration("sys.api::readById").unwrap().clone();
+        assert!(
+            Registry::bind_with(observation(), &[("sys.api::ops", Handler::ReadById)]).is_err()
+        );
+        assert!(
+            Registry::bind_with(observation(), &[("sys.api::readById", Handler::Ops)]).is_err()
+        );
+        assert!(Registry::bind_with(observation(), &[("sys.api::close", Handler::Ops)]).is_err());
+        // An observation without the fixed supported signatures cannot bind.
+        let read_by_id_only =
+            Arc::new(ActivatedCatalog::new(Catalog::load_pinned().unwrap(), None).unwrap());
+        assert!(Registry::bind(read_by_id_only.clone()).is_err());
+        // Activation reports the first missing supported declaration.
+        assert_eq!(
+            Registry::bind_checked(read_by_id_only).err(),
+            Some(BindError::new(
+                "sys.api::ops",
+                "supported handler declaration is not admitted"
+            ))
+        );
+        assert_eq!(
+            Registry::bind_with(observation(), &[("sys.api::close", Handler::Ops)])
+                .err()
+                .map(|error| error.reason),
+            Some("admitted signature does not match the supported handler")
+        );
+        let mut declaration = observation()
+            .catalog()
+            .declaration("sys.api::readById")
+            .unwrap()
+            .clone();
         declaration.spec.meta.remove("op");
         assert!(validate_binding(&declaration, Handler::ReadById).is_err());
     }
@@ -557,7 +663,7 @@ mod tests {
     }
     #[test]
     fn get_requires_exact_no_side_effects_marker() {
-        let profile = ReadByIdProfile::load_http_pinned().unwrap();
+        let profile = Catalog::load_http_pinned().unwrap();
         let mut declaration = profile.declaration("sys.api::readById").unwrap().clone();
         declaration.spec.meta.remove("noSideEffects");
         validate_binding(&declaration, Handler::ReadById).unwrap();

@@ -73,7 +73,7 @@ pub(crate) fn record(
         let own_id = tag == "id" && matches!(value, Kind::Ref(r) if r.val == id);
         // Check all nested refs even when a nested tag will itself be hidden.
         // Any denied nested identity removes this entire top-level tag.
-        if !visible(value, own_id, policy, budget, 1)? {
+        if !member_visible(tag, value, own_id, policy, budget, 1)? {
             continue;
         }
         let name = budget.copy_string(tag)?;
@@ -154,11 +154,45 @@ fn visit_dict(
 ) -> Result<bool, ReadError> {
     for (tag, value) in dict.iter() {
         budget.charge(BudgetKind::Work, tag.len().saturating_add(1))?;
-        if !visible(value, false, policy, budget, depth)? {
+        if !member_visible(tag, value, false, policy, budget, depth)? {
             return Ok(false);
         }
     }
     Ok(true)
+}
+/// Structural `spec`/`of` annotations hold `lib::Name` catalog references,
+/// resolved against the catalog rather than the entity store. They follow the
+/// policy's catalog visibility for that declaration and its library, never
+/// entity visibility: an entity allow-list does not strip them, and a
+/// catalog-hidden declaration name is never disclosed.
+fn catalog_reference<'a>(tag: &str, value: &'a Kind) -> Option<(&'a str, &'a str)> {
+    if !matches!(tag, "spec" | "of") {
+        return None;
+    }
+    let Kind::Ref(reference) = value else {
+        return None;
+    };
+    let (library, name) = reference.val.split_once("::")?;
+    (!library.is_empty() && !name.is_empty()).then_some((reference.val.as_str(), library))
+}
+fn member_visible(
+    tag: &str,
+    value: &Kind,
+    own_id: bool,
+    policy: &dyn PolicySnapshot,
+    budget: &mut Budget,
+    depth: usize,
+) -> Result<bool, ReadError> {
+    match catalog_reference(tag, value) {
+        Some((qname, library)) => {
+            budget.depth(depth)?;
+            budget.charge(BudgetKind::Values, 1)?;
+            budget.charge(BudgetKind::Work, qname.len().saturating_add(1))?;
+            Ok(policy.catalog(CatalogKind::Spec, qname)
+                && policy.catalog(CatalogKind::Library, library))
+        }
+        None => visible(value, own_id, policy, budget, depth),
+    }
 }
 fn visible(
     value: &Kind,

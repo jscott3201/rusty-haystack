@@ -71,6 +71,10 @@ pub struct DefNamespace {
     choice_index: HashMap<String, Vec<String>>,
     /// Xeto specs by qualified name (e.g. "ph::Ahu").
     specs: HashMap<String, Spec>,
+    /// Strict selection this namespace was derived from, when managed.
+    selected: Option<std::sync::Arc<crate::xeto::catalog::Catalog>>,
+    /// Compatibility specs displaced by `selected`, restored before re-deriving.
+    shadowed: HashMap<String, Option<Spec>>,
     /// Library name -> list of spec qnames belonging to that lib.
     spec_libs: HashMap<String, Vec<String>>,
     /// Library name -> how it was loaded.
@@ -89,9 +93,56 @@ impl DefNamespace {
             tag_on_index: HashMap::new(),
             choice_index: HashMap::new(),
             specs: HashMap::new(),
+            selected: None,
+            shadowed: HashMap::new(),
             spec_libs: HashMap::new(),
             lib_sources: HashMap::new(),
         }
+    }
+
+    /// Derive a namespace from this selected catalog while retaining the
+    /// compatibility definitions supplied by the owning graph. A namespace
+    /// already derived from another selection first restores exactly the
+    /// compatibility specs that selection displaced, so re-deriving never
+    /// deletes or duplicates unrelated definitions.
+    pub(crate) fn with_catalog(
+        mut self,
+        catalog: std::sync::Arc<crate::xeto::catalog::Catalog>,
+    ) -> Self {
+        if self.selected.take().is_some() {
+            for (qname, original) in std::mem::take(&mut self.shadowed) {
+                self.unindex_spec(&qname);
+                if let Some(spec) = original {
+                    self.register_spec(spec);
+                }
+            }
+        }
+        for entry in catalog.declarations() {
+            let qname = entry.spec.qname.clone();
+            let displaced = self.specs.get(&qname).cloned();
+            self.unindex_spec(&qname);
+            self.shadowed.insert(qname, displaced);
+            self.register_spec(entry.spec.clone());
+        }
+        self.selected = Some(catalog);
+        self
+    }
+
+    fn unindex_spec(&mut self, qname: &str) {
+        if let Some(spec) = self.specs.remove(qname)
+            && let Some(names) = self.spec_libs.get_mut(&spec.lib)
+        {
+            names.retain(|name| name != qname);
+            if names.is_empty() {
+                self.spec_libs.remove(&spec.lib);
+            }
+        }
+    }
+
+    /// The admitted strict selection this namespace was derived from, if any.
+    /// Selected declarations are matched by that catalog's controlled fitter.
+    pub fn selected_catalog(&self) -> Option<&crate::xeto::catalog::Catalog> {
+        self.selected.as_deref()
     }
 
     /// Load the bundled standard Haystack 4 defs.
@@ -467,6 +518,13 @@ impl DefNamespace {
         term: &str,
         ctx: Option<crate::xeto::QueryContext<'_>>,
     ) -> bool {
+        if let Some(catalog) = self.selected_catalog()
+            && catalog.declaration(term).is_some()
+        {
+            // Selected declarations never fall back to permissive legacy
+            // fitting. References resolve only through the caller's store.
+            return catalog.fits_selected(term, entity, ctx.map(|ctx| ctx.forward));
+        }
         match self.resolve_spec_term(term) {
             Some(SpecTerm::Def(name)) => self.entity_is_a(entity, &name),
             Some(SpecTerm::Spec(spec)) => {

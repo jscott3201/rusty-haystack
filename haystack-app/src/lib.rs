@@ -40,7 +40,7 @@ mod lifecycle;
 mod output;
 mod policy;
 mod registry;
-pub use registry::{FunctionDescriptor, FunctionIdentity};
+pub use registry::{FunctionDescriptor, FunctionIdentity, TypedFunctions};
 mod sanitize;
 mod service;
 mod typed_http;
@@ -57,6 +57,9 @@ pub use lifecycle::{
     ShutdownPhase, ShutdownPolicy, TerminationReport, WorkGuard,
 };
 pub use policy::{AllowAll, PolicySnapshot, ReadPolicy};
-pub use service::{ReadAdmission, ReadLoad, ReadService};
+pub use service::{
+    CatalogActivation, CatalogActivationError, CatalogActivationLimits, ReadAdmission, ReadLoad,
+    ReadService,
+};
 pub use tokio_util::sync::CancellationToken;
 pub use types::*;

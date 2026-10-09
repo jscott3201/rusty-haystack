@@ -377,141 +377,10 @@ fn response_media(
     selected.ok_or(ApiError::NotAcceptable)
 }
 
-const ARGUMENTS: &str = "rusty.http::Arguments";
-/// A codec-only argument container derived from the actual admitted function
-/// slots. It does not register a function or admit a broader Xeto catalog.
-pub(crate) struct WireProfile {
-    context: jeto::Context,
-    parameters: std::collections::BTreeMap<String, String>,
-    result: String,
-    strict_arguments: bool,
-    function: String,
-}
-impl WireProfile {
-    pub(crate) fn new(
-        profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
-        declaration: &haystack_core::xeto::read_by_id::AdmittedSpec,
-    ) -> Result<Self, ReadError> {
-        use std::collections::{BTreeMap, BTreeSet};
-        fn ty(
-            profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
-            name: &str,
-            definitions: &mut Vec<jeto::Definition>,
-            seen: &mut BTreeSet<String>,
-        ) -> Result<String, ReadError> {
-            if name == "sys.api::ApiVersion" {
-                return Ok("sys::Str".into());
-            }
-            if jeto::Context::standard().contains(name) {
-                return Ok(name.into());
-            }
-            if !seen.insert(name.into()) {
-                return Ok(name.into());
-            }
-            let definition = if let Some(keys) = profile.enum_keys(name) {
-                jeto::Definition::Enum {
-                    name: name.into(),
-                    keys: keys.to_vec(),
-                }
-            } else if matches!(name, "sys::Filter" | "sys::Version") {
-                jeto::Definition::Nominal {
-                    name: name.into(),
-                    pattern: if name == "sys::Filter" {
-                        "(?s:.*)"
-                    } else {
-                        "[0-9]+(?:\\.[0-9]+)*"
-                    }
-                    .into(),
-                }
-            } else {
-                let declaration = profile.declaration(name).ok_or(ReadError::InvalidLimits)?;
-                if declaration.spec.base.as_deref() != Some("sys::Dict") {
-                    return Err(ReadError::InvalidLimits);
-                }
-                let mut members = BTreeMap::new();
-                for member in &declaration.spec.slots {
-                    members.insert(
-                        member.name.clone(),
-                        slot(profile, name, member, definitions, seen)?,
-                    );
-                }
-                jeto::Definition::Dict {
-                    name: name.into(),
-                    members,
-                }
-            };
-            definitions.push(definition);
-            Ok(name.into())
-        }
-        fn slot(
-            profile: &haystack_core::xeto::read_by_id::ReadByIdProfile,
-            owner: &str,
-            slot: &haystack_core::xeto::spec::Slot,
-            definitions: &mut Vec<jeto::Definition>,
-            seen: &mut BTreeSet<String>,
-        ) -> Result<String, ReadError> {
-            let name = slot.type_ref.as_deref().ok_or(ReadError::InvalidLimits)?;
-            if let Some(Kind::Ref(of)) = slot.meta.get("of") {
-                let of = ty(profile, &of.val, definitions, seen)?;
-                if name == "sys::List" {
-                    let name = format!(
-                        "rusty.http::{}_{}",
-                        owner.rsplit("::").next().unwrap_or(""),
-                        slot.name
-                    );
-                    definitions.push(jeto::Definition::List {
-                        name: name.clone(),
-                        of,
-                    });
-                    return Ok(name);
-                }
-                if name != "sys::Grid" {
-                    return Err(ReadError::InvalidLimits);
-                }
-            }
-            ty(profile, name, definitions, seen)
-        }
-        let mut parameters = BTreeMap::new();
-        let mut definitions = Vec::new();
-        let mut seen = BTreeSet::new();
-        let mut result = None;
-        for member in &declaration.spec.slots {
-            let name = slot(
-                profile,
-                &declaration.spec.qname,
-                member,
-                &mut definitions,
-                &mut seen,
-            )?;
-            if member.name == "returns" {
-                result = Some(name);
-            } else {
-                parameters.insert(member.name.clone(), name);
-            }
-        }
-        definitions.push(jeto::Definition::Dict {
-            name: ARGUMENTS.into(),
-            members: parameters.clone(),
-        });
-        let context = jeto::Context::new(
-            &profile.provenance().repository,
-            &profile.provenance().commit,
-            definitions,
-        )
-        .map_err(|_| ReadError::InvalidLimits)?;
-        let result = result.ok_or(ReadError::InvalidLimits)?;
-        if !context.contains(&result) {
-            return Err(ReadError::InvalidLimits);
-        }
-        Ok(Self {
-            context,
-            function: declaration.spec.qname.clone(),
-            parameters,
-            result,
-            strict_arguments: declaration.spec.qname != "sys.api::readById",
-        })
-    }
-}
+/// Codec-only argument and result contexts compiled by the core catalog
+/// observation from the admitted function slots and selected data declarations.
+pub(crate) type WireProfile = haystack_core::xeto::catalog::CallableContext;
+use haystack_core::xeto::catalog::ARGUMENTS;
 struct JetoMeter<'a>(&'a mut Budget);
 impl jeto::Meter for JetoMeter<'_> {
     type Error = ReadError;
@@ -1053,7 +922,7 @@ mod tests {
     };
     use haystack_core::{
         graph::{EntityGraph, SharedGraph},
-        xeto::read_by_id::ReadByIdProfile,
+        xeto::catalog::Catalog,
     };
     use std::{future::Future, sync::Arc, task::Poll, time::Duration};
     fn input() -> TypedInvocationInput {
@@ -1066,7 +935,7 @@ mod tests {
     }
     #[test]
     fn every_terminal_envelope_fits_the_retained_reachable_error_declaration() {
-        let profile = ReadByIdProfile::load_http_pinned().unwrap();
+        let profile = Catalog::load_http_pinned().unwrap();
         for error in [
             ApiError::InvalidArgs,
             ApiError::UnsupportedVersion,
@@ -1171,7 +1040,7 @@ mod tests {
     #[test]
     fn core_codec_meter_preserves_original_interruptions_and_generated_output_limits() {
         use std::time::Instant;
-        let catalog = ReadByIdProfile::load_http_pinned().unwrap();
+        let catalog = Catalog::load_http_pinned().unwrap();
         let profile =
             WireProfile::new(&catalog, catalog.declaration("sys.api::readById").unwrap()).unwrap();
         let fresh = |limits| {

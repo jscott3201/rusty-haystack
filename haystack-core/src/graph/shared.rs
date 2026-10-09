@@ -186,6 +186,144 @@ impl SharedGraph {
             .expect("write guard exists until drop")))
     }
 
+    /// Atomically replace the managed observation `expected` with one derived
+    /// from `catalog` (reject-on-invalid-affected-data).
+    ///
+    /// The candidate is compiled and admitted without any graph lock. The union
+    /// of old and candidate associations is then validated over borrowed
+    /// records in bounded chunks, each under its own read guard; writers are
+    /// not starved between chunks, and every chunk must observe the same
+    /// [`GraphState`], so the chunks together form one coherent observation.
+    /// Publication takes the write lock within the caller's bounded waits,
+    /// compares the full state and observation identity, then calls
+    /// [`ActivationControl::publish`] as the commit point and replaces the
+    /// handles. An entity-only change restarts validation at most
+    /// [`ActivationControl::max_revalidations`] times, then reports `Conflict`;
+    /// any catalog, replacement or observation change is a conflict at once.
+    /// Failure leaves every handle, generation, cache and wake unchanged.
+    /// Success bumps the catalog generation once and emits one catalog wake
+    /// after unlocking.
+    ///
+    /// Validation cost is proportional to the whole graph on every attempt;
+    /// incremental revalidation is not implemented.
+    pub fn activate_catalog<C: crate::xeto::catalog::ActivationControl>(
+        &self,
+        expected: &Arc<crate::xeto::catalog::ActivatedCatalog>,
+        catalog: crate::xeto::catalog::Catalog,
+        control: &mut C,
+    ) -> Result<
+        (Arc<crate::xeto::catalog::ActivatedCatalog>, GraphState),
+        crate::xeto::catalog::ActivationError<C::Error>,
+    > {
+        use crate::xeto::catalog::{ActivatedCatalog, ActivationError as E};
+        let current = |graph: &EntityGraph| -> Result<(), E<C::Error>> {
+            match graph.activated_catalog() {
+                None => Err(E::Unmanaged),
+                Some(current) if Arc::ptr_eq(current, expected) => Ok(()),
+                Some(_) => Err(E::Conflict),
+            }
+        };
+        let (origin, base) = loop {
+            let wait = control.wait().map_err(E::Control)?;
+            if let Some(captured) = self.read_for(wait, |graph| {
+                current(graph)?;
+                Ok::<_, E<C::Error>>((graph.state(), graph.namespace_arc().cloned()))
+            }) {
+                break captured?;
+            }
+        };
+        // Off-lock: clone the derived namespace base, compile, admit.
+        let candidate = Arc::new(
+            ActivatedCatalog::new(catalog, base.as_deref())
+                .map_err(|error| E::Catalog(Box::new(error)))?,
+        );
+        candidate
+            .check_provenance(expected)
+            .map_err(|error| E::Catalog(Box::new(error)))?;
+        control.admit(&candidate)?;
+        let same_catalog = |state: GraphState| {
+            state.incarnation == origin.incarnation
+                && state.catalog_generation == origin.catalog_generation
+        };
+        let chunk = control.chunk_records().max(1);
+        let mut restarts = 0usize;
+        let mut restart = |control: &mut C| {
+            restarts += 1;
+            if restarts > control.max_revalidations() {
+                Err(E::Conflict)
+            } else {
+                Ok(())
+            }
+        };
+        loop {
+            control.work(1).map_err(E::Control)?;
+            // Chunked validation; `None` asks for a restart.
+            let mut observed: Option<GraphState> = None;
+            let mut after: Option<String> = None;
+            let validated = loop {
+                let wait = control.wait().map_err(E::Control)?;
+                let Some(result) = self.read_for(wait, |graph| {
+                    let state = graph.state();
+                    if !same_catalog(state) {
+                        return Err(E::Conflict);
+                    }
+                    current(graph)?;
+                    if observed.is_some_and(|observed| observed != state) {
+                        return Ok(None);
+                    }
+                    let next = candidate.validate_chunk(
+                        Some(expected),
+                        graph,
+                        after.as_deref(),
+                        chunk,
+                        control,
+                    )?;
+                    Ok(Some((state, next)))
+                }) else {
+                    continue;
+                };
+                match result? {
+                    None => break None,
+                    Some((state, Some(last))) => {
+                        observed = Some(state);
+                        after = Some(last);
+                    }
+                    Some((state, None)) => break Some(state),
+                }
+            };
+            let Some(validated) = validated else {
+                restart(control)?;
+                continue;
+            };
+            let published = loop {
+                let wait = control.wait().map_err(E::Control)?;
+                if let Some(result) = self.write_for(wait, |graph| {
+                    let state = graph.state();
+                    if !same_catalog(state) {
+                        return Err(E::Conflict);
+                    }
+                    current(graph)?;
+                    if state != validated {
+                        // Only entities moved: revalidate under the same control.
+                        return Ok(None);
+                    }
+                    // Commit point; nothing fallible follows a successful return.
+                    control.publish().map_err(E::Control)?;
+                    graph
+                        .compare_activate_catalog(validated, expected, candidate.clone())
+                        .map(|_| Some(graph.state()))
+                        .map_err(|_| E::Conflict)
+                }) {
+                    break result?;
+                }
+            };
+            match published {
+                Some(state) => return Ok((candidate, state)),
+                None => restart(control)?,
+            }
+        }
+    }
+
     // ── Convenience methods ──
 
     /// Swap in a newer ontology. See [`EntityGraph::set_namespace`].

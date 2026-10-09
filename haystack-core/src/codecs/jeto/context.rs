@@ -151,7 +151,7 @@ impl Context {
         types.insert("sys::Grid".into(), Class::Grid(Option::None));
         Self {
             catalog: "project-haystack/xeto".into(),
-            revision: crate::xeto::read_by_id::READ_BY_ID_UPSTREAM_COMMIT.into(),
+            revision: crate::xeto::catalog::PINNED_XETO_REVISION.into(),
             types,
             max_enum_keys: 0,
         }

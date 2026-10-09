@@ -40,7 +40,8 @@ pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Res
         .collect();
 
     if let Some(application) = &state.application {
-        for function in application.read_service().typed_functions() {
+        let functions = application.read_service().typed_functions();
+        for function in functions.iter() {
             if crate::capabilities::CAPABILITIES
                 .iter()
                 .any(|capability| capability.name == function.name)

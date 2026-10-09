@@ -521,10 +521,22 @@ async fn catalog_hidden_unknown_and_budgets_have_consistent_outcomes() {
             .await
             .unwrap(),
     );
-    assert_eq!(visible.rows.len(), 1);
-    assert_eq!(
-        visible.rows[0].get("qname"),
-        Some(&Kind::Str("demo::Visible".into()))
+    // The graph namespace is derived from the service's admitted selection,
+    // so its declarations are listed too; hidden compatibility specs are not.
+    let listed: Vec<_> = visible
+        .rows
+        .iter()
+        .filter_map(|row| match row.get("qname") {
+            Some(Kind::Str(qname)) if !qname.starts_with("sys") => Some(qname.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(listed, ["demo::Visible"]);
+    assert!(
+        visible
+            .rows
+            .iter()
+            .any(|row| row.get("qname") == Some(&Kind::Str("sys.api::readById".into())))
     );
     let bounded = service(
         graph,

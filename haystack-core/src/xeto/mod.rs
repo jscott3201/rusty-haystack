@@ -2,12 +2,12 @@
 
 pub mod ast;
 pub mod bundled;
+pub mod catalog;
 pub mod export;
 pub mod fitting;
 pub mod lexer;
 pub mod loader;
 pub mod parser;
-pub mod read_by_id;
 pub mod resolver;
 pub mod spec;
 

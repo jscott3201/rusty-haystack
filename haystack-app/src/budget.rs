@@ -60,6 +60,14 @@ impl SessionFence {
 pub(crate) struct Budget {
     #[cfg(test)]
     pub typed_encode_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs after a typed request captured its catalog observation and before
+    /// any graph evaluation, outside every graph lock.
+    #[cfg(test)]
+    pub typed_lookup_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs immediately after an activation passes its commit point, under
+    /// the final graph write lock.
+    #[cfg(test)]
+    pub activation_commit_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     pub limits: Arc<ReadLimits>,
     pub deadline: Instant,
     pub cancel: CancellationToken,
@@ -85,6 +93,10 @@ impl Budget {
         Self {
             #[cfg(test)]
             typed_encode_hook: None,
+            #[cfg(test)]
+            typed_lookup_hook: None,
+            #[cfg(test)]
+            activation_commit_hook: None,
             limits,
             deadline,
             cancel,

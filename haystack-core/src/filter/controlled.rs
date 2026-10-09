@@ -155,6 +155,11 @@ fn fits_term<E: QueryEnvironment>(
     if !catalog_term_available(Some(ns), term, env)? {
         return Ok(false);
     }
+    if let Some(catalog) = ns.selected_catalog()
+        && catalog.declaration(term).is_some()
+    {
+        return fits_selected(entity, term, catalog, ns, env);
+    }
     match ns.resolve_spec_term(term) {
         Some(SpecTerm::Def(name)) => member_of(entity, &name, ns, env, depth + 1),
         Some(SpecTerm::Spec(spec)) => fits_spec(entity, spec, ns, env, queries, depth + 1),
@@ -267,6 +272,53 @@ fn fits_spec<E: QueryEnvironment>(
         }
     }
     Ok(true)
+}
+/// A selected declaration is matched only by its catalog's strict fitter. Every
+/// declaration on its base chain must be visible; references resolve through
+/// the environment's already-authorized forward view, so a hidden target is
+/// indistinguishable from a missing one and never fits.
+fn fits_selected<E: QueryEnvironment>(
+    entity: &HDict,
+    term: &str,
+    catalog: &crate::xeto::catalog::Catalog,
+    ns: &DefNamespace,
+    env: &mut E,
+) -> Result<bool, E::Error> {
+    use crate::xeto::catalog::{FitEnvironment, FitError, FitRecord};
+    struct Controlled<'e, E>(&'e mut E);
+    impl<'a, E: QueryEnvironment> FitEnvironment<'a> for Controlled<'_, E> {
+        type Error = E::Error;
+        fn work(&mut self, amount: usize) -> Result<(), E::Error> {
+            self.0.work(amount)
+        }
+        fn retain(&mut self, bytes: usize) -> Result<(), E::Error> {
+            self.0.retain(bytes)
+        }
+        fn depth(&mut self, depth: usize) -> Result<(), E::Error> {
+            self.0.depth(depth)
+        }
+        fn record(&mut self, id: &HRef) -> Result<Option<FitRecord<'a>>, E::Error> {
+            Ok(self.0.forward(id)?.map(FitRecord::Shared))
+        }
+    }
+    let mut next = Some(term);
+    while let Some(name) = next {
+        env.work(1)?;
+        let Some(spec) = ns.get_spec(name) else {
+            return Ok(false);
+        };
+        if !visible_spec(spec, env)? {
+            return Ok(false);
+        }
+        next = catalog
+            .declaration(name)
+            .and_then(|entry| entry.spec.base.as_deref());
+    }
+    match catalog.fit_entity(term, entity, &mut Controlled(env)) {
+        Ok(()) => Ok(true),
+        Err(FitError::Invalid(_)) => Ok(false),
+        Err(FitError::Control(error)) => Err(error),
+    }
 }
 fn slot_type_matches(v: &Kind, name: Option<&str>) -> bool {
     match name {

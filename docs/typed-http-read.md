@@ -4,15 +4,64 @@ The installed `sys.api` functions are `readById`, `readByIds`, `read`, `readAll`
 `about`, `close`, `ops`, `libs`, and `filetypes`. Each is available at its simple
 and qualified `/api/` name. Select version 5 to use typed dispatch on names
 shared with legacy H4 routes, or use the qualified name explicitly.
-One immutable application registry owns the nine production bindings, their admitted
-signature/profile, codec contexts, selected library version, source provenance,
-GET eligibility, and handler selection. Registration rejects duplicate
-qname/version bindings and unsupported handler/signature shapes before the
-registry becomes available. The native bootstrap profile and its expanded HTTP
-closure remain explicit subsets of `sys` and `sys.api`; neither claims complete
-library admission. The shared [contextual Jeto codec](jeto.md) handles admitted
-native values. Broader catalog admission, generated clients and complete H5
-conformance remain outside this profile.
+The nine production handlers are a fixed application inventory; routes derive
+from it, never from a parsed catalog. Their admitted signatures, codec contexts,
+selected library versions and source provenance come from the graph's current
+`ActivatedCatalog` observation. Binding rejects duplicate qname/version bindings
+and unsupported handler/signature shapes before an observation can serve calls,
+and an activation candidate that cannot bind the inventory is not published.
+Each typed request captures one observation and uses it for resolution,
+discovery, argument decoding/defaults/fitting, metadata and result encoding; it
+verifies that observation is still current before any graph evaluation and
+otherwise fails with `UnavailableErr`. An owned result already produced may
+encode with its retained context. `ReadService::typed_functions()` returns an
+owned retained view of the current bindings. The bootstrap profile and its
+expanded HTTP closure remain explicit subsets of `sys` and `sys.api`; neither
+claims complete library admission. The shared [contextual Jeto codec](jeto.md)
+handles admitted native values.
+
+`ReadService::activate_catalog` (trusted embedding only) replaces the observation
+with a selected closure such as the [protocol-metadata
+profile](../haystack-core/xeto-profiles/read-by-id/README.md#selected-protocol-metadata-closure-m2-pr07)
+under the service's admission, cancellation and session, with its own
+`CatalogActivationLimits` (deadline bound, cumulative work, per-record retained
+bytes, validation chunk size and revalidation bound) rather than per-request
+`ReadLimits`; its value depth and deadline bounds (at most 64 and 60 s) are its
+own. Sealing is observed during validation and rechecked at the commit point
+after the final lock wait. A commit fence resolves a caller stop racing that
+point: once the worker commits, the awaiting caller reports the published
+result, never a stop. An error therefore means nothing was published, with two
+exceptions: a worker panic after the commit point is reported as
+`Control(Unavailable)`, and a caller that drops the activation future loses its
+outcome. Either caller reconciles through the graph's catalog generation or
+`typed_functions().selection_identity()`. Activating a selection identical to
+the current one still publishes a new observation: the catalog generation
+advances, one catalog wake is emitted, and in-flight typed requests retaining
+the previous observation fail with `UnavailableErr` before graph evaluation.
+A candidate that cannot bind a supported handler fails with `Unsupported`
+naming the declaration. With the pinned profiles this is a defensive guard: a
+narrower pinned profile is already rejected as `Catalog` by provenance, and
+project libraries cannot remove declarations. Codec-context failures name the
+declaration and slot. Invalid affected data,
+including hidden records, rejects the activation without publishing or
+disclosing hidden identities. Every attempt validates the whole associated
+graph in chunks; sustained entity writes end in `Conflict` after the bounded
+revalidations. Incremental revalidation and large-graph performance are not
+claimed. Trusted namespace replacement (`with_namespace`, `set_namespace`)
+re-derives the namespace view of the same selection rather than pairing a new
+namespace with stale strict semantics. Scoped legacy `loadLib`/`unloadLib` routes
+remain disabled. Generated clients and complete H5 conformance remain outside
+this profile.
+
+Structural `spec` and `of` references in returned records are `lib::Name`
+catalog names. They follow the policy's catalog and library visibility, not
+entity visibility: an entity allow-list keeps them, and a catalog-hidden name is
+removed with its enclosing tag.
+
+Typed Jeto grids reserve the `spec` column for structural row typing, so exact
+grid output refuses rows that carry a `spec` tag. Typed `readAll`/`readByIds`
+over such records therefore fail with `NotAcceptableErr` (406), while
+`readById`, whose result is a Dict, encodes them. H4 grid output is unaffected.
 
 The preview exposes only supported, admitted, authorized functions with the exact
 `op` marker. Discovery and invocation use the same entry and visibility predicate:
