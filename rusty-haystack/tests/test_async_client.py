@@ -480,3 +480,173 @@ def test_past_connect_deadline_never_dispatches_and_closes_owner():
             await client.close()
             assert client.closed and not peer.requests and not peer.handlers
     run(case())
+
+
+def _https_peer_context(tmp_path, *, mutual=False):
+    import ssl
+    directory = tls_material(tmp_path)
+    cert, key = directory / "localhost.pem", directory / "localhost-key.pem"
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    if mutual:
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_verify_locations(cafile=directory / "ca.pem")
+    return directory, context
+
+
+def test_tls_verify_default_and_true_reject_untrusted_before_http(tmp_path):
+    """Omitted tls_verify and tls_verify=True must fail before any peer request."""
+    from rusty_haystack.client import HaystackClient
+
+    _directory, context = _https_peer_context(tmp_path)
+
+    async def case():
+        async with Peer(ssl=context) as peer:
+            for kwargs in ({}, {"tls_verify": True}):
+                async_client = rh.AsyncHaystackClient(peer.url, "user", "password", **kwargs)
+                with pytest.raises(rh.ClientError):
+                    await async_client.connect()
+                await async_client.close()
+
+                with pytest.raises(rh.ClientError):
+                    await asyncio.to_thread(
+                        lambda: HaystackClient.connect(peer.url, "user", "password", **kwargs)
+                    )
+            assert not peer.requests
+
+    run(case())
+
+
+def test_tls_verify_false_scram_and_authenticated_read(tmp_path):
+    """tls_verify=False completes SCRAM and a subsequent authenticated read."""
+    from rusty_haystack.client import HaystackClient
+
+    _directory, context = _https_peer_context(tmp_path)
+
+    async def case():
+        async with Peer(ssl=context) as peer:
+            async with rh.AsyncHaystackClient(
+                peer.url, "user", "password", tls_verify=False
+            ) as client:
+                assert len(await client.read("site")) == 1
+
+            def sync_flow():
+                client = HaystackClient.connect(
+                    peer.url, "user", "password", tls_verify=False
+                )
+                try:
+                    assert len(client.read("site")) == 1
+                finally:
+                    client.close()
+
+            await asyncio.to_thread(sync_flow)
+            await peer.wait_eof(2)
+            await peer.wait_idle()
+
+    run(case())
+
+
+def test_tls_verify_false_allows_hostname_mismatch(tmp_path):
+    """Opt-out disables hostname verification as well as certificate trust."""
+    from rusty_haystack.client import HaystackClient
+
+    _directory, context = _https_peer_context(tmp_path)
+
+    async def case():
+        async with Peer(ssl=context) as peer:
+            mismatched = peer.url.replace("localhost", "127.0.0.1")
+            async with rh.AsyncHaystackClient(
+                mismatched, "user", "password", tls_verify=False
+            ) as client:
+                assert len(await client.read("site")) == 1
+
+            def sync_flow():
+                client = HaystackClient.connect(
+                    mismatched, "user", "password", tls_verify=False
+                )
+                try:
+                    assert len(client.read("site")) == 1
+                finally:
+                    client.close()
+
+            await asyncio.to_thread(sync_flow)
+
+    run(case())
+
+
+def test_tls_verify_opt_out_does_not_poison_default_clients(tmp_path):
+    """A later default client must still reject the untrusted cert."""
+    from rusty_haystack.client import HaystackClient
+
+    _directory, context = _https_peer_context(tmp_path)
+
+    async def case():
+        async with Peer(ssl=context) as peer:
+            async with rh.AsyncHaystackClient(
+                peer.url, "user", "password", tls_verify=False
+            ) as insecure:
+                assert len(await insecure.read("site")) == 1
+
+            before = len(peer.requests)
+            default_async = rh.AsyncHaystackClient(peer.url, "user", "password")
+            with pytest.raises(rh.ClientError):
+                await default_async.connect()
+            await default_async.close()
+            assert len(peer.requests) == before
+
+            with pytest.raises(rh.ClientError):
+                await asyncio.to_thread(
+                    HaystackClient.connect, peer.url, "user", "password"
+                )
+            assert len(peer.requests) == before
+
+    run(case())
+
+
+def test_tls_verify_false_still_rejects_bad_credentials(tmp_path):
+    """Wrong password fails SCRAM even when TLS verification is disabled."""
+    from rusty_haystack.client import HaystackClient
+
+    _directory, context = _https_peer_context(tmp_path)
+
+    async def case():
+        async with Peer(ssl=context) as peer:
+            bad_async = rh.AsyncHaystackClient(
+                peer.url, "user", "wrong-password", tls_verify=False
+            )
+            with pytest.raises(rh.ClientError):
+                await bad_async.connect()
+            await bad_async.close()
+
+            with pytest.raises(rh.ClientError):
+                await asyncio.to_thread(
+                    lambda: HaystackClient.connect(
+                        peer.url, "user", "wrong-password", tls_verify=False
+                    )
+                )
+
+            # No authenticated read: only HELLO/SCRAM attempts, never /api/read.
+            assert peer.requests
+            assert all(path != "/api/read" for _, path, _, _ in peer.requests)
+
+    run(case())
+
+
+def test_async_tls_identity_retained_with_tls_verify_false(tmp_path):
+    """Async client keeps client cert/key when tls= is combined with tls_verify=False."""
+    from rusty_haystack.client import TlsConfig
+
+    directory, context = _https_peer_context(tmp_path, mutual=True)
+    cert, key = directory / "localhost.pem", directory / "localhost-key.pem"
+    tls = TlsConfig.from_files(str(cert), str(key), str(directory / "ca.pem"))
+
+    async def case():
+        async with Peer(ssl=context) as peer:
+            async with rh.AsyncHaystackClient(
+                peer.url, "user", "password", tls=tls, tls_verify=False
+            ) as client:
+                assert len(await client.read("site")) == 1
+            await peer.wait_eof()
+            await peer.wait_idle()
+
+    run(case())

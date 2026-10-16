@@ -147,13 +147,14 @@ fn add_cancellation(future: &Bound<'_, PyAny>, cancellation: Cancellation) -> Py
 #[pymethods]
 impl PyAsyncHaystackClient {
     #[new]
-    #[pyo3(signature = (url, username, password, *, tls=None, timeout=30.0))]
+    #[pyo3(signature = (url, username, password, *, tls=None, timeout=30.0, tls_verify=true))]
     fn new(
         url: String,
         username: String,
         password: String,
         tls: Option<&PyTlsConfig>,
         timeout: f64,
+        tls_verify: bool,
     ) -> PyResult<Self> {
         if !timeout.is_finite() || timeout <= 0.0 {
             return Err(PyValueError::new_err("timeout must be positive and finite"));
@@ -167,6 +168,7 @@ impl PyAsyncHaystackClient {
             timeout,
             auth_timeout: timeout,
             tls: tls.map(|tls| tls.inner.clone()),
+            tls_verify,
             ..ClientConfig::default()
         };
         Ok(Self {

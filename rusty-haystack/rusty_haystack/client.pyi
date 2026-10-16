@@ -31,8 +31,22 @@ class HaystackClient:
         client.close()
     """
     @staticmethod
-    def connect(url: str, username: str, password: str) -> HaystackClient:
-        """Connect to a Haystack server over HTTP with SCRAM auth."""
+    def connect(
+        url: str,
+        username: str,
+        password: str,
+        *,
+        tls_verify: bool = True,
+    ) -> HaystackClient:
+        """Connect to a Haystack server over HTTP with SCRAM auth.
+
+        ``tls_verify`` defaults to ``True`` (certificate chain + hostname).
+        Pass ``tls_verify=False`` only for controlled lab/development HTTPS
+        (self-signed FIN Stack hosts, etc.). That opt-out disables certificate
+        **and** hostname verification for SCRAM and later HTTPS ops on this
+        client; it does not configure WebSocket TLS or enable redirects.
+        Prefer ``connect_tls`` / ``TlsConfig.with_ca`` when a custom CA is available.
+        """
         ...
     @staticmethod
     def connect_tls(
@@ -41,7 +55,7 @@ class HaystackClient:
         password: str,
         tls: TlsConfig,
     ) -> HaystackClient:
-        """Connect with mutual TLS authentication."""
+        """Connect with mutual TLS authentication via a ``TlsConfig``."""
         ...
     def about(self) -> HGrid:
         """Query the server's about information."""
@@ -177,7 +191,25 @@ class AsyncHaystackClient:
     Watch keys reserve one logical owner per session, with at most 32 live or
     unconfirmed reservations. Local Unknown cleanup does not free a key.
     """
-    def __init__(self, url: str, username: str, password: str, *, tls: TlsConfig | None = None, timeout: float = 30.0) -> None: ...
+    def __init__(
+        self,
+        url: str,
+        username: str,
+        password: str,
+        *,
+        tls: TlsConfig | None = None,
+        timeout: float = 30.0,
+        tls_verify: bool = True,
+    ) -> None:
+        """Construct an owned async HTTP client (call ``connect`` / ``async with``).
+
+        ``tls_verify`` defaults to ``True``. ``tls_verify=False`` disables
+        certificate-chain and hostname verification for lab/dev only; it applies
+        to SCRAM and subsequent HTTPS ops, not WebSocket TLS or redirects.
+        Optional ``tls`` supplies client identity and/or extra CA trust and is
+        retained when combined with ``tls_verify``.
+        """
+        ...
     @property
     def state(self) -> Literal["new", "connecting", "open", "closing", "closed"]: ...
     @property
