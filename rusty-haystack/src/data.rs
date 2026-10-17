@@ -34,7 +34,9 @@ impl PyHDict {
     fn new(tags: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut inner = data::HDict::new();
         if let Some(py_dict) = tags {
-            for (key, value) in py_dict.iter() {
+            // Own a snapshot: callers may mutate their dict on another thread,
+            // and conversion must not iterate that changing key inventory.
+            for (key, value) in py_dict.copy()?.iter() {
                 let name: String = key.extract()?;
                 let kind = py_to_kind(&value)?;
                 crate::convert::ensure_python_child(&kind)?;
@@ -102,7 +104,7 @@ impl PyHDict {
     #[staticmethod]
     fn from_dict(d: &Bound<'_, PyDict>) -> PyResult<Self> {
         let mut inner = data::HDict::new();
-        for (key, value) in d.iter() {
+        for (key, value) in d.copy()?.iter() {
             let name: String = key.extract()?;
             let kind = py_to_kind(&value)?;
             crate::convert::ensure_python_child(&kind)?;

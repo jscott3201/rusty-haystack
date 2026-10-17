@@ -125,11 +125,23 @@ revision and file-bound receipts for that claim. See [artifact validation and
 provenance](artifact-validation.md) for the source-archive repair, evidence profiles
 and publication boundaries.
 
-The current Python wheel workflow has no Windows wheel target. New interpreter
-versions, free-threaded Python, alternate compression/TLS backends, and unlisted
-feature or platform combinations are unqualified until explicit checks and execution
-evidence cover them. PyO3 is not built with `abi3`; one interpreter's successful build
-does not qualify another interpreter's wheel.
+That manual workflow also builds one CPython 3.14 free-threaded Linux x86_64 wheel
+and reuses its ordinary 3.12 wheel for two rich installed consumers. The local
+selected profile covers macOS arm64 CPython 3.12.13 and 3.14.4 free-threaded using
+the same receipt and consumer code. Hosted patch versions, SOABI, runtime GIL state,
+native dependencies and deployment requirements are recorded per run. Selected
+capabilities are typed values, async H4/H5, bounded watches, embedded memory
+application, synchronous facade and bounded shared-instance/lifecycle concurrency.
+Each capability process must retain unforced disabled GIL observations for the
+free-threaded cell. PostgreSQL, SQLite, MCP, analytics and free-threaded source
+installation remain explicitly unselected by this wheel profile.
+
+The tag/publication matrix remains the twelve ordinary wheel tuples above. There
+is no Windows wheel or Python 3.15 selection. Other interpreter, feature, backend
+and platform combinations require separate execution evidence. PyO3 is not built
+with `abi3`; `cp314-cp314t` is a version-specific free-threaded ABI. One interpreter's
+successful build does not qualify another interpreter's wheel, and selected
+concurrency runs do not certify every schedule, subinterpreter use or scaling.
 
 ## Shared application reads
 

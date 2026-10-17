@@ -118,7 +118,7 @@ def main():
         elif args.kind == "wheel":
             run([args.python, "-m", "maturin", "build", "--locked", "--release", "--target", args.target, "--interpreter", args.python, "--out", str(bundle / "files"), "-m", str(repo / "rusty-haystack/Cargo.toml")], work, cwd=repo, env=env, label="wheel-build")
             version_parts = tools["python"]["version"].split(".")
-            tag = "cp" + "".join(version_parts[:2])
+            tag = "cp" + "".join(version_parts[:2]) + ("t" if tools["python"]["py_gil_disabled"] else "")
             receipt = a.seal(repo, bundle, source, args.target, "wheel", tools, python_tag=tag)
         else:
             a.require(args.target == "source", "sdist target must be source")

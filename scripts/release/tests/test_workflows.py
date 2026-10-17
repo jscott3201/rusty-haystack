@@ -75,7 +75,23 @@ class WorkflowContracts(unittest.TestCase):
             self.assertIn('id: proof',job)
             self.assertIn('path: ${{ runner.temp }}/publication',job)
         manual=workflows['artifact-qualification.yml']
-        self.assertEqual(set(native),{'build','qualify'})
+        self.assertEqual(set(native),{'build','build-ft','qualify','qualify-selected'})
+        self.assertEqual(self.needs(native['qualify-selected']), {'build', 'build-ft'})
+        self.assertIn('wheel_ft: ${{ steps.identity.outputs.wheel_ft }}', native['build-ft'])
+        self.assertIn('python-version: "3.14t"', native['build-ft'])
+        self.assertIn('ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}', native['build-ft'])
+        selected = native['qualify-selected']
+        for value in ('abi: cp312', 'abi: cp314t', 'artifact: wheel\n', 'artifact: wheel_ft\n'):
+            self.assertIn(value, selected)
+        self.assertIn('PRODUCERS_JSON: ${{ toJSON(needs) }}', selected)
+        self.assertIn('artifacts.py download-ids --profile selected-wheels', selected)
+        self.assertIn('selected_wheel.py fixture', selected)
+        self.assertIn('selected_wheel.py qualify', selected)
+        self.assertIn('--fixture-receipt "$RUNNER_TEMP/fixture.json"', selected)
+        downloads=[step for step in steps(selected) if 'uses: actions/download-artifact@v4' in step]
+        self.assertEqual(len(downloads), 1)
+        self.assertIn('artifact-ids: ${{ steps.inventory.outputs[matrix.artifact] }}', downloads[0])
+        self.assertNotRegex(downloads[0], r'(?m)^          (name|pattern|run-id|repository|github-token):')
         self.assertIn('\non:\n  workflow_dispatch:\n',manual)
         self.assertNotRegex(manual,r'(?m)^  (push|pull_request|workflow_call):')
         self.assertNotRegex(manual,r'(secrets\.|id-token:|contents: write|gh-action-pypi-publish|action-gh-release|cargo publish)')
@@ -114,6 +130,9 @@ class WorkflowContracts(unittest.TestCase):
             ('python.yml','PRODUCERS_JSON: ${{ toJSON(needs) }}','PRODUCERS_JSON: "{}"'),
             ('artifact-qualification.yml','artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}','name: native-candidate-cli-${{ github.run_attempt }}'),
             ('artifact-qualification.yml','  contents: read','  contents: write'),
+            ('artifact-qualification.yml','needs: [build, build-ft]','needs: build'),
+            ('artifact-qualification.yml','artifact-ids: ${{ steps.inventory.outputs[matrix.artifact] }}','name: selected-${{ matrix.abi }}-${{ github.run_attempt }}'),
+            ('artifact-qualification.yml','artifact: wheel_ft','artifact: wheel'),
             ('release.yml','artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}','artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}\n          run-id: 123'),
             ('python.yml','proof: ${{ steps.proof.outputs.artifact-id }}','proof: ${{ steps.qualified.outputs.artifact-id }}'),
             ('python.yml','wheel_linux_x86_64_cp311: ${{ steps.identity.outputs.wheel_linux_x86_64_cp311 }}','wheel_linux_x86_64_cp312: ${{ steps.identity.outputs.wheel_linux_x86_64_cp311 }}'),

@@ -294,11 +294,9 @@ def test_deadlines_validation_cancellation_and_reusable_capacity():
             app.read("site", deadline=loop.time() - 1)
         with pytest.raises(TimeoutError):
             await app.terminated(deadline=loop.time() + .01)
-        # Holding the GIL in this loop prevents completed Python conversion from
-        # dropping its guard; all sixteen tickets remain occupied.
+        # Capacity saturation is tested with explicitly held native permits.
+        # These conversions may finish concurrently on free-threaded CPython.
         reads = [app.read("site") for _ in range(16)]
-        with pytest.raises(rh.ApplicationError, match="pending Python reads"):
-            app.read("site")
         for read in reads:
             read.cancel()
         await asyncio.gather(*reads, return_exceptions=True)

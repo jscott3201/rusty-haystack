@@ -9,14 +9,19 @@ import importlib.metadata
 import json
 from pathlib import Path
 import platform
+import runpy
 import sys
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--prefix", type=Path, required=True)
 parser.add_argument("--version", required=True)
 parser.add_argument("--typing-manifest", type=Path, required=True)
+parser.add_argument("--abi", choices=("cp312", "cp314t"), default="cp312")
+parser.add_argument("--wheel-manifest", type=Path)
 args = parser.parse_args()
-assert platform.python_implementation() == "CPython" and sys.version_info[:2] == (3, 12)
+profile = runpy.run_path(str(Path(__file__).with_name("runtime_profile.py")))
+before = profile["observe"]()
+profile["validate"](before, args.abi)
 assert Path(sys.prefix).resolve() == args.prefix.resolve()
 module = importlib.import_module("rusty_haystack")
 origin = Path(module.__file__).resolve()
@@ -53,4 +58,17 @@ classes = {node.name for node in ast.parse(stub.read_text()).body if isinstance(
 assert {"Number", "Ref", "HGrid", "CodecError", "ClientError"} <= classes
 installed_files = {str(path) for path in importlib.metadata.distribution("rusty-haystack").files}
 assert {"rusty_haystack/" + name for name in expected_typing} <= installed_files
-print(json.dumps({"implementation": platform.python_implementation(), "python": platform.python_version(), "prefix": str(args.prefix.resolve()), "module_origin": str(origin), "version": module.__version__, "typing_files_sha256": expected_typing, "typing": "installed PEP 561 layout, complete current stub digests and parsed public names; no full type-checker claim"}, sort_keys=True))
+wheel_members = {}
+if args.wheel_manifest:
+    wheel_members = json.loads(args.wheel_manifest.read_text())
+    assert wheel_members and set(wheel_members) <= installed_files
+    for name, expected in wheel_members.items():
+        path = package.parent / name
+        assert path.resolve().is_relative_to(args.prefix.resolve())
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, name
+native = importlib.import_module("rusty_haystack.rusty_haystack")
+native_origin = Path(native.__file__).resolve()
+assert native_origin.is_relative_to(args.prefix.resolve())
+after = profile["observe"]()
+profile["validate"](after, args.abi)
+print(json.dumps({"implementation": platform.python_implementation(), "python": platform.python_version(), "prefix": str(args.prefix.resolve()), "module_origin": str(origin), "native_origin": str(native_origin), "version": module.__version__, "typing_files_sha256": expected_typing, "wheel_members_sha256": wheel_members, "runtime_before": before, "runtime_after": after, "typing": "installed PEP 561 layout, complete current stub digests and parsed public names; no full type-checker claim"}, sort_keys=True))

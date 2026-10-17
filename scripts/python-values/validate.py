@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tomllib
@@ -28,12 +29,24 @@ def run(command, work, label, *, cwd, expected=0):
     env = dict(os.environ)
     for name in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
         env.pop(name, None)
-    result = subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, timeout=300)
-    (work / (label + ".stdout")).write_text(result.stdout)
-    (work / (label + ".stderr")).write_text(result.stderr)
-    if result.returncode != expected:
-        raise RuntimeError(f"{label} exited {result.returncode}, expected {expected}; retained output in {work}")
-    return result.stdout
+    process = subprocess.Popen(command, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=os.name != "nt")
+    try:
+        stdout, stderr = process.communicate(timeout=300)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        stdout, stderr = process.communicate()
+        (work / (label + ".stdout")).write_text(stdout)
+        (work / (label + ".stderr")).write_text(stderr)
+        raise RuntimeError(f"{label} exceeded 300 seconds; process group stopped; output retained in {work}")
+    (work / (label + ".stdout")).write_text(stdout)
+    (work / (label + ".stderr")).write_text(stderr)
+    if process.returncode != expected:
+        raise RuntimeError(f"{label} exited {process.returncode}, expected {expected}; retained output in {work}")
+    return stdout
 
 
 def main():
@@ -43,6 +56,8 @@ def main():
     parser.add_argument("--pyright", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--watch-fixture", type=Path, required=True)
+    parser.add_argument("--abi", choices=("cp312", "cp314t"), default="cp312")
+    parser.add_argument("--fixture-receipt", type=Path)
     args = parser.parse_args()
     work = args.work.resolve()
     if work.is_relative_to(REPO):
@@ -59,10 +74,15 @@ def main():
     run([str(python), "-I", "-m", "pip", "install", "--no-index", "--no-deps", "--no-cache-dir", str(wheel)], work, "install-wheel", cwd=scratch)
     manifest = work / "expected-typing.json"
     manifest.write_text(json.dumps(artifacts.typing_sources(REPO), sort_keys=True))
+    wheel_manifest = work / "expected-wheel-members.json"
+    wheel_members = {name: hashlib.sha256(data).hexdigest() for name, (data, _) in artifacts.members(wheel).items() if name.startswith("rusty_haystack/")}
+    wheel_manifest.write_text(json.dumps(wheel_members, sort_keys=True))
     version = tomllib.loads((REPO / "Cargo.toml").read_text())["workspace"]["package"]["version"]
-    installed = json.loads(run([str(python), "-I", str(REPO / "scripts/release/consumer.py"), "--prefix", str(venv), "--version", version, "--typing-manifest", str(manifest)], work, "installed-layout", cwd=scratch))
-    for name in ("positive.py", "negative.py", "async-runtime.py", "application-runtime.py", "watch-runtime.py", "h5-runtime.py", "sync-runtime.py"):
+    layout_command = [str(python), "-I", str(REPO / "scripts/release/consumer.py"), "--prefix", str(venv), "--version", version, "--typing-manifest", str(manifest), "--wheel-manifest", str(wheel_manifest), "--abi", args.abi]
+    installed = json.loads(run(layout_command, work, "installed-layout", cwd=scratch))
+    for name in ("positive.py", "negative.py", "async-runtime.py", "application-runtime.py", "watch-runtime.py", "h5-runtime.py", "sync-runtime.py", "concurrency-runtime.py", "runtime-runner.py"):
         shutil.copyfile(Path(__file__).with_name(name), scratch / name)
+    shutil.copyfile(REPO / "scripts/release/runtime_profile.py", scratch / "runtime_profile.py")
     shutil.copyfile(REPO / "rusty-haystack/tests/async_peer.py", scratch / "async_peer.py")
     shutil.copyfile(REPO / "rusty-haystack/tests/sync_peer.py", scratch / "sync_peer.py")
     shutil.copyfile(REPO / "rusty-haystack/tests/application_fixture.py", scratch / "application_fixture.py")
@@ -71,15 +91,24 @@ def main():
     shutil.copy2(args.watch_fixture.resolve(), watch_fixture)
     shutil.copyfile(REPO / "haystack-core/tests/fixtures/typed-v1-entity.json", scratch / "typed-v1-entity.json")
     (scratch / "pyrightconfig.json").write_text(json.dumps({"typeCheckingMode": "strict", "pythonVersion": "3.11", "extraPaths": []}))
-    run([str(python), "-I", str(scratch / "positive.py")], work, "positive-runtime", cwd=scratch)
-    async_runtime = json.loads(run([str(python), "-I", str(scratch / "async-runtime.py")], work, "async-runtime", cwd=scratch))
-    application_runtime = json.loads(run([str(python), "-I", str(scratch / "application-runtime.py")], work, "application-runtime", cwd=scratch))
-    h5_runtime = json.loads(run([str(python), "-I", str(scratch / "h5-runtime.py")], work, "h5-runtime", cwd=scratch))
-    sync_runtime = json.loads(run([str(python), "-I", str(scratch / "sync-runtime.py")], work, "sync-runtime", cwd=scratch))
+    runtime_modes = {}
+    def runtime(name, *arguments):
+        label = "positive-runtime" if name == "positive" else name
+        observation = work / (label + ".mode.json")
+        value = run([str(python), "-I", str(scratch / "runtime-runner.py"), "--abi", args.abi,
+                     "--prefix", str(venv), "--evidence", str(observation), str(scratch / (name + ".py")), *arguments], work, label, cwd=scratch)
+        runtime_modes[label] = json.loads(observation.read_text())
+        return value
+    runtime("positive")
+    async_runtime = json.loads(runtime("async-runtime"))
+    application_runtime = json.loads(runtime("application-runtime"))
+    h5_runtime = json.loads(runtime("h5-runtime"))
+    sync_runtime = json.loads(runtime("sync-runtime"))
+    concurrency_runtime = json.loads(runtime("concurrency-runtime"))
     expected_helper = REPO / "rusty-haystack/rusty_haystack/_application.py"
     if application_runtime["entry_helper_sha256"] != hashlib.sha256(expected_helper.read_bytes()).hexdigest():
         raise AssertionError("installed application entry helper differs from source")
-    watch_runtime = json.loads(run([str(python), "-I", str(scratch / "watch-runtime.py"), "--fixture", str(watch_fixture)], work, "watch-runtime", cwd=scratch))
+    watch_runtime = json.loads(runtime("watch-runtime", "--fixture", str(watch_fixture)))
     expected_watch_helper = REPO / "rusty-haystack/rusty_haystack/_watch.py"
     if watch_runtime["entry_helper_sha256"] != artifacts.digest(expected_watch_helper):
         raise AssertionError("installed watch entry helper differs from source")
@@ -110,6 +139,12 @@ def main():
     result = {"wheel": str(wheel), "wheel_sha256": artifacts.digest(wheel), "checker": CHECKER, "static_python_floor": "3.11", "positive_errors": 0, "native_submodule_source_warnings": source_warnings, "negative_lines_rejected": len(expected_lines), "installed": installed, "async_runtime": async_runtime, "application_runtime": application_runtime, "watch_runtime": watch_runtime, "watch_inputs": watch_inputs}
     result["h5_runtime"] = h5_runtime
     result["sync_runtime"] = sync_runtime
+    result["abi"] = args.abi
+    result["runtime_modes"] = runtime_modes
+    result["concurrency_runtime"] = concurrency_runtime
+    result["installed_after"] = json.loads(run(layout_command, work, "installed-layout-after", cwd=scratch))
+    result["consumer_inputs"] = artifacts.python_consumer_inputs(REPO)
+    result["watch_fixture_build"] = artifacts.read_json(args.fixture_receipt) if args.fixture_receipt else {"status": "unbound", "sha256": artifacts.digest(args.watch_fixture)}
     (work / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
 

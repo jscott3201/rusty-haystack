@@ -174,11 +174,7 @@ impl View {
         if deadline <= Instant::now() {
             return Err(timeout());
         }
-        let permit = self
-            .pending
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| application_error("too many pending Python reads"))?;
+        let permit = reserve_read(&self.pending)?;
         let work = ReadWork {
             guard: self.native.admit().map_err(application_error)?,
             _permit: permit,
@@ -219,9 +215,22 @@ struct ReadWork {
     guard: WorkGuard,
     _permit: OwnedSemaphorePermit,
 }
+fn reserve_read(pending: &Arc<Semaphore>) -> PyResult<OwnedSemaphorePermit> {
+    pending
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| application_error("too many pending Python reads"))
+}
 fn convert_read(grid: &haystack_core::data::HGrid, work: ReadWork) -> PyResult<Py<PyAny>> {
-    let result =
-        async_bridge::with_python(|py| Py::new(py, PyHGrid::from_core(grid)?).map(Py::into_any));
+    convert_read_with(work, |py| {
+        Py::new(py, PyHGrid::from_core(grid)?).map(Py::into_any)
+    })
+}
+fn convert_read_with(
+    work: ReadWork,
+    convert: impl for<'py> FnOnce(Python<'py>) -> PyResult<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let result = async_bridge::with_python(convert);
     // Native termination includes successful and failed Python conversion.
     drop(work);
     result
@@ -614,9 +623,10 @@ mod tests {
         for invalid in [false, true] {
             let owner = builder().start(runtime.handle()).unwrap();
             runtime.block_on(owner.ready()).unwrap();
+            let pending = Arc::new(Semaphore::new(1));
             let work = ReadWork {
                 guard: owner.handle().admit().unwrap(),
-                _permit: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
+                _permit: reserve_read(&pending).unwrap(),
             };
             let mut row = HDict::new();
             if invalid {
@@ -628,27 +638,29 @@ mod tests {
             }
             let grid = HGrid::from_parts(HDict::new(), vec![], vec![row]);
             let (entered, receive) = std::sync::mpsc::sync_channel(1);
-            let worker = Python::attach(|_| {
-                let worker = std::thread::spawn(move || {
+            let (release, wait) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                convert_read_with(work, |py| {
                     entered.send(()).unwrap();
-                    convert_read(&grid, work)
-                });
-                receive.recv_timeout(Duration::from_secs(2)).unwrap();
-                owner.request_close();
-                // This thread holds the GIL. Conversion cannot attach yet, and
-                // dropping its native read result must not release this guard.
-                assert!(
-                    runtime
-                        .block_on(async {
-                            tokio::time::timeout(Duration::from_millis(30), owner.terminated())
-                                .await
-                        })
-                        .is_err()
-                );
-                assert!(!owner.handle().is_terminated());
-                worker
+                    py.detach(move || wait.recv_timeout(Duration::from_secs(2)).unwrap());
+                    Py::new(py, PyHGrid::from_core(&grid)?).map(Py::into_any)
+                })
             });
+            receive.recv_timeout(Duration::from_secs(2)).unwrap();
+            owner.request_close();
+            // The actual conversion callback is held independently of the GIL.
+            assert!(reserve_read(&pending).is_err());
+            assert!(
+                runtime
+                    .block_on(async {
+                        tokio::time::timeout(Duration::from_millis(30), owner.terminated()).await
+                    })
+                    .is_err()
+            );
+            assert!(!owner.handle().is_terminated());
+            release.send(()).unwrap();
             assert_eq!(worker.join().unwrap().is_err(), invalid);
+            assert_eq!(pending.available_permits(), 1);
             let report = runtime.block_on(async {
                 tokio::time::timeout(Duration::from_secs(2), owner.terminated())
                     .await
@@ -657,6 +669,22 @@ mod tests {
             assert!(report.close.is_ok());
             assert_eq!(owner.handle().outstanding_tasks(), 0);
         }
+    }
+
+    #[test]
+    fn pending_read_capacity_rejects_until_owned_permit_is_released() {
+        Python::initialize();
+        let pending = Arc::new(Semaphore::new(MAX_PENDING_READS));
+        let mut permits = (0..MAX_PENDING_READS)
+            .map(|_| reserve_read(&pending).unwrap())
+            .collect::<Vec<_>>();
+        assert!(reserve_read(&pending).is_err());
+        drop(permits.pop());
+        let resumed = reserve_read(&pending).unwrap();
+        assert!(reserve_read(&pending).is_err());
+        drop(resumed);
+        drop(permits);
+        assert_eq!(pending.available_permits(), MAX_PENDING_READS);
     }
 
     #[test]

@@ -28,6 +28,7 @@ Repository = "https://github.com/jscott3201/rusty-haystack"
 [tool.maturin]
 locked = true
 features = ["pyo3/extension-module"]
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

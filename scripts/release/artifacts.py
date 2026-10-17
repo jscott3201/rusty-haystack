@@ -23,6 +23,7 @@ MATURIN = "1.15.0"
 BINARY_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc")
 WHEEL_TARGETS = BINARY_TARGETS[:4]
 PYTHONS = ("cp311", "cp312", "cp313")
+SELECTED_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-apple-darwin")
 MAX_BYTES = 512 * 1024 * 1024
 TYPING_FILES = ("__init__.pyi", "auth.pyi", "client.pyi", "codecs.pyi", "data.pyi", "filter.pyi", "graph.pyi", "kinds.pyi", "ontology.pyi", "server.pyi", "units.pyi", "py.typed")
 
@@ -74,6 +75,14 @@ def typing_hashes(package):
 
 def typing_sources(repo):
     return typing_hashes(repo / "rusty-haystack/rusty_haystack")
+
+
+def python_consumer_inputs(repo):
+    paths = (*sorted((repo / "scripts/python-values").glob("*.py")),
+             repo / "scripts/release/consumer.py", repo / "scripts/release/runtime_profile.py",
+             *(repo / "rusty-haystack/tests" / name for name in ("async_peer.py", "sync_peer.py", "application_fixture.py", "watch_fixture.py")),
+             repo / "haystack-core/tests/fixtures/typed-v1-entity.json")
+    return {str(path.relative_to(repo)): digest(path) for path in paths}
 
 
 def archived_typing(entries, prefix):
@@ -183,7 +192,8 @@ def tool_info(python=None, maturin=None, *, repo=None, target=None, env=None):
     require(cargo.startswith("cargo " + RUST), "unexpected selected Cargo version")
     info = {"rustc": rustc, "cargo": cargo, "executables": executables, "context": context, "target": target}
     if python:
-        info["python"] = json.loads(output([python, "-I", "-c", "import json,platform,sys,sysconfig; print(json.dumps({'implementation':platform.python_implementation(),'version':platform.python_version(),'cache_tag':sys.implementation.cache_tag,'platform':sysconfig.get_platform()}))"], cwd=repo, env=environ))
+        info["python"] = json.loads(output([python, "-I", str(Path(__file__).with_name("runtime_profile.py"))], cwd=repo, env=environ))
+        info["python"]["executable_sha256"] = digest(Path(info["python"]["executable"]).resolve(strict=True))
         info["maturin"] = output([maturin, "--version"] if maturin else [python, "-m", "maturin", "--version"], cwd=repo, env=environ)
         require(info["maturin"] == f"maturin {MATURIN}", "unexpected Maturin backend")
     return info
@@ -279,6 +289,8 @@ def target_identity(target):
 
 def inspect_file(path, kind, version, target, python_tag=None):
     entries = members(path)
+    if kind in ("wheel", "sdist"):
+        require(not any("__pycache__" in PurePosixPath(name).parts or name.endswith((".pyc", ".pyo")) for name in entries), "Python archive contains builder bytecode")
     if kind == "cli":
         binary = "haystack.exe" if "windows" in target else "haystack"
         require(set(entries) == {binary, "LICENSE"}, "unexpected CLI archive inventory")
@@ -287,12 +299,12 @@ def inspect_file(path, kind, version, target, python_tag=None):
         require(path.name == expected, "CLI filename mismatch")
         return {"name": "rusty-haystack-cli", "version": version}, None
     if kind == "wheel":
-        require(target in WHEEL_TARGETS and python_tag in PYTHONS, "unsupported wheel tuple")
+        require((target in WHEEL_TARGETS and python_tag in PYTHONS) or (target in SELECTED_TARGETS and python_tag == "cp314t"), "unsupported wheel tuple")
         fields = path.name.removesuffix(".whl").split("-")
         require(path.suffix == ".whl" and len(fields) == 5, "unexpected wheel filename")
         dist, wheel_version, interpreter, abi, platforms = fields
         require(canonical(dist) == "rusty-haystack" and wheel_version == version, "wheel filename version/name mismatch")
-        require(interpreter == abi == python_tag, "wheel Python/ABI mismatch")
+        require(interpreter == python_tag.removesuffix("t") and abi == python_tag, "wheel Python/ABI mismatch")
         expected_suffix = "arm64" if target == "aarch64-apple-darwin" else target.split("-")[0]
         platform_tags = platforms.split(".")
         require(all(tag.endswith("_" + expected_suffix) and tag.startswith("macosx_" if "darwin" in target else ("manylinux", "linux_")) for tag in platform_tags), "wheel platform mismatch")
@@ -402,10 +414,14 @@ def read_bundle(bundle, *, source, version, source_lock, source_typing=None, all
     for executable in ("cargo", "rustc", "rustdoc"):
         selected = tools["executables"][executable]
         require(isinstance(selected["path"], str) and re.fullmatch(r"[0-9a-f]{64}", selected["sha256"]), "selected executable provenance mismatch")
-    python_tag = receipt["details"].get("python") if receipt["kind"] == "wheel" else None
+    python_tag = receipt["details"].get("abi") if receipt["kind"] == "wheel" else None
     if python_tag:
         python = build["tools"]["python"]
-        require(python["implementation"] == "CPython" and python["cache_tag"] == "cpython-" + python_tag[2:] and "cp" + "".join(python["version"].split(".")[:2]) == python_tag, "builder interpreter provenance mismatch")
+        interpreter_tag = python_tag.removesuffix("t")
+        require(python["implementation"] == "CPython" and python["cache_tag"] == "cpython-" + interpreter_tag[2:] and "cp" + "".join(python["version"].split(".")[:2]) == interpreter_tag, "builder interpreter provenance mismatch")
+        if python_tag == "cp314t":
+            from runtime_profile import validate
+            validate(python, python_tag)
     package, details = inspect_file(path, receipt["kind"], version, build["target"], python_tag)
     require(receipt["package"] == package and receipt["details"] == details, "package/ABI metadata mismatch")
     if receipt["kind"] != "cli":
@@ -483,6 +499,7 @@ def download_ids(profile, needs):
     wheel_keys = tuple("wheel_" + platform + "_" + py for platform in platforms for py in PYTHONS)
     profiles = {
         "native": {"build": ("cli", "wheel", "sdist")},
+        "selected-wheels": {"build": ("cli", "wheel", "sdist"), "build-ft": ("wheel_ft",)},
         "binaries": {"build-binaries": tuple("cli_" + platform for platform in (*platforms, "windows_x86_64"))},
         "python": {"build-wheels": wheel_keys, "build-sdist": ("sdist",)},
         "publish-binaries": {"validate": (), "qualify-binaries": ("packages", "proof")},
@@ -508,7 +525,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     downloads = commands.add_parser("download-ids", help="validate successful producer outputs before same-run ID downloads")
-    downloads.add_argument("--profile", choices=("native", "binaries", "python", "publish-binaries", "publish-python"), required=True)
+    downloads.add_argument("--profile", choices=("native", "selected-wheels", "binaries", "python", "publish-binaries", "publish-python"), required=True)
     downloads.add_argument("--needs-json", required=True); downloads.add_argument("--github-output", type=Path)
     version = commands.add_parser("version", help="parse package version and check a supplied tag")
     version.add_argument("--repo", type=Path, required=True); version.add_argument("--tag")
