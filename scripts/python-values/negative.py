@@ -82,3 +82,19 @@ async def bad_watch(delivery: rh.WatchDelivery, control: rh.WatchControl) -> Non
     delivery.removed = ()  # reject
     control.kind = "closed"  # reject
     control.local_joined = True  # reject
+
+sync_client = rh.SyncHaystackClient("http://localhost:1", "user", "password")
+sync_client.connect(deadline=1.0)  # reject
+sync_client.read("site", timeout="slow")  # reject
+sync_client.read("site", limit=None)  # reject
+sync_client.close().cancel()  # reject
+sync_client.state = "open"  # reject
+sync_client.closed = True  # reject
+sync_client.watch(["id"])  # reject
+sync_client.read_by_id(rh.Ref("id"))  # reject
+rh.SyncHaystackClient("http://localhost:1", "user", "password", h5=rh.H5Config())  # reject
+async def bad_sync() -> None:
+    await sync_client.connect()  # reject
+    await sync_client.read("site")  # reject
+    async with sync_client:  # reject
+        pass
