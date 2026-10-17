@@ -61,9 +61,10 @@ def main():
     manifest.write_text(json.dumps(artifacts.typing_sources(REPO), sort_keys=True))
     version = tomllib.loads((REPO / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     installed = json.loads(run([str(python), "-I", str(REPO / "scripts/release/consumer.py"), "--prefix", str(venv), "--version", version, "--typing-manifest", str(manifest)], work, "installed-layout", cwd=scratch))
-    for name in ("positive.py", "negative.py", "async-runtime.py", "application-runtime.py", "watch-runtime.py", "h5-runtime.py"):
+    for name in ("positive.py", "negative.py", "async-runtime.py", "application-runtime.py", "watch-runtime.py", "h5-runtime.py", "sync-runtime.py"):
         shutil.copyfile(Path(__file__).with_name(name), scratch / name)
     shutil.copyfile(REPO / "rusty-haystack/tests/async_peer.py", scratch / "async_peer.py")
+    shutil.copyfile(REPO / "rusty-haystack/tests/sync_peer.py", scratch / "sync_peer.py")
     shutil.copyfile(REPO / "rusty-haystack/tests/application_fixture.py", scratch / "application_fixture.py")
     shutil.copyfile(REPO / "rusty-haystack/tests/watch_fixture.py", scratch / "watch_fixture.py")
     watch_fixture = scratch / args.watch_fixture.name
@@ -74,6 +75,7 @@ def main():
     async_runtime = json.loads(run([str(python), "-I", str(scratch / "async-runtime.py")], work, "async-runtime", cwd=scratch))
     application_runtime = json.loads(run([str(python), "-I", str(scratch / "application-runtime.py")], work, "application-runtime", cwd=scratch))
     h5_runtime = json.loads(run([str(python), "-I", str(scratch / "h5-runtime.py")], work, "h5-runtime", cwd=scratch))
+    sync_runtime = json.loads(run([str(python), "-I", str(scratch / "sync-runtime.py")], work, "sync-runtime", cwd=scratch))
     expected_helper = REPO / "rusty-haystack/rusty_haystack/_application.py"
     if application_runtime["entry_helper_sha256"] != hashlib.sha256(expected_helper.read_bytes()).hexdigest():
         raise AssertionError("installed application entry helper differs from source")
@@ -107,6 +109,7 @@ def main():
         raise AssertionError("negative static diagnostics did not match the marked consumer lines")
     result = {"wheel": str(wheel), "wheel_sha256": artifacts.digest(wheel), "checker": CHECKER, "static_python_floor": "3.11", "positive_errors": 0, "native_submodule_source_warnings": source_warnings, "negative_lines_rejected": len(expected_lines), "installed": installed, "async_runtime": async_runtime, "application_runtime": application_runtime, "watch_runtime": watch_runtime, "watch_inputs": watch_inputs}
     result["h5_runtime"] = h5_runtime
+    result["sync_runtime"] = sync_runtime
     (work / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
 

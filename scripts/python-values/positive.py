@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator, Coroutine, Literal, assert_type
 import rusty_haystack as rh
 from rusty_haystack import Buf, CodecError, Coord, Float, HDateTime, HDict, HGrid, HList, Int, Nominal, NoneValue, Number
 from rusty_haystack.auth import generate_nonce
-from rusty_haystack.client import AsyncHaystackClient, AsyncWatch, WatchControl, WatchDelivery, HaystackClient, TlsConfig, H5Config, H5Error
+from rusty_haystack.client import AsyncHaystackClient, SyncHaystackClient, AsyncWatch, WatchControl, WatchDelivery, HaystackClient, TlsConfig, H5Config, H5Error
 from rusty_haystack.codecs import decode_typed_value, encode_typed_value
 from rusty_haystack.data import HCol
 from rusty_haystack.filter import CmpOp, Filter, Path as FilterPath
@@ -85,6 +85,18 @@ async def close_unconnected_owner() -> None:
     assert client.closed
 
 asyncio.run(close_unconnected_owner())
+
+assert SyncHaystackClient is rh.SyncHaystackClient
+def sync_surface(client: SyncHaystackClient) -> None:
+    assert_type(client.connect(timeout=2.0), None)
+    assert_type(client.read("site", limit=100, timeout=1.0), HGrid)
+    assert_type(client.close(), None)
+    with rh.SyncHaystackClient("http://localhost:1", "user", "password") as owned:
+        assert_type(owned, SyncHaystackClient)
+
+sync_client = rh.SyncHaystackClient("http://localhost:1", "user", "password")
+assert_type(sync_client.__exit__(exc_type=None, exc_value=None, traceback=None), None)
+assert sync_client.closed
 
 assert ApplicationBuilder is rh.ApplicationBuilder
 assert ApplicationOwner is rh.ApplicationOwner

@@ -16,6 +16,7 @@ mod kinds;
 mod ontology;
 mod rich_kinds;
 mod server;
+mod sync_client;
 mod units;
 mod watch_owner;
 
@@ -69,6 +70,7 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ontology::PyDefNamespace>()?;
 
     m.add_class::<async_client::PyAsyncHaystackClient>()?;
+    m.add_class::<sync_client::PySyncHaystackClient>()?;
     m.add_class::<h5::PyH5Config>()?;
     m.add_class::<async_watch::PyAsyncWatch>()?;
     m.add_class::<async_watch::PyWatchDelivery>()?;
@@ -189,6 +191,7 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ── Submodule: client ──
     add_submodule(m, "client", |sub| {
         sub.add_class::<async_client::PyAsyncHaystackClient>()?;
+        sub.add_class::<sync_client::PySyncHaystackClient>()?;
         sub.add_class::<h5::PyH5Config>()?;
         sub.add("H5Error", m.py().get_type::<exceptions::H5Error>())?;
         sub.add_class::<async_watch::PyAsyncWatch>()?;

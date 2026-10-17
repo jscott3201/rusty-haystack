@@ -209,6 +209,57 @@ target Python 3.11. Broader platform and free-threaded qualification is separate
 The independent TLS tests require an OpenSSL CLI and generate temporary seven-day
 certificates so platform certificate policies and stale fixtures are respected.
 
+## Owned synchronous HTTP client
+
+`SyncHaystackClient` provides direct blocking H4 `connect`, `read`, and `close`
+operations with the same native HTTP/SCRAM owner as `AsyncHaystackClient`.
+Constructing it performs no I/O. Context entry connects and returns the client;
+context exit closes it and preserves an existing body exception, adding a
+cleanup note when possible.
+
+```python
+from rusty_haystack import SyncHaystackClient
+
+with SyncHaystackClient(url, username, password, timeout=30.0) as client:
+    sites = client.read("site", limit=100, timeout=5.0)
+    print(len(sites))
+```
+
+`connect()` and `close()` return `None`; `read()` returns an `HGrid`. `state` and
+`closed` are observations available from any thread. The first valid blocking
+operation binds the client to one OS thread, including when that operation is
+`close()`. Later blocking calls must use that same thread. Calls from a running
+asyncio loop or an entered Tokio runtime raise `RuntimeError` before admission or
+state changes. A complete construct/connect/read/close flow can run inside one
+`asyncio.to_thread` call. Separate `to_thread` calls need not reuse a thread.
+
+The constructor budget defaults to 30 seconds. Constructor and per-call `timeout`
+values must be finite, positive, and representable at native timer resolution.
+Per-call values only shorten the constructor budget. Each call converts its
+relative budget once; native waiting, reacquiring Python, and result conversion
+all consume it. Invalid inputs fail before thread binding or dispatch. A read
+timeout cancels that request and permits later reads; a connect failure or timeout
+is terminal. `TimeoutError` reports expiry, and `ClientError` reports native
+failures. Reads default to 100 rows, allow at most 1000 rows and 8192 UTF-8 filter
+bytes, and reject responses larger than 1 MiB. TLS configuration uses the same
+verified defaults, custom CA/client identity, and explicit `tls_verify=False`
+lab option described above.
+
+Native waits release Python so other Python threads can run. Signal delivery,
+including `KeyboardInterrupt`, may wait until the bounded native wait returns;
+this facade does not promise prompt signal polling. A tiny valid close budget
+still requests cleanup. If close times out, cleanup continues and a later close
+can observe it. Successful close waits for the owned native thread, its runtime
+and admitted result conversions to finish. Process-wide bridge threads remain
+available to other clients. Dropping a client requests cleanup without waiting;
+use successful explicit close for a teardown receipt. Close does not establish
+remote SCRAM-session revocation. Supervised pending-work exit tests qualify the
+selected host only; process exit is not proof of pre-exit native teardown.
+
+This facade is exported from both `rusty_haystack` and `rusty_haystack.client`.
+It has no H5, watch, or generic raw-call methods. Existing `HaystackClient` and
+`WsClient` APIs retain their wider capabilities and existing lifecycle behavior.
+
 ## Selected H5 async reads
 
 Pass `h5=H5Config()` to select the pinned preview for `read_by_id` and

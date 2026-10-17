@@ -208,7 +208,7 @@ impl Owner {
             let mut control = self.0.control.lock();
             if control.phase != Phase::New {
                 return Err(ClientError::Connection(
-                    "connect requires a new async client".into(),
+                    "connect requires a new client".into(),
                 ));
             }
             control.phase = Phase::Connecting;
@@ -608,11 +608,17 @@ fn timeout() -> ClientError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    #[test]
-    fn close_joins_blocking_tail_then_result_conversion_guard() {
+    pub(crate) struct HeldOwner {
+        pub(crate) owner: Owner,
+        pub(crate) release: std::sync::mpsc::Sender<()>,
+        pub(crate) thread_exited: std::sync::mpsc::Receiver<()>,
+        pub(crate) conversion: Arc<Ticket>,
+    }
+
+    pub(crate) fn held_owner() -> HeldOwner {
         let owner = Owner::new(Settings {
             url: "http://localhost:1".into(),
             username: "fixture".into(),
@@ -655,6 +661,34 @@ mod tests {
             owner: owner.clone(),
             cancel: CancellationToken::new(),
         });
+        HeldOwner {
+            owner,
+            release,
+            thread_exited: thread_exited_rx,
+            conversion,
+        }
+    }
+
+    pub(crate) fn ready_operation(owner: &Owner, connecting: bool) -> Operation<()> {
+        let ticket = owner.admit().unwrap();
+        let (response, receiver) = oneshot::channel();
+        response.send(Ok(())).unwrap();
+        Operation {
+            response: receiver,
+            ticket,
+            connecting,
+            completed: false,
+        }
+    }
+
+    #[test]
+    fn close_joins_blocking_tail_then_result_conversion_guard() {
+        let HeldOwner {
+            owner,
+            release,
+            thread_exited: thread_exited_rx,
+            conversion,
+        } = held_owner();
         owner.begin_close();
         let runtime = crate::async_bridge::runtime();
         runtime.block_on(async {
