@@ -65,6 +65,10 @@ class Peer:
         writer.write(f"HTTP/1.1 {status} Fixture\r\nContent-Type: text/zinc\r\nContent-Length: {len(body)}\r\n{headers}\r\n".encode() + body)
         await writer.drain()
 
+    async def operation(self, reader, writer, method, path, headers, body):
+        """Optional authenticated operation for specialized independent peers."""
+        return False
+
     async def handle(self, reader, writer):
         task = asyncio.current_task()
         self.handlers.add(task)
@@ -108,6 +112,8 @@ class Peer:
                         server_key = hmac.digest(salted, b"Server Key", "sha256")
                         verifier = "v=" + base64.b64encode(hmac.digest(server_key, transcript, "sha256")).decode()
                         await self.response(writer, 200, headers=f"Authentication-Info: hash=SHA-256, authToken=fixture-token, data={b64(verifier.encode())}\r\n")
+                elif auth == "BEARER authToken=fixture-token" and await self.operation(reader, writer, method, path, headers, body):
+                    pass
                 elif auth == "BEARER authToken=fixture-token" and path == "/api/read":
                     if self.mode == "stall_read":
                         writer.write(b"HTTP/1.1 200 Fixture\r\nContent-Type: text/zinc\r\nContent-Length: 100\r\n\r\nv")

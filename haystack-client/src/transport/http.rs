@@ -8,6 +8,36 @@ use haystack_core::data::HGrid;
 /// Operations that use GET (noSideEffects).
 const GET_OPS: &[&str] = &["about", "ops", "formats"];
 
+fn h5_media_type(value: &str) -> bool {
+    let mut parts = value.split(';').map(str::trim);
+    if !parts
+        .next()
+        .is_some_and(|media| media.eq_ignore_ascii_case("application/json"))
+    {
+        return false;
+    }
+    let (mut boxing, mut charset) = (false, false);
+    for parameter in parts {
+        let Some((name, value)) = parameter.split_once('=') else {
+            return false;
+        };
+        if name.trim().eq_ignore_ascii_case("box")
+            && !boxing
+            && matches!(value.trim(), "all" | "auto")
+        {
+            boxing = true;
+        } else if name.trim().eq_ignore_ascii_case("charset")
+            && !charset
+            && value.trim().eq_ignore_ascii_case("utf-8")
+        {
+            charset = true;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 enum AuthCredential {
     Bearer(zeroize::Zeroizing<String>),
     Basic {
@@ -29,6 +59,81 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
+    /// Separate typed route: the legacy grid codec and status mapping do not apply.
+    pub(crate) async fn call_h5(
+        &self,
+        request: &crate::h5::ReadRequest,
+        control: &crate::h5::ReadControl,
+    ) -> Result<haystack_core::kinds::Kind, ClientError> {
+        use crate::h5::{MAX_WIRE_BYTES, MEDIA_TYPE};
+        control.check()?;
+        if !self.entity_submission_safe {
+            return Err(ClientError::Connection(
+                "H5 reads require a first-party no-retry/no-redirect client".into(),
+            ));
+        }
+        crate::config::validate_http_url(&self.base_url)?;
+        let mut meter = control.meter()?;
+        let body = request.encode(control, &mut meter)?;
+        control.check()?;
+        let mut response = self
+            .apply_auth(
+                self.client
+                    .post(format!("{}/{}", self.base_url, request.operation())),
+            )?
+            .header("Xeto-Version", "5")
+            .header("Content-Type", MEDIA_TYPE)
+            .header("Accept", MEDIA_TYPE)
+            .body(body)
+            .send()
+            .await
+            .map_err(crate::error::http_error)?;
+        control.check()?;
+        let versions: Vec<_> = response.headers().get_all("xeto-version").iter().collect();
+        if versions.len() != 1 || versions[0] != "5" {
+            return Err(ClientError::Codec("unexpected H5 response version".into()));
+        }
+        let types: Vec<_> = response.headers().get_all("content-type").iter().collect();
+        let valid_type = types.len() == 1 && types[0].to_str().ok().is_some_and(h5_media_type);
+        if !valid_type {
+            return Err(ClientError::Codec("unexpected H5 response format".into()));
+        }
+        let encodings: Vec<_> = response
+            .headers()
+            .get_all("content-encoding")
+            .iter()
+            .collect();
+        if encodings.len() > 1
+            || encodings
+                .first()
+                .is_some_and(|encoding| *encoding != "identity")
+        {
+            return Err(ClientError::Codec("unexpected H5 content encoding".into()));
+        }
+        if response.status().is_success() && response.status().as_u16() != 200 {
+            return Err(ClientError::Codec("unexpected H5 success status".into()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_WIRE_BYTES as u64)
+        {
+            return Err(ClientError::Codec("H5 response exceeds byte limit".into()));
+        }
+        let status = response.status().as_u16();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(crate::error::http_error)? {
+            control.check()?;
+            if chunk.len() > MAX_WIRE_BYTES.saturating_sub(bytes.len()) {
+                return Err(ClientError::Codec("H5 response exceeds byte limit".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        control.check()?;
+        let result = request.decode(status, &bytes, control, &mut meter);
+        control.check()?;
+        result
+    }
+
     /// SCRAM session transport using a bearer token.
     ///
     /// The supplied client's TLS, timeout, redirect, and retry policies are

@@ -10,6 +10,7 @@ from . import kinds as kinds, data as data, codecs as codecs, filter as filter
 from . import units as units, graph as graph, ontology as ontology, auth as auth
 from . import client as client, server as server
 from .client import AsyncHaystackClient as AsyncHaystackClient, AsyncWatch as AsyncWatch, WatchDelivery as WatchDelivery, WatchControl as WatchControl
+from .client import H5Config as H5Config
 from .server import ApplicationBuilder as ApplicationBuilder, ApplicationOwner as ApplicationOwner
 from .server import ApplicationHandle as ApplicationHandle, ApplicationTermination as ApplicationTermination
 from .codecs import encode_grid as encode_grid, decode_grid as decode_grid
@@ -103,6 +104,11 @@ class AuthError(HaystackError): ...
 
 
 class ClientError(HaystackError): ...
+class H5Error(ClientError):
+    """Typed ApiErr; status is HTTP status, payload.status remains advisory."""
+    status: int
+    spec: str
+    payload: HDict
 class ApplicationError(HaystackError): ...
 
 

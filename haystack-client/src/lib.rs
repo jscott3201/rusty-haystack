@@ -41,6 +41,7 @@ pub mod client;
 pub mod config;
 pub mod entity;
 pub mod error;
+pub mod h5;
 pub mod history;
 pub mod history_mutation;
 pub mod repository;

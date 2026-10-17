@@ -5,6 +5,9 @@
 /// Errors that can occur during Haystack client operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    /// Typed failure of a selected pinned H5 request.
+    #[error(transparent)]
+    H5(#[from] crate::h5::ApiError),
     /// Authentication failed, including rejected or expired HTTP credentials.
     #[error("authentication failed: {0}")]
     AuthFailed(String),

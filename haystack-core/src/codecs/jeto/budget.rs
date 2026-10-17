@@ -60,14 +60,17 @@ pub enum Limit {
     #[error("depth")]
     Depth,
 }
-pub(super) struct Bounded {
+/// Reusable cumulative codec budget, composable with an embedding's cancellation
+/// or deadline checks through [`Meter`]. Sharing it across stages does not reset
+/// work, retained-byte, or node charges.
+pub struct Bounded {
     limits: Limits,
     work: usize,
     retained: usize,
     nodes: usize,
 }
 impl Bounded {
-    pub(super) fn new(limits: Limits) -> Result<Self, Limit> {
+    pub fn new(limits: Limits) -> Result<Self, Limit> {
         if limits.max_input_bytes == 0
             || limits.max_output_bytes == 0
             || limits.max_work == 0

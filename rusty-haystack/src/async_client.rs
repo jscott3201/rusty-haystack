@@ -5,6 +5,7 @@ use haystack_client::{ClientConfig, ClientError};
 use parking_lot::Mutex;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use pyo3_async_runtimes::TaskLocals;
 use tokio::time::Instant;
 use zeroize::Zeroizing;
@@ -24,6 +25,7 @@ struct Affinity {
 #[pyclass(name = "AsyncHaystackClient", module = "rusty_haystack.client", frozen)]
 pub(crate) struct PyAsyncHaystackClient {
     owner: Owner,
+    h5: bool,
     pub(crate) context: Arc<ClientContext>,
 }
 
@@ -48,9 +50,19 @@ impl CancelOperation {
 
 pub(crate) fn native_error(error: ClientError) -> PyErr {
     match error {
+        ClientError::H5(error) => crate::h5::error(error),
         ClientError::Timeout(_) => PyTimeoutError::new_err("async client deadline expired"),
         error => crate::exceptions::ClientError::new_err(error.to_string()),
     }
+}
+
+fn validate_h5_id(id: &crate::kinds::PyRef_) -> PyResult<()> {
+    if id.val.len() > haystack_client::h5::MAX_ID_BYTES {
+        return Err(PyValueError::new_err(
+            "H5 IDs allow at most 8192 UTF-8 bytes",
+        ));
+    }
+    Ok(())
 }
 
 impl ClientContext {
@@ -107,6 +119,46 @@ impl ClientContext {
     }
 }
 impl PyAsyncHaystackClient {
+    fn start_h5<'py>(
+        &self,
+        py: Python<'py>,
+        request: haystack_client::h5::ReadRequest,
+        deadline: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if !self.h5 {
+            return Err(PyValueError::new_err(
+                "selected reads require h5=H5Config()",
+            ));
+        }
+        request.validate().map_err(|_| {
+            PyValueError::new_err(
+                "H5 reads allow at most 1000 IDs of at most 8192 UTF-8 bytes each",
+            )
+        })?;
+        let (locals, deadline) = self.context.context(py, deadline)?;
+        let mut operation = self
+            .owner
+            .read_h5(request, deadline)
+            .map_err(native_error)?;
+        let cancellation = operation.cancellation();
+        let control = cancellation.read_control(deadline);
+        let future = async_bridge::future(py, locals, async move {
+            let value = operation.result().await;
+            control.check().map_err(native_error)?;
+            let result = value.map_err(native_error).and_then(|value| {
+                async_bridge::with_python(|py| {
+                    control.check().map_err(native_error)?;
+                    crate::convert::kind_to_py(py, &value)
+                })
+            });
+            control.check().map_err(native_error)?;
+            drop(operation);
+            result
+        })?;
+        add_cancellation(&future, cancellation)?;
+        Ok(future)
+    }
+
     fn start_connect<'py>(
         &self,
         py: Python<'py>,
@@ -147,7 +199,7 @@ fn add_cancellation(future: &Bound<'_, PyAny>, cancellation: Cancellation) -> Py
 #[pymethods]
 impl PyAsyncHaystackClient {
     #[new]
-    #[pyo3(signature = (url, username, password, *, tls=None, timeout=30.0, tls_verify=true))]
+    #[pyo3(signature = (url, username, password, *, tls=None, timeout=30.0, tls_verify=true, h5=None))]
     fn new(
         url: String,
         username: String,
@@ -155,6 +207,7 @@ impl PyAsyncHaystackClient {
         tls: Option<&PyTlsConfig>,
         timeout: f64,
         tls_verify: bool,
+        h5: Option<&crate::h5::PyH5Config>,
     ) -> PyResult<Self> {
         if !timeout.is_finite() || timeout <= 0.0 {
             return Err(PyValueError::new_err("timeout must be positive and finite"));
@@ -172,6 +225,7 @@ impl PyAsyncHaystackClient {
             ..ClientConfig::default()
         };
         Ok(Self {
+            h5: h5.is_some(),
             owner: Owner::new(Settings {
                 url,
                 username,
@@ -233,6 +287,61 @@ impl PyAsyncHaystackClient {
         })?;
         add_cancellation(&future, cancellation)?;
         Ok(future)
+    }
+
+    #[pyo3(signature = (id=None, *, checked=true, deadline=None))]
+    fn read_by_id<'py>(
+        &self,
+        py: Python<'py>,
+        id: Option<&crate::kinds::PyRef_>,
+        checked: bool,
+        deadline: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(id) = id {
+            validate_h5_id(id)?;
+        }
+        self.start_h5(
+            py,
+            haystack_client::h5::ReadRequest::ById {
+                id: id.map(|id| haystack_core::kinds::HRef::from_val(&id.val)),
+                checked,
+            },
+            deadline,
+        )
+    }
+
+    #[pyo3(signature = (ids, *, checked=true, deadline=None))]
+    fn read_by_ids<'py>(
+        &self,
+        py: Python<'py>,
+        ids: &Bound<'_, PyList>,
+        checked: bool,
+        deadline: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if ids.len() > haystack_client::h5::MAX_IDS {
+            return Err(PyValueError::new_err("H5 reads allow at most 1000 IDs"));
+        }
+        // Borrow only a bounded number of references, validate all byte lengths,
+        // then copy owned IDs. PyList iteration does not invoke subclass hooks.
+        let ids: Vec<PyRef<'_, crate::kinds::PyRef_>> = ids
+            .iter()
+            .map(|item| {
+                let id = item.extract::<PyRef<'_, crate::kinds::PyRef_>>()?;
+                validate_h5_id(&id)?;
+                Ok(id)
+            })
+            .collect::<PyResult<_>>()?;
+        self.start_h5(
+            py,
+            haystack_client::h5::ReadRequest::ByIds {
+                ids: ids
+                    .iter()
+                    .map(|id| haystack_core::kinds::HRef::from_val(&id.val))
+                    .collect(),
+                checked,
+            },
+            deadline,
+        )
     }
 
     #[pyo3(signature = (ids, *, key, lease_ms=60_000, cleanup_timeout=2.0))]

@@ -45,3 +45,9 @@ create_exception!(
     HaystackError,
     "Error in a managed embedded application."
 );
+create_exception!(
+    rusty_haystack,
+    H5Error,
+    ClientError,
+    "A fitted pinned H5 ApiErr with spec, HTTP status, and typed payload."
+);

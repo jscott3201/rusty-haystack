@@ -61,7 +61,7 @@ def main():
     manifest.write_text(json.dumps(artifacts.typing_sources(REPO), sort_keys=True))
     version = tomllib.loads((REPO / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     installed = json.loads(run([str(python), "-I", str(REPO / "scripts/release/consumer.py"), "--prefix", str(venv), "--version", version, "--typing-manifest", str(manifest)], work, "installed-layout", cwd=scratch))
-    for name in ("positive.py", "negative.py", "async-runtime.py", "application-runtime.py", "watch-runtime.py"):
+    for name in ("positive.py", "negative.py", "async-runtime.py", "application-runtime.py", "watch-runtime.py", "h5-runtime.py"):
         shutil.copyfile(Path(__file__).with_name(name), scratch / name)
     shutil.copyfile(REPO / "rusty-haystack/tests/async_peer.py", scratch / "async_peer.py")
     shutil.copyfile(REPO / "rusty-haystack/tests/application_fixture.py", scratch / "application_fixture.py")
@@ -73,6 +73,7 @@ def main():
     run([str(python), "-I", str(scratch / "positive.py")], work, "positive-runtime", cwd=scratch)
     async_runtime = json.loads(run([str(python), "-I", str(scratch / "async-runtime.py")], work, "async-runtime", cwd=scratch))
     application_runtime = json.loads(run([str(python), "-I", str(scratch / "application-runtime.py")], work, "application-runtime", cwd=scratch))
+    h5_runtime = json.loads(run([str(python), "-I", str(scratch / "h5-runtime.py")], work, "h5-runtime", cwd=scratch))
     expected_helper = REPO / "rusty-haystack/rusty_haystack/_application.py"
     if application_runtime["entry_helper_sha256"] != hashlib.sha256(expected_helper.read_bytes()).hexdigest():
         raise AssertionError("installed application entry helper differs from source")
@@ -105,6 +106,7 @@ def main():
     if actual_lines != expected_lines or any(item["severity"] != "error" or Path(item["file"]).resolve() != scratch / "negative.py" for item in diagnostics):
         raise AssertionError("negative static diagnostics did not match the marked consumer lines")
     result = {"wheel": str(wheel), "wheel_sha256": artifacts.digest(wheel), "checker": CHECKER, "static_python_floor": "3.11", "positive_errors": 0, "native_submodule_source_warnings": source_warnings, "negative_lines_rejected": len(expected_lines), "installed": installed, "async_runtime": async_runtime, "application_runtime": application_runtime, "watch_runtime": watch_runtime, "watch_inputs": watch_inputs}
+    result["h5_runtime"] = h5_runtime
     (work / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
 

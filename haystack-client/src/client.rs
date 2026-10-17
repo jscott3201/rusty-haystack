@@ -199,6 +199,9 @@ impl HaystackClient<WsTransport> {
 }
 
 impl<T: Transport> HaystackClient<T> {
+    pub(crate) fn transport(&self) -> &T {
+        &self.transport
+    }
     /// Create a client with an already-configured transport.
     ///
     /// Useful for testing or when you have a custom [`Transport`] implementation.
