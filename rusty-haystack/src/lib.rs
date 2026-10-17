@@ -10,6 +10,7 @@ mod data;
 pub mod exceptions;
 mod filter;
 mod graph;
+mod h5;
 mod http_owner;
 mod kinds;
 mod ontology;
@@ -68,6 +69,7 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ontology::PyDefNamespace>()?;
 
     m.add_class::<async_client::PyAsyncHaystackClient>()?;
+    m.add_class::<h5::PyH5Config>()?;
     m.add_class::<async_watch::PyAsyncWatch>()?;
     m.add_class::<async_watch::PyWatchDelivery>()?;
     m.add_class::<async_watch::PyWatchControl>()?;
@@ -187,6 +189,8 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ── Submodule: client ──
     add_submodule(m, "client", |sub| {
         sub.add_class::<async_client::PyAsyncHaystackClient>()?;
+        sub.add_class::<h5::PyH5Config>()?;
+        sub.add("H5Error", m.py().get_type::<exceptions::H5Error>())?;
         sub.add_class::<async_watch::PyAsyncWatch>()?;
         sub.add_class::<async_watch::PyWatchDelivery>()?;
         sub.add_class::<async_watch::PyWatchControl>()?;
@@ -218,6 +222,7 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GraphError", m.py().get_type::<exceptions::GraphError>())?;
     m.add("AuthError", m.py().get_type::<exceptions::AuthError>())?;
     m.add("ClientError", m.py().get_type::<exceptions::ClientError>())?;
+    m.add("H5Error", m.py().get_type::<exceptions::H5Error>())?;
     m.add(
         "ApplicationError",
         m.py().get_type::<exceptions::ApplicationError>(),

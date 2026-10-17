@@ -13,7 +13,7 @@ mod scalar;
 mod storage;
 
 use crate::kinds::Kind;
-pub use budget::{Charge, Limit, Limits, Meter};
+pub use budget::{Bounded, Charge, Limit, Limits, Meter};
 pub use context::{Context, ContextError, Definition};
 
 /// Wire syntax/type errors carry fixed reasons rather than request contents.

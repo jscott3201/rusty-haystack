@@ -22,6 +22,17 @@ rh.HaystackClient  # reject: lives only in the client submodule
 
 import asyncio
 async_client = rh.AsyncHaystackClient("http://localhost:1", "user", "password")
+rh.H5Config(version="4")  # reject
+rh.H5Config(format="hayson")  # reject
+rh.H5Config(boxing="none")  # reject
+rh.H5Config().version = "5"  # reject
+rh.AsyncHaystackClient("http://localhost:1", "user", "password", h5=True)  # reject
+async_client.read_by_id("a")  # reject
+async_client.read_by_ids(["a"])  # reject
+async_client.read_by_ids([None])  # reject
+async_client.read_by_id(None, False)  # reject
+async_client.read_by_id(checked="false")  # reject
+asyncio.create_task(async_client.read_by_id())  # reject
 async_client.read("site", limit=None)  # reject
 async_client.read("site", deadline="later")  # reject
 async_client.close(1.0)  # reject

@@ -140,7 +140,7 @@ can still be observed through `close`. Failed or cancelled connect starts
 terminal cleanup. A cancelled read cancels that request; the open client remains
 usable once its admission slot has drained.
 
-`connect`, `read`, `close`, `__aenter__` and `__aexit__` return asyncio **Futures**.
+`connect`, `read`, `read_by_id`, `read_by_ids`, `close`, `__aenter__` and `__aexit__` return asyncio **Futures**.
 Direct `await`, `asyncio.ensure_future`, `gather` and `wait_for` accept them. APIs
 requiring coroutine objects, including `create_task` and `TaskGroup.create_task`,
 need an explicit wrapper:
@@ -198,14 +198,89 @@ behavior.
 
 TLS uses verified system trust plus optional custom trust and identity. Pass
 `tls=TlsConfig.with_ca(ca_pem_bytes)` for an additional CA, or
-`TlsConfig.from_files(cert_path, key_path, ca_path)` for mutual TLS. There is no
-insecure-verification option in the async API; redirects and automatic retries
-remain disabled. HTTP authentication and reads reuse the same TLS configuration.
+`TlsConfig.from_files(cert_path, key_path, ca_path)` for mutual TLS. The explicit
+`tls_verify=False` lab/development option disables certificate-chain and hostname
+verification while retaining any supplied CA/client identity. Redirects and
+automatic retries remain disabled. HTTP authentication and reads reuse the same
+TLS configuration; the WebSocket watch transport has its separate trust policy.
 
 The selected runtime evidence is CPython 3.12 on macOS arm64; installed stub checks
 target Python 3.11. Broader platform and free-threaded qualification is separate.
 The independent TLS tests require an OpenSSL CLI and generate temporary seven-day
 certificates so platform certificate policies and stale fixtures are respected.
+
+## Selected H5 async reads
+
+Pass `h5=H5Config()` to select the pinned preview for `read_by_id` and
+`read_by_ids`. `H5Config` currently accepts only `version="5"`, `format="jeto"`,
+and `boxing="all"`; other selections raise `ValueError` before dispatch. This
+configuration applies to these two methods. The existing `read` and watch APIs
+keep their existing protocol. There is no automatic negotiation or fallback.
+
+```python
+from rusty_haystack import AsyncHaystackClient, H5Config, H5Error, Ref
+
+async def read_entities(url: str, username: str, password: str):
+    async with AsyncHaystackClient(url, username, password, h5=H5Config()) as client:
+        entity = await client.read_by_id(Ref("site-1"))  # HDict
+        missing = await client.read_by_id(Ref("missing"), checked=False)  # None
+        rows = await client.read_by_ids(
+            [Ref("site-1"), Ref("missing"), Ref("site-1")], checked=False
+        )  # HGrid: three rows, with an empty middle row
+        try:
+            await client.read_by_id()  # nullable id defaults to absence
+        except H5Error as error:
+            assert error.spec == "sys.api::UnknownEntityErr"
+            assert error.status == 404
+        return entity, missing, rows
+```
+
+Arguments follow the retained `sys.api::readById` and `sys.api::readByIds`
+signatures at Project-Haystack/xeto revision
+`873b922451d3ef4c0c9c08ef3daa542f352d69f3`. A lookup takes a `Ref`; its display
+text does not change lookup identity. Omitted/`None` single IDs mean absence.
+`checked=True` is the default and a missing entity fails the whole request.
+Unchecked batch results keep input order, duplicates, and one empty `HDict` row
+for each missing or inaccessible entity. Empty input yields an empty grid.
+
+Requests use qualified function paths, `Xeto-Version: 5`, and contextual Jeto
+`application/json;box=all`. Responses must report version 5 and admitted Jeto
+JSON; Hayson, Zinc, unknown type contexts, malformed or mismatched identities,
+wrong cardinality, and unsupported content encodings are rejected. The native
+codec context and argument/result fitting derive from the retained HTTP catalog;
+remote project catalogs are not loaded. This is a selected H5 preview, not a
+complete library or operation-family implementation.
+
+Supported values retain the existing `Int`, `Float`, `Number` (including units),
+`Buf`, `NoneValue`, temporal and nested container mappings. Python `None` denotes
+Haystack Null and remains distinct from `NoneValue`. Jeto Dict null members
+denote absent fields, including batch placeholders. Unsupported exact output,
+such as an unrelated nominal type or a noncanonical NaN payload on the current
+server, produces a typed error rather than lossy substitution. A Time finer than
+Python microseconds raises `ValueError`; the request admission is still released.
+
+`H5Error` subclasses `ClientError` and exposes the admitted error `spec`, the
+authoritative HTTP `status`, and an owned `HDict` `payload`. The payload's status
+is advisory and can differ from HTTP status. Its `dis` and other fields are
+untrusted peer data, excluded from the exception message. Malformed or unadmitted
+error envelopes raise a sanitized `ClientError` instead. Local signature errors
+retain `TypeError`/`ValueError`, local deadlines raise `TimeoutError`, and Python
+cancellation remains `CancelledError`.
+
+The same 16-operation owner bound, original session/TLS configuration, loop
+affinity, cancellation, and close guarantees apply. Each batch accepts at most
+1000 IDs of at most 8192 UTF-8 bytes each; encoded requests and collected response
+bodies are bounded to 1 MiB, with additional codec work/depth/allocation bounds.
+Batch length and borrowed Ref byte lengths are validated before owned ID copies.
+The original absolute deadline and cancellation authorities are checked at codec
+charges and around catalog initialization, fitting, identity checks, dispatch,
+and result conversion. They do not reset between encoding and decoding. A caller
+may observe completion later when its Python event loop resumes; the deadline
+does not bound event-loop scheduling latency.
+Tests use an independent wire peer and the first-party managed HTTP application.
+Installed CPython 3.12/macOS arm64 evidence and Python 3.11 stub checks do not
+qualify upstream-server interoperability, other platforms, free-threaded Python,
+package publication, or navigation/history/watch/point-write H5 functions.
 
 ## Bounded remote async watches
 

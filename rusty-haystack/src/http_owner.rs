@@ -80,14 +80,14 @@ impl Drop for Ticket {
     }
 }
 
-pub(crate) struct Operation {
-    response: oneshot::Receiver<Result<Option<HGrid>, ClientError>>,
+pub(crate) struct Operation<T = Option<HGrid>> {
+    response: oneshot::Receiver<Result<T, ClientError>>,
     ticket: Arc<Ticket>,
     connecting: bool,
     completed: bool,
 }
-impl Operation {
-    pub(crate) async fn result(&mut self) -> Result<Option<HGrid>, ClientError> {
+impl<T> Operation<T> {
+    pub(crate) async fn result(&mut self) -> Result<T, ClientError> {
         let result = (&mut self.response)
             .await
             .unwrap_or(Err(ClientError::ConnectionClosed));
@@ -102,7 +102,7 @@ impl Operation {
         }
     }
 }
-impl Drop for Operation {
+impl<T> Drop for Operation<T> {
     fn drop(&mut self) {
         self.ticket.cancel.cancel();
         if self.connecting && !self.completed {
@@ -118,6 +118,13 @@ pub(crate) struct Cancellation {
     connecting: bool,
 }
 impl Cancellation {
+    pub(crate) fn read_control(&self, deadline: Instant) -> haystack_client::h5::ReadControl {
+        haystack_client::h5::ReadControl::new(
+            deadline,
+            self.token.clone(),
+            self.owner.0.stop.clone(),
+        )
+    }
     pub(crate) fn cancel(&self) {
         self.token.cancel();
         if self.connecting {
@@ -127,7 +134,14 @@ impl Cancellation {
 }
 enum Command {
     Read(Read),
+    H5(H5Read),
     Watch(watch_owner::Registration),
+}
+struct H5Read {
+    request: haystack_client::h5::ReadRequest,
+    deadline: Instant,
+    ticket: Arc<Ticket>,
+    response: oneshot::Sender<Result<haystack_core::kinds::Kind, ClientError>>,
 }
 struct Read {
     filter: String,
@@ -138,6 +152,35 @@ struct Read {
 }
 
 impl Owner {
+    pub(crate) fn read_h5(
+        &self,
+        request: haystack_client::h5::ReadRequest,
+        deadline: Instant,
+    ) -> Result<Operation<haystack_core::kinds::Kind>, ClientError> {
+        let ticket = self.admit()?;
+        let (response, receiver) = oneshot::channel();
+        let commands = self
+            .0
+            .control
+            .lock()
+            .commands
+            .clone()
+            .ok_or(ClientError::ConnectionClosed)?;
+        commands
+            .try_send(Command::H5(H5Read {
+                request,
+                deadline,
+                ticket: ticket.clone(),
+                response,
+            }))
+            .map_err(|_| ClientError::ConnectionClosed)?;
+        Ok(Operation {
+            response: receiver,
+            ticket,
+            connecting: false,
+            completed: false,
+        })
+    }
     pub(crate) fn new(settings: Settings) -> Self {
         Self(Arc::new(Inner {
             control: Mutex::new(Control {
@@ -404,6 +447,26 @@ impl Owner {
                 command = commands.recv() => {
                     let Some(command) = command else { break };
                     let command = match command {
+                        Command::H5(command) => {
+                            let client = client.clone();
+                            let stop = self.0.stop.clone();
+                            tasks.spawn(async move {
+                                let control = haystack_client::h5::ReadControl::new(
+                                    command.deadline, command.ticket.cancel.clone(), stop.clone(),
+                                );
+                                let result = if Instant::now() >= command.deadline { Err(timeout()) } else { tokio::select! {
+                                    biased;
+                                    _ = stop.cancelled() => Err(ClientError::ConnectionClosed),
+                                    _ = command.ticket.cancel.cancelled() => Err(ClientError::ConnectionClosed),
+                                    _ = tokio::time::sleep_until(command.deadline) => Err(timeout()),
+                                    result = client.read_h5(&command.request, &control) => result,
+                                }};
+                                let result = control.check().and(result);
+                                let _ = command.response.send(result);
+                                drop(command.ticket);
+                            });
+                            continue;
+                        }
                         Command::Watch(watch) => {
                             had_watches = true;
                             watches.spawn(watch.run(client.clone(), ws_url.clone()));

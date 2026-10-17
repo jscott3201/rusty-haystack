@@ -2,12 +2,12 @@
 import datetime as dt
 import json
 from pathlib import Path
-from typing import Any, AsyncIterator, Coroutine, assert_type
+from typing import Any, AsyncIterator, Coroutine, Literal, assert_type
 
 import rusty_haystack as rh
 from rusty_haystack import Buf, CodecError, Coord, Float, HDateTime, HDict, HGrid, HList, Int, Nominal, NoneValue, Number
 from rusty_haystack.auth import generate_nonce
-from rusty_haystack.client import AsyncHaystackClient, AsyncWatch, WatchControl, WatchDelivery, HaystackClient, TlsConfig
+from rusty_haystack.client import AsyncHaystackClient, AsyncWatch, WatchControl, WatchDelivery, HaystackClient, TlsConfig, H5Config, H5Error
 from rusty_haystack.codecs import decode_typed_value, encode_typed_value
 from rusty_haystack.data import HCol
 from rusty_haystack.filter import CmpOp, Filter, Path as FilterPath
@@ -18,6 +18,9 @@ from rusty_haystack.server import ApplicationBuilder, ApplicationHandle, Applica
 from rusty_haystack.units import compatible
 
 assert KindInt is Int and rh.kinds.Int is Int
+assert H5Config is rh.H5Config and H5Error is rh.H5Error
+assert issubclass(H5Error, rh.ClientError)
+assert_type(H5Config().version, Literal["5"])
 assert issubclass(CodecError, rh.HaystackError)
 assert all(value is not None for value in (generate_nonce, HaystackClient, TlsConfig, HCol, CmpOp, Filter, FilterPath, DiffOp, GraphDiff, DefNamespace, Slot, Spec, AuthManager, HaystackServer, HisStore, compatible))
 number = Number(val=42, unit="kW")
@@ -151,3 +154,16 @@ async def watch_surface(client: AsyncHaystackClient, ids: list[str]) -> None:
         return await watch.next()
     async with asyncio.TaskGroup() as group:
         assert_type(group.create_task(one()), asyncio.Task[WatchDelivery | WatchControl])
+
+async def h5_surface(client: AsyncHaystackClient) -> None:
+    assert_type(client.read_by_id(), asyncio.Future[HDict | None])
+    assert_type(client.read_by_id(None, checked=False), asyncio.Future[HDict | None])
+    assert_type(client.read_by_id(rh.Ref("a")), asyncio.Future[HDict | None])
+    assert_type(client.read_by_ids([rh.Ref("a")]), asyncio.Future[HGrid])
+    assert_type(await client.read_by_ids([], checked=False), HGrid)
+    try:
+        await client.read_by_id()
+    except H5Error as error:
+        assert_type(error.spec, str)
+        assert_type(error.status, int)
+        assert_type(error.payload, HDict)
