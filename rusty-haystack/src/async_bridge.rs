@@ -185,33 +185,47 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn shutdown_drains_admitted_gil_waiter_and_rejects_late_attachment() {
+    fn shutdown_drains_held_attachment_and_rejects_late_attachment() {
         Python::initialize();
         let gate = Arc::new(AttachmentGate::default());
         let called = Arc::new(AtomicBool::new(false));
-        let worker = Python::attach(|py| {
-            let worker_gate = Arc::clone(&gate);
-            let worker_called = Arc::clone(&called);
-            let worker = std::thread::spawn(move || {
-                worker_gate.try_attach(|_| {
-                    assert!(worker_gate.state.lock().sealed);
-                    worker_called.store(true, Ordering::SeqCst);
-                })
-            });
+        let worker_gate = Arc::clone(&gate);
+        let worker_called = Arc::clone(&called);
+        let (entered, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release, release_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            worker_gate.try_attach(|py| {
+                entered.send(()).unwrap();
+                py.detach(move || release_rx.recv_timeout(Duration::from_secs(3)).unwrap());
+                assert!(worker_gate.state.lock().sealed);
+                worker_called.store(true, Ordering::SeqCst);
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let releasing_gate = Arc::clone(&gate);
+        let releaser = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            while gate.state.lock().active != 1 {
+            loop {
+                let state = releasing_gate.state.lock();
+                if state.sealed {
+                    assert_eq!(state.active, 1);
+                    break;
+                }
+                drop(state);
                 assert!(std::time::Instant::now() < deadline);
                 std::thread::yield_now();
             }
-            // This thread still holds the GIL: the worker reserved admission
-            // but cannot have entered its callback. The shutdown method must
-            // detach while it drains this already admitted GIL waiter.
+            release.send(()).unwrap();
+        });
+        Python::attach(|py| {
+            // The callback is held by a channel, including on free-threaded
+            // CPython. Draining must detach so ordinary CPython can reattach.
             assert!(!called.load(Ordering::SeqCst));
             gate.seal_and_drain(py);
             assert!(called.load(Ordering::SeqCst));
             assert_eq!(gate.state.lock().active, 0);
-            worker
         });
+        releaser.join().unwrap();
         assert_eq!(worker.join().unwrap(), Some(()));
 
         let (sent, received) = std::sync::mpsc::sync_channel(1);

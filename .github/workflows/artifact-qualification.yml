@@ -65,6 +65,109 @@ jobs:
           path: ${{ runner.temp }}/build-work/*.log
           if-no-files-found: warn
 
+  build-ft:
+    name: Build selected free-threaded wheel
+    runs-on: ubuntu-latest
+    outputs:
+      wheel_ft: ${{ steps.identity.outputs.wheel_ft }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14t"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: python -m pip install maturin==1.15.0
+      - run: cargo fetch --locked
+      - name: Build and seal the selected wheel
+        env:
+          SOURCE: ${{ github.sha }}
+        run: python scripts/release/build.py wheel --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work"
+      - uses: actions/upload-artifact@v4
+        id: candidate
+        with:
+          name: selected-candidate-cp314t-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+      - name: Retain producer identity and artifact service digest
+        id: identity
+        env:
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
+        run: |
+          test -n "$ARTIFACT_ID"
+          echo "wheel_ft=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: selected-build-logs-cp314t-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-work/*.log
+          if-no-files-found: warn
+
+  qualify-selected:
+    name: Qualify selected installed wheel (${{ matrix.abi }})
+    needs: [build, build-ft]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.12"
+            abi: cp312
+            artifact: wheel
+          - python: "3.14t"
+            abi: cp314t
+            artifact: wheel_ft
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: npm install --global pyright@1.1.413
+      - run: cargo fetch --locked
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile selected-wheels --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.inventory.outputs[matrix.artifact] }}
+          path: ${{ runner.temp }}/download
+      - name: Bind the separate first-party fixture and qualify unchanged wheel bytes
+        env:
+          SOURCE: ${{ github.sha }}
+          ABI: ${{ matrix.abi }}
+        run: |
+          python scripts/release/selected_wheel.py fixture --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --work "$RUNNER_TEMP/fixture-work" --output "$RUNNER_TEMP/fixture.json"
+          python scripts/release/selected_wheel.py qualify --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --abi "$ABI" --python "$(command -v python)" --pyright "$(command -v pyright)" --input "$RUNNER_TEMP/download" --fixture-receipt "$RUNNER_TEMP/fixture.json" --work "$RUNNER_TEMP/selected-work" --evidence "$RUNNER_TEMP/selected-evidence.json"
+          python scripts/release/selected_wheel.py check --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --abi "$ABI" --input "$RUNNER_TEMP/download" --fixture-receipt "$RUNNER_TEMP/fixture.json" --evidence "$RUNNER_TEMP/selected-evidence.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selected-proof-${{ matrix.abi }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/download-ids.json
+            ${{ runner.temp }}/fixture.json
+            ${{ runner.temp }}/fixture-work/*.log
+            ${{ runner.temp }}/selected-evidence.json
+            ${{ runner.temp }}/download/**/receipts
+            ${{ runner.temp }}/selected-work/*.log
+            ${{ runner.temp }}/selected-work/consumer/*.json
+            ${{ runner.temp }}/selected-work/consumer/*.stdout
+            ${{ runner.temp }}/selected-work/consumer/*.stderr
+          if-no-files-found: error
+
   qualify:
     name: Download, install, verify and stage
     needs: build

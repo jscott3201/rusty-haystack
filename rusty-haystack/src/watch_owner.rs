@@ -691,7 +691,7 @@ mod tests {
         assert!(slot.reserve().is_ok());
     }
     #[test]
-    fn close_waits_for_actual_python_conversion_attachment() {
+    fn close_waits_for_inflight_python_conversion() {
         use pyo3::prelude::*;
         Python::initialize();
         let owner = Owner::new(crate::http_owner::Settings {
@@ -718,35 +718,35 @@ mod tests {
         handle.inner.finish(Event::NotCreated);
         let converted = Arc::new(AtomicBool::new(false));
         let (waiting, wait_rx) = std::sync::mpsc::channel();
-        Python::attach(|py| {
-            let done = converted.clone();
-            let worker = std::thread::spawn(move || {
+        let (release, release_rx) = std::sync::mpsc::sync_channel(1);
+        let done = converted.clone();
+        let worker = std::thread::spawn(move || {
+            crate::async_bridge::with_python(|py| {
                 waiting.send(()).unwrap();
-                crate::async_bridge::with_python(|py| {
-                    let value = pyo3::types::PyString::new(py, "owned watch result");
-                    assert_eq!(value.to_str().unwrap(), "owned watch result");
-                    done.store(true, Ordering::Release);
-                    Ok(())
-                })
-                .unwrap();
-                drop(conversion);
-            });
-            wait_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-            // Native work has finished, but this thread holds the GIL and the
-            // actual conversion attachment cannot finish. No production hook.
-            crate::async_bridge::runtime().block_on(async {
-                assert!(matches!(
-                    handle
-                        .wait_closed(Instant::now() + Duration::from_millis(20))
-                        .await,
-                    Err(ClientError::Timeout(_))
-                ));
-            });
-            assert!(!converted.load(Ordering::Acquire));
-            assert!(!handle.closed());
-            assert!(handle.inner.slot.reserve().is_err());
-            py.detach(|| worker.join().unwrap());
+                py.detach(move || release_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+                let value = pyo3::types::PyString::new(py, "owned watch result");
+                assert_eq!(value.to_str().unwrap(), "owned watch result");
+                done.store(true, Ordering::Release);
+                Ok(())
+            })
+            .unwrap();
+            drop(conversion);
         });
+        wait_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // The conversion callback retains its ticket while explicitly held.
+        crate::async_bridge::runtime().block_on(async {
+            assert!(matches!(
+                handle
+                    .wait_closed(Instant::now() + Duration::from_millis(20))
+                    .await,
+                Err(ClientError::Timeout(_))
+            ));
+        });
+        assert!(!converted.load(Ordering::Acquire));
+        assert!(!handle.closed());
+        assert!(handle.inner.slot.reserve().is_err());
+        release.send(()).unwrap();
+        worker.join().unwrap();
         crate::async_bridge::runtime().block_on(async {
             handle
                 .wait_closed(Instant::now() + Duration::from_secs(2))

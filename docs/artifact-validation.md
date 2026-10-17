@@ -2,7 +2,7 @@
 
 The release workflows build each binary archive, wheel and source archive once, then qualify downloaded candidates and stage byte-for-byte copies. Build receipts, runtime evidence and staging records are kept separate from package files. Publication jobs download that staged directory and recheck its hashes before the existing publishing action runs.
 
-`Artifact Qualification` is a manually dispatched rehearsal with `contents: read`, no package-registry credentials and no publication jobs. Its three-row build matrix constructs one Linux x86_64 CLI archive, a CPython 3.12 wheel and the source archive. A separate job downloads the exact artifact IDs returned by those successful producers outside the checkout, verifies their provenance, exercises installed consumers and stages identical bytes. A dispatch at a tag still cannot publish. The workflow must exist on the repository's default branch before GitHub accepts its first manual dispatch.
+`Artifact Qualification` is a manually dispatched rehearsal with `contents: read`, no package-registry credentials and no publication jobs. Its three-row build matrix constructs one Linux x86_64 CLI archive, a CPython 3.12 wheel and the source archive. A separate producer constructs a CPython 3.14 free-threaded wheel. Consumers download exact successful producer artifact IDs outside the checkout. The original native consumer verifies and stages the CLI/wheel/source inventory; two selected-wheel consumers reuse the ordinary wheel and qualify the free-threaded wheel. A dispatch at a tag still cannot publish. The workflow must exist on the repository's default branch before GitHub accepts its first manual dispatch.
 
 ## Scope of the evidence
 
@@ -11,21 +11,36 @@ The release workflows build each binary archive, wheel and source archive once, 
 | `native` | One CLI archive and CPython 3.12 wheel for an explicit native target, plus the source archive | Native CLI, installed wheel and source installation |
 | `binaries` | Five existing CLI targets: Linux and macOS x86_64/aarch64, Windows x86_64 | Linux x86_64 CLI |
 | `python` | Twelve existing CPython 3.11/3.12/3.13 wheels for Linux/macOS x86_64/aarch64, plus the source archive | Linux x86_64 CPython 3.12 wheel and source installation |
+| `selected-wheel` | One CPython 3.12 ordinary (`cp312-cp312`) or 3.14 free-threaded (`cp314-cp314t`) wheel, on Linux x86_64 or macOS arm64 | Complete installed typed-value/static, async H4/H5, bounded watch, embedded memory application, synchronous facade and bounded concurrency consumers; native linkage and deployment requirements |
 
-Every file receives archive, native-header, package, version, target and provenance checks. A metadata check for another target is build-artifact evidence, not runtime qualification for that operating system, architecture or interpreter. No Windows wheel, abi3, free-threaded Python or newer runtime floor is introduced.
+Every file receives archive, native-header, package, version, target and provenance checks. A metadata check for another target is build-artifact evidence, not runtime qualification for that operating system, architecture or interpreter. The selected profile adds no release/publication matrix entries, Windows wheel, stable ABI or newer Python floor. The version-specific free-threaded wheel has interpreter tag `cp314` and ABI tag `cp314t`; these are intentionally distinct.
 
 The isolated CLI consumer checks `haystack --version` and a two-entity Zinc-to-JSON v3 export with a `site` filter against fixed expected values. The Python consumer checks the installed distribution and module version, imports the public submodules, exercises number/ref/Zinc behavior and the public codec exception, and compares authentication derivation with independent standard-library PBKDF2/HMAC calculations. It verifies that import origins are in a newly created virtual environment while the working directory is outside the checkout. Python path overrides are cleared and the consumer runs with `-I`.
 
-Release typing evidence covers the complete installed root/submodule `.pyi` set and `py.typed`, distribution file records, exact equality with the current source file SHA-256 map and parsed public stub declarations. Separate `scripts/python-values/validate.py` evidence runs positive and negative installed consumers with Pyright 1.1.413; neither check claims every annotation has been exhaustively validated.
+Release typing evidence covers the complete installed root/submodule `.pyi` set and `py.typed`, distribution file records, exact equality with the current source file SHA-256 map and parsed public stub declarations. `scripts/python-values/validate.py` runs positive and negative installed consumers with Pyright 1.1.413; the selected profile requires these checks. Neither check claims every annotation has been exhaustively validated.
+
+## Selected native wheel qualification
+
+The selected profile pins Rust 1.99.0, Maturin 1.15.0 and the lockfile's PyO3 0.29.3 / pyo3-async-runtimes 0.29.0. Local macOS arm64 qualification selects CPython 3.12.13 and 3.14.4 free-threaded. The hosted Linux x86_64 jobs select 3.12 and 3.14t and record their actual patch versions. Every consumer must match its builder's exact interpreter version. A successful result applies to that wheel digest, source, target, interpreter and default binding feature selection.
+
+Each runtime consumer observes its own interpreter before package import, after each public/native submodule and selected standard-library dependency import, and after the consumer finishes. Free-threaded evidence requires `Py_GIL_DISABLED`, the `cpython-314t` extension ABI, and `sys._is_gil_enabled() == False` at every point. A missing introspection result, enabled GIL, `PYTHON_GIL` environment override or `-X gil` override fails qualification. Ordinary 3.12 records its lack of the newer runtime introspection API. An import-only probe does not substitute for these same-process capability observations.
+
+The consumer verifies every installed wheel package member against its archive digest before and after execution, including the native extension, private Python helpers and complete typing inventory. Each subprocess has a 300-second bound; on POSIX a timed-out consumer and its child fixture process group are stopped together. Runtime checks cover same-instance mutation/read, mutable input dictionaries and lists, atomic multi-tag graph snapshots, returned-copy independence, close during admitted reads and repeated application creation/destruction. Mutable `HDict`, `HList` and `HGrid` calls can reject overlapping PyO3 borrows with `RuntimeError`; this is recorded separately from successful mutations. These checks do not claim that those wrappers queue simultaneous writes or qualify arbitrary Python objects, subinterpreters, performance scaling or all possible schedules.
+
+The separate first-party watch executable is built from the same clean source with a recorded compiler context, command and binary digest. Its receipt and source identity are bound to the consumer result; it is a test dependency, not a wheel member. macOS qualification records system-library linkage, Mach-O deployment minimum and SDK. Linux records ELF dependencies and required glibc symbol versions. Unexpected non-system libraries, explicit libpython linkage, search paths, and understated deployment tags fail.
+
+The final evidence records passed capabilities separately from unselected PostgreSQL, SQLite, MCP, analytics, free-threaded source installation and other interpreter/platform cells. The original ordinary Linux source-archive PEP 517 installation remains a separate required rehearsal. `selected_wheel.py check` rejects altered receipt/artifact/fixture identities, missing capabilities or runtime observations, mismatched installed members and missing linkage evidence. These receipts describe observed selected runs; they are not a universal free-thread-safety certification.
 
 ## File identity and promotion
+
+Wheel and source archives exclude and reject `__pycache__`, `.pyc` and `.pyo` files. Builder bytecode contains interpreter/path-dependent state and may be rewritten on installation; it cannot stand in for the shipped Python sources. Fresh installer-generated caches are outside the sealed member inventory.
 
 Each uploaded candidate contains only `files/<one package file>` and `receipts/<filename>.json`. The receipt records:
 
 - The exact clean source revision and SHA-256 of the checkout's `Cargo.lock`.
 - Package name/version and the final package filename, size and SHA-256.
 - Target, release/source profile, explicitly enabled features and actual Rust/Cargo versions, selected executable paths/hashes and the repository working directory. The build records the workspace profiles, admitted native inputs and allowed linker-only Cargo configuration hashes.
-- For Python artifacts, the actual Maturin version and interpreter identity plus the current typing-stub digest; wheels also bind Python/ABI/platform tags and `Requires-Python` metadata.
+- For Python artifacts, the actual Maturin version and interpreter executable/digest, patch version, architecture, SOABI, extension suffix, build/runtime GIL state and typing-stub digest; wheels also bind Python/ABI/platform tags and `Requires-Python` metadata.
 - For container builders, the actual inspected image ID and immutable registry digest. The cross executable is pinned to 0.2.5 and its version is captured.
 - For the repaired source archive, its distinct shipped lock hash and the exact removed lock packages.
 
@@ -81,6 +96,22 @@ python3 scripts/release/artifacts.py check-staged --repo "$REPO" --source "$SOUR
 ```
 
 The helpers emit one JSON result, return nonzero on failure and retain bounded diagnostic text plus subprocess logs in the selected work directory. The retained tests cover compiler/configuration rejection, caller-relative stale output, removal-only lock transformations, producer attempt 1 with consumer attempt 2, incomplete producer output, and mutations of publication guards, qualification dependencies, package-only staging paths and manual-workflow authority. Run fast rejection tests with `python3 -m unittest discover -s scripts/release/tests -v`; they need no compiler, registry credentials or native build. Use `actionlint` for the three workflow definitions. Preserve failed logs and successful receipts as evidence, then remove task-owned scratch directories when they are no longer needed.
+
+To qualify a selected wheel locally, use the same clean-source builder with a trusted ordinary or free-threaded interpreter containing Maturin 1.15.0. Build in a separate environment for each ABI. Do not pass the explicit-libpython linker flags used for native Rust test executables into candidate builds. After copying that one bundle unchanged to an external download directory, run:
+
+```bash
+# TARGET is aarch64-apple-darwin or x86_64-unknown-linux-gnu.
+# ABI is cp312 or cp314t; PYTHON selects the matching trusted interpreter.
+python3 scripts/release/selected_wheel.py fixture --repo "$REPO" --source "$SOURCE" \
+  --target "$TARGET" --work "$RUN/fixture-work" --output "$RUN/fixture.json"
+python3 scripts/release/selected_wheel.py qualify --repo "$REPO" --source "$SOURCE" \
+  --target "$TARGET" --abi "$ABI" --python "$PYTHON" --pyright "$(command -v pyright)" \
+  --input "$RUN/download-wheel" --fixture-receipt "$RUN/fixture.json" \
+  --work "$RUN/selected-work" --evidence "$RUN/selected-evidence.json"
+python3 scripts/release/selected_wheel.py check --repo "$REPO" --source "$SOURCE" \
+  --target "$TARGET" --abi "$ABI" --input "$RUN/download-wheel" \
+  --fixture-receipt "$RUN/fixture.json" --evidence "$RUN/selected-evidence.json"
+```
 
 ## Publication authority
 

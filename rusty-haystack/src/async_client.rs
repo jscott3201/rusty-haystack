@@ -182,6 +182,24 @@ impl PyAsyncHaystackClient {
         Ok(future)
     }
 }
+
+fn borrowed_h5_ids<'py>(
+    ids: impl Iterator<Item = Bound<'py, PyAny>>,
+) -> PyResult<Vec<PyRef<'py, crate::kinds::PyRef_>>> {
+    ids.take(haystack_client::h5::MAX_IDS + 1)
+        .enumerate()
+        .map(|(index, item)| {
+            // The Python list can grow after the length precheck. Bound both
+            // the iterator's allocation hint and references borrowed here.
+            if index == haystack_client::h5::MAX_IDS {
+                return Err(PyValueError::new_err("H5 reads allow at most 1000 IDs"));
+            }
+            let id = item.extract::<PyRef<'_, crate::kinds::PyRef_>>()?;
+            validate_h5_id(&id)?;
+            Ok(id)
+        })
+        .collect()
+}
 fn add_cancellation(future: &Bound<'_, PyAny>, cancellation: Cancellation) -> PyResult<()> {
     let callback = Py::new(
         future.py(),
@@ -323,14 +341,7 @@ impl PyAsyncHaystackClient {
         }
         // Borrow only a bounded number of references, validate all byte lengths,
         // then copy owned IDs. PyList iteration does not invoke subclass hooks.
-        let ids: Vec<PyRef<'_, crate::kinds::PyRef_>> = ids
-            .iter()
-            .map(|item| {
-                let id = item.extract::<PyRef<'_, crate::kinds::PyRef_>>()?;
-                validate_h5_id(&id)?;
-                Ok(id)
-            })
-            .collect::<PyResult<_>>()?;
+        let ids = borrowed_h5_ids(ids.iter())?;
         self.start_h5(
             py,
             haystack_client::h5::ReadRequest::ByIds {
@@ -441,6 +452,30 @@ fn finish_exit(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn h5_list_growth_after_length_check_cannot_expand_borrowed_batch() {
+        Python::initialize();
+        Python::attach(|py| {
+            let id = Py::new(py, crate::kinds::PyRef_::new("a".into(), None)).unwrap();
+            let ids = PyList::new(
+                py,
+                (0..haystack_client::h5::MAX_IDS).map(|_| id.clone_ref(py)),
+            )
+            .unwrap();
+            assert_eq!(ids.len(), haystack_client::h5::MAX_IDS);
+            assert_eq!(
+                borrowed_h5_ids(ids.iter()).unwrap().len(),
+                haystack_client::h5::MAX_IDS
+            );
+            // This is the interleaving between the caller's length precheck and
+            // iterator creation; the source can grow on another Python thread.
+            ids.append(id).unwrap();
+            let error = borrowed_h5_ids(ids.iter())
+                .err()
+                .expect("grown list must fail");
+            assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
     use super::*;
     use pyo3::types::PyDict;
     use std::ffi::CString;
