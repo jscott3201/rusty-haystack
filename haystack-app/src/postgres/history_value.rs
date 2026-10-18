@@ -18,7 +18,7 @@ pub(crate) fn encode_sample(item: &HisItem) -> Result<Vec<u8>, PostgresError> {
     let mut row = HDict::new();
     row.set("ts", Kind::Str(timestamp(item.ts)));
     row.set("val", item.val.clone());
-    value::encode_dict(&row)
+    value::encode_dict(&row).map_err(Into::into)
 }
 pub(crate) fn decode_sample(bytes: &[u8]) -> Result<HisItem, PostgresError> {
     let row = value::decode_dict(bytes)?;

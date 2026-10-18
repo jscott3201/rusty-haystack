@@ -1,6 +1,6 @@
 # Rusty Haystack
 
-Rust libraries, a CLI and Python bindings for [Project Haystack](https://project-haystack.org) building data: typed values, entity graphs, filters and codecs, managed applications, HTTP clients and servers, optional PostgreSQL storage, and read-only MCP tools.
+Rust libraries, a CLI and Python bindings for [Project Haystack](https://project-haystack.org) building data: typed values, entity graphs, filters and codecs, managed applications, HTTP clients and servers, optional PostgreSQL and SQLite entity storage, and read-only MCP tools.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -12,7 +12,7 @@ This README describes the **0.9.0 source on `dev`**. Build this checkout to use 
 - **Exchange and validate data.** Read and write Zinc, Haystack JSON and Trio; export CSV. Contextual Jeto and the project-owned typed payload preserve selected richer values. Load Xeto libraries, inspect and fit admitted specs, and validate entities against the selected catalog.
 - **Embed a bounded application.** Share authorization, catalog observations, paging, cancellation and resource limits across Rust reads and scoped HTTP adapters. Select entity mutations, history reads/writes, state subscriptions and local point-write simulation when your application needs them.
 - **Use typed contracts and generated clients.** Admitted Xeto signatures drive argument defaults, fitting, discovery and encoding. Scoped applications export OpenAPI 3.1 and JSON Schema 2020-12; an independent generated-client fixture exercises the selected contract over real HTTP.
-- **Choose storage and access profiles.** Use process-memory services or explicitly select PostgreSQL durability. Python offers semantic values, graph APIs, an async HTTP client and a controlled embedded application. MCP exposes two authorized read tools over stdio or protected local HTTP.
+- **Choose storage and access profiles.** Use process-memory services or explicitly select PostgreSQL durability or a local SQLite entity authority. Python offers semantic values, graph APIs, an async HTTP client and a controlled embedded application. MCP exposes two authorized read tools over stdio or protected local HTTP.
 
 ![An admitted catalog supplies the executable registry. Scoped application requests share policy, budgets and lifecycle ownership across Rust and HTTP adapters and schema export; optional service owners are selected by the application.](docs/images/admitted-api.svg)
 
@@ -52,6 +52,7 @@ Select optional CLI features in that install command according to the profile yo
 | Core Rust data model | `rusty-haystack-core`; optional `chrono-tz` feature | Trusted in-process graph, values, filters and codecs. [Typed values](docs/typed-values.md) |
 | Managed Rust application | `rusty-haystack-app` and chosen adapters/services | One application owner, borrowed handles and Tokio runtime. [Shared reads](docs/shared-reads.md), [lifecycle](docs/application-lifecycle.md) |
 | Ordinary CLI/HTTP demo | No optional feature required | `haystack serve --demo`, data tools and HTTP client commands. [CLI](docs/cli.md) |
+| SQLite Rust application | `rusty-haystack-app` with `features = ["sqlite"]` | One local-file owner, durable entity mutations/receipts/feed; no history or CLI selector. [SQLite contract](docs/sqlite-durability.md) |
 | PostgreSQL CLI | `--features postgres` | `haystack serve --postgres-config FILE --users FILE`; explicit database and SCRAM configuration. [Standalone workflow](docs/standalone-postgres.md) |
 | MCP stdio CLI | `--features mcp` | `haystack mcp stdio --config FILE`; trusted launch scope and Unix pipes. [Stdio configuration](docs/mcp-stdio.md) |
 | MCP HTTP CLI | `--features mcp-http` | `haystack mcp http --config FILE`; numeric loopback, issuer/public keys and per-subject scope. [HTTP configuration](docs/mcp-http.md) |
@@ -117,6 +118,10 @@ For remote HTTP, [`AsyncHaystackClient`](rusty-haystack/README.md#async-http-cli
 
 For synchronous scripts, [`SyncHaystackClient`](rusty-haystack/README.md#owned-synchronous-http-client) provides owned H4 connect/read/close with direct return values, one OS thread per client, and finite relative timeout budgets. Native waits release Python, and successful close joins owned native resources. Existing `HaystackClient` and `WsClient` capabilities remain available.
 
+## Optional SQLite entity storage
+
+The application crate's `sqlite` feature selects a single-owner local file using bundled SQLite **3.53.2**. Entity CRUD, expected revisions, retained receipts and change-feed cursors survive close/reopen. The [SQLite contract](docs/sqlite-durability.md) describes native cleanup, process-crash qualification and scope; history, a CLI selector and SQLite Python wheels are not selected.
+
 ## Optional PostgreSQL storage
 
 The `postgres` application/CLI feature selects bounded durable entity and history services for cooperating processes sharing one database/schema. It supports verified TLS, retained operation receipts, coherent admission refresh, bounded periodic cache convergence, restart recovery and bounded entity snapshot sessions. Runtime qualification uses PostgreSQL **18.6**. History remains bounded live data; entity and history mutation domains do not form one atomic combined commit.
@@ -150,7 +155,7 @@ The adapters bound input, response size, concurrent work and complete request de
 | Crate | Role |
 | --- | --- |
 | [haystack-core](haystack-core/) | Values, codecs, filters, units, graph, ontology, Xeto admission and fitting |
-| [haystack-app](haystack-app/) | Scoped reads, selected mutations/history/subscriptions/commands, catalog activation, optional PostgreSQL and lifecycle ownership |
+| [haystack-app](haystack-app/) | Scoped reads, selected mutations/history/subscriptions/commands, catalog activation, optional PostgreSQL/SQLite and lifecycle ownership |
 | [haystack-server](haystack-server/) | Axum HTTP adapters, SCRAM authentication and WebSocket transport |
 | [haystack-client](haystack-client/) | Async Rust HTTP/WebSocket client, SCRAM and TLS configuration |
 | [haystack-cli](haystack-cli/) | `haystack` data/validation tools, server/client commands, user management, storage administration and selected MCP launchers |

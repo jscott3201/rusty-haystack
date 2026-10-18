@@ -10,6 +10,10 @@ mod budget;
 mod command;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+mod storage_value;
 pub use command::*;
 mod session;
 mod subscription;

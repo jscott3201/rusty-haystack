@@ -67,6 +67,8 @@ struct Inner {
     native_writes: bool,
     #[cfg(feature = "postgres")]
     backend: Option<Arc<crate::postgres::storage::Backend>>,
+    #[cfg(feature = "sqlite")]
+    sqlite: Option<Arc<crate::sqlite::storage::Backend>>,
     dataset: [u8; 16],
     policy: Arc<dyn ReadPolicy>,
     limits: Arc<ReadLimits>,
@@ -141,6 +143,8 @@ impl ReadService {
                 native_writes: true,
                 #[cfg(feature = "postgres")]
                 backend: None,
+                #[cfg(feature = "sqlite")]
+                sqlite: None,
                 dataset: rand::random(),
                 policy,
                 active: Arc::new(Semaphore::new(limits.max_concurrent)),
@@ -171,6 +175,16 @@ impl ReadService {
         let inner = Arc::get_mut(&mut self.inner).ok_or(ReadError::Unavailable)?;
         inner.native_writes = false;
         inner.backend = Some(backend);
+        Ok(())
+    }
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn configure_sqlite(
+        &mut self,
+        backend: Arc<crate::sqlite::storage::Backend>,
+    ) -> Result<(), ReadError> {
+        let inner = Arc::get_mut(&mut self.inner).ok_or(ReadError::Unavailable)?;
+        inner.native_writes = false;
+        inner.sqlite = Some(backend);
         Ok(())
     }
     /// Whether both handles share this exact service, including policy, cursor
@@ -350,6 +364,8 @@ impl ReadService {
         };
         #[cfg(feature = "postgres")]
         let admission = admission.verify_postgres().await?;
+        #[cfg(feature = "sqlite")]
+        let admission = admission.verify_sqlite().await?;
         Ok(admission)
     }
     async fn run(&self, context: ReadContext, input: Input) -> Result<ReadPage, ReadError> {
@@ -440,6 +456,35 @@ impl Drop for ReadAdmission {
     }
 }
 impl ReadAdmission {
+    #[cfg(feature = "sqlite")]
+    async fn verify_sqlite(mut self) -> Result<Self, ReadError> {
+        let Some(backend) = self.inner.sqlite.clone() else {
+            return Ok(self);
+        };
+        self.retain_work()?;
+        let owned = self.budget.as_ref().expect("live admission").clone();
+        let observer = owned.clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.runtime().spawn_blocking(move || {
+            let mut stop = crate::sqlite::storage::Stop::from_budget(&owned);
+            // This verification continues the WorkGuard already retained above.
+            // Graceful sealing denies new admission, but admitted reads drain
+            // until their original deadline, cancellation/session or owner stop.
+            // Keep the seal fence in the original budget for mutation paths.
+            stop.owner_sealed = None;
+            let result = backend.verify(&stop).map_err(|_| ReadError::Unavailable);
+            drop(owned);
+            let _ = send.send(result);
+        });
+        tokio::select! {
+            biased;
+            _=observer.cancelled()=>return Err(observer.check().err().unwrap_or(ReadError::Cancelled)),
+            _=tokio::time::sleep_until(tokio::time::Instant::from_std(observer.deadline))=>return Err(ReadError::Deadline),
+            result=receive=>result.map_err(|_|ReadError::Unavailable)??,
+        }
+        observer.check()?;
+        Ok(self)
+    }
     /// Reserve raw bytes and transport copy/storage overhead before allocation.
     /// Calls accumulate across URI, headers, principal and streamed body frames.
     pub fn reserve_wire_input(&mut self, bytes: usize) -> Result<(), ReadError> {

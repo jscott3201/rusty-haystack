@@ -138,6 +138,31 @@ jobs:
       - run: cargo +1.99.0 test --locked --workspace --exclude rusty-haystack
       - run: cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz
 
+  sqlite:
+    name: SQLite 3.53.2 entity durability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-3.53.2
+      - name: Install pinned qualification test runner
+        run: cargo +1.99.0 install --locked cargo-nextest --version 0.9.146
+      - run: cargo +1.99.0 clippy --locked -p rusty-haystack-app --no-default-features --features sqlite --all-targets -- -D warnings
+      - run: cargo +1.99.0 nextest run --locked -p rusty-haystack-app --no-default-features --features sqlite
+      - run: cargo +1.99.0 test --locked -p rusty-haystack-app --no-default-features --features sqlite --doc
+      - run: cargo +1.99.0 clippy --locked -p rusty-haystack-app --no-default-features --features postgres,sqlite --all-targets -- -D warnings
+      - run: cargo +1.99.0 nextest run --locked -p rusty-haystack-app --no-default-features --features postgres,sqlite
+      - name: Verify optional dependency isolation
+        run: python3 -m unittest discover -s scripts/sqlite -p 'test_*.py' -v
+      - name: Qualify native identity, interruption, recovery and physical ownership
+        run: cargo +1.99.0 nextest run --locked -p rusty-haystack-app --features sqlite -E 'test(sqlite::qualification) & not test(process_crash_worker)' --success-output immediate
+
   postgres:
     name: PostgreSQL 18.6 durability
     runs-on: ubuntu-latest
@@ -238,7 +263,7 @@ jobs:
   ci-ok:
     name: CI OK
     if: ${{ always() }}
-    needs: [ci-policy, fmt, clippy, test, current-stable, python, deny, postgres, core-features, codeql]
+    needs: [ci-policy, fmt, clippy, test, current-stable, python, deny, postgres, sqlite, core-features, codeql]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

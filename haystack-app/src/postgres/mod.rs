@@ -5,8 +5,8 @@ pub(crate) mod history_value;
 mod recovery;
 mod refresh;
 pub(crate) mod storage;
-pub(crate) mod value;
 pub use crate::service::postgres_snapshot::PostgresSnapshot;
+pub(crate) use crate::storage_value as value;
 pub use config::{PostgresConfig, PostgresLimits, PostgresTransport};
 
 /// Public failures deliberately omit driver messages, endpoints, SQL and
@@ -31,6 +31,15 @@ pub enum PostgresError {
     Conflict,
     #[error("PostgreSQL operation deadline exceeded")]
     Deadline,
+}
+
+impl From<crate::storage_value::PayloadError> for PostgresError {
+    fn from(error: crate::storage_value::PayloadError) -> Self {
+        match error {
+            crate::storage_value::PayloadError::Limit => Self::Limit,
+            crate::storage_value::PayloadError::Incompatible => Self::Incompatible,
+        }
+    }
 }
 
 use crate::{

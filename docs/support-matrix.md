@@ -22,6 +22,7 @@ policy in `scripts/ci/policy.py` rejects an unknown event, target branch, or pro
 | Schema and generated HTTP client | Ubuntu, Python 3.12 | Ubuntu, Python 3.12 | Locked OpenAPI/JSON Schema validators and unedited openapi-python-client output against a real local fixture; part of the existing Python job |
 | MCP pipe profile | Ubuntu | Ubuntu, macOS adapter tests; Ubuntu installed fixture | Explicit `stdio`/CLI `mcp` feature tests and Ubuntu Clippy; fresh installed default H4 and opt-in Jeto discovery, independent boxed schemas/selected-value decoder, scope, EOF/signals and pipe backpressure; no Windows stdio claim |
 | MCP local HTTP profile | Ubuntu | Ubuntu, macOS adapter tests; Ubuntu installed fixture | Explicit `http`/CLI `mcp-http` and combined feature tests; default H4 and opt-in Jeto, offline RS256 fixture issuer, SDK/raw HTTP, independent boxed schemas/selected-value decoder, caller scope, cancellation and socket backpressure; local JSON-response profile only, no production TLS/IdP or external host claim |
+| SQLite 3.53.2 entity durability | Ubuntu x86_64 | Ubuntu x86_64 | Optional app SQLite and combined PostgreSQL/SQLite Clippy/tests, SQLite doctests, dependency isolation and native local-file process-crash/rollback/recovery/ownership qualification; history is not selected |
 | PostgreSQL 18.6 durability | Ubuntu | Ubuntu | Optional app/CLI feature Clippy/tests, app doctests, real Docker verified-TLS durability qualification, and installed standalone auth/write/history/restart/signal cleanup |
 | Cargo Deny | Ubuntu | Ubuntu | Locked all-feature dependency advisory, license, ban and source checks |
 | CodeQL | Ubuntu, Rust/Python/Actions | Ubuntu, Rust/Python/Actions | Analysis and upload jobs completed using the existing query filters; the separate alert-results check is described below |
@@ -35,13 +36,13 @@ standing in for either contract. Workspace builds can enable dependency features
 that an isolated core build does not.
 
 `CI OK` is the canonical workflow-job aggregate. Its explicit dependencies are `ci-policy`, `fmt`,
-`clippy`, `test`, `current-stable`, `python`, `deny`, `postgres`, `core-features`, and `codeql`.
+`clippy`, `test`, `current-stable`, `python`, `deny`, `postgres`, `sqlite`, `core-features`, and `codeql`.
 It runs with `always()` and accepts only `success` for every required job. Missing
 jobs, malformed or duplicate JSON keys, failure, cancellation, skip, unknown profiles,
 or an unexpected planned OS inventory fail closed. Job results enter through an
 environment variable, never interpolation into shell source. There are no optional
 jobs in either profile. The general dev test matrix excludes macOS/Windows; the
-PostgreSQL selected profile is explicitly Ubuntu-only on both target branches.
+PostgreSQL and SQLite selected profiles are explicitly Ubuntu-only on both target branches.
 
 For CodeQL, `CI OK` confirms successful completion of the reusable analysis and upload
 jobs. GitHub subsequently evaluates alert severity in the separate
@@ -98,7 +99,8 @@ or full Haystack 5 interoperability.
 
 Running without `--full` omits Cargo Deny and therefore returns 2 if all other checks
 pass. The local gate does not run hosted CodeQL, other host operating systems, or
-release-artifact validation or the optional PostgreSQL runtime profile. For a
+release-artifact validation or optional storage runtime profiles. For SQLite, run the
+[explicit native qualification commands](sqlite-durability.md#validation). For a
 PostgreSQL change, also run `python3 scripts/postgres/qualify.py --docker`. For the
 installed CLI workflow, run `python3 scripts/postgres/standalone.py --docker`; see the
 [exact profile and external-fixture alternative](postgres-durability.md). The
@@ -178,3 +180,14 @@ periodic catch-up, actual local TCP interruption/reconnect, durable feed replay,
 process-local subscription resync and explicit restore-epoch fencing. Other
 database versions, geographic replication, power-loss behavior and backup
 restoration remain separate evidence requirements.
+
+
+The optional SQLite entity profile uses the bundled SQLite 3.53.2 runtime through
+rusqlite 0.40.2, with a single application owner for one local file. Its separate
+Ubuntu x86_64 job includes native commit/rollback and process interruption before
+and after COMMIT, durable pending/final receipts, typed payload recovery, owner
+locks and actual native cleanup. Native macOS arm64 can run the same commands
+locally; other operating systems and architectures require separate evidence.
+This does not qualify power loss, network filesystems, multiple application owners,
+history storage, a SQLite CLI selector, or Python wheels containing SQLite. See
+[the selected SQLite contract](sqlite-durability.md).

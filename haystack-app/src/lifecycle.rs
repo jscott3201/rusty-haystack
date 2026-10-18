@@ -180,6 +180,18 @@ impl ApplicationBuilder {
             .reads
             .configure_postgres(backend)
     }
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn configure_sqlite(
+        &mut self,
+        backend: Arc<crate::sqlite::storage::Backend>,
+    ) -> Result<(), ReadError> {
+        self.parts
+            .as_mut()
+            .ok_or(ReadError::Unavailable)?
+            .application
+            .reads
+            .configure_sqlite(backend)
+    }
     /// Configure the bounded label reported by typed `about`. The boot timestamp
     /// is captured once when this owner starts on its selected runtime.
     pub fn server_name(self, name: impl Into<String>) -> Result<Self, ReadError> {
