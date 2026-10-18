@@ -4,6 +4,12 @@
 #[cfg(feature = "postgres")]
 #[path = "mutation_postgres.rs"]
 mod postgres;
+#[cfg(feature = "sqlite")]
+#[path = "mutation_sqlite.rs"]
+mod sqlite;
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+#[path = "mutation_storage.rs"]
+mod storage;
 use crate::{
     BudgetKind, Principal, ReadAdmission, ReadContext, ReadError, ReadService, budget::Budget,
 };
@@ -127,8 +133,8 @@ struct Store {
     graph: SharedGraph,
     dataset: [u8; 16],
     native_writes: bool,
-    #[cfg(feature = "postgres")]
-    backend: Option<Arc<crate::postgres::storage::Backend>>,
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    backend: Option<storage::Backend>,
     receipts: Mutex<Receipts>,
 }
 /// The selected entity receipt authority and its read-only graph projection.
@@ -145,7 +151,7 @@ impl EntityMutationStore {
                 graph,
                 dataset: rand::random(),
                 native_writes: true,
-                #[cfg(feature = "postgres")]
+                #[cfg(any(feature = "postgres", feature = "sqlite"))]
                 backend: None,
                 receipts: Mutex::new(Receipts::default()),
             }),
@@ -196,7 +202,7 @@ pub struct PreparedMutation {
     store: Arc<Store>,
     binding: Binding,
     plan: PreparedBatch,
-    #[cfg(feature = "postgres")]
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
     batch_limits: BatchLimits,
     receipt: EntityReceipt,
     deadline: Instant,
@@ -208,6 +214,20 @@ pub struct PreparedMutation {
     _lease: Option<Arc<crate::service::WorkLease>>,
 }
 impl PreparedMutation {
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    fn unknown(&self) -> MutationOutcome {
+        MutationOutcome::Unknown {
+            identity: self.binding.identity.clone(),
+            cause: UnknownCause::Provider,
+        }
+    }
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    fn cache_outcome(&self, outcome: &MutationOutcome) {
+        if let Some(record) = self.store.receipts.lock().entries.get_mut(&self.binding) {
+            record.outcome = outcome.clone();
+        }
+    }
+
     pub fn identity(&self) -> &OperationIdentity {
         &self.receipt.identity
     }
@@ -234,9 +254,9 @@ impl PreparedMutation {
     }
     /// Guaranteed no effect because this still owns the unconsumed plan.
     pub fn reject(self, reason: RejectionReason) -> MutationOutcome {
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = self.store.backend.clone() {
-            return self.reject_postgres(&backend, reason);
+            return backend.reject(self, reason);
         }
         let result = MutationOutcome::Rejected {
             identity: self.receipt.identity.clone(),
@@ -250,9 +270,9 @@ impl PreparedMutation {
         result
     }
     pub fn publish(self) -> MutationOutcome {
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = self.store.backend.clone() {
-            return self.publish_postgres(&backend);
+            return backend.publish(self);
         }
         if let Some(reason) = self.stop() {
             return self.reject(reason);
@@ -416,9 +436,12 @@ impl MutationService {
         provider: Arc<dyn MutationProvider>,
     ) -> Result<Self, ReadError> {
         limits.validate()?;
-        #[cfg(feature = "postgres")]
-        if store.inner.backend.is_some()
-            && provider.qualification() != ReceiptQualification::PostgresDurable
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
+        if store
+            .inner
+            .backend
+            .as_ref()
+            .is_some_and(|backend| provider.qualification() != backend.qualification())
         {
             return Err(ReadError::Forbidden);
         }
@@ -514,7 +537,7 @@ impl MutationInner {
         let identity = request.identity.clone();
         match self.prepare_and_submit(&principal, request, budget) {
             Ok(result) => result,
-            #[cfg(feature = "postgres")]
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
             Err(RejectionReason::Provider) if self.store.inner.backend.is_some() => {
                 MutationOutcome::Unknown {
                     identity,
@@ -620,13 +643,13 @@ impl MutationInner {
             .saturating_mul(32)
             .saturating_add(principal.bytes().saturating_mul(2))
             .saturating_add(8192);
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         let mut reservation = self
             .store
             .inner
             .backend
             .as_ref()
-            .map(|backend| backend.publication_guard(budget.deadline))
+            .map(|backend| backend.publication_guard(budget))
             .transpose()
             .map_err(|_| RejectionReason::Provider)?;
         let mut table = loop {
@@ -643,9 +666,9 @@ impl MutationInner {
         // this one prepared. Never overwrite or reapply that pending operation.
         if let Some(record) = table.entries.get(&binding).cloned() {
             drop(table);
-            #[cfg(feature = "postgres")]
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
             drop(reservation.take());
-            #[cfg(feature = "postgres")]
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
             let record = if self.store.inner.backend.is_some() {
                 self.lookup(&binding, budget)
                     .map_err(|_| RejectionReason::Provider)?
@@ -680,13 +703,14 @@ impl MutationInner {
             identity: request.identity.clone(),
             cause: UnknownCause::Pending,
         };
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = &self.store.inner.backend {
             drop(table);
-            match postgres::reserve(backend, &binding, &canonical, &pending, budget.deadline) {
+            match backend.reserve(&binding, &canonical, &pending, budget) {
                 Ok(Some(_)) => {
                     drop(reservation.take());
-                    let record = postgres::lookup(backend, &binding, budget.deadline)
+                    let record = backend
+                        .lookup(&binding, budget)
                         .map_err(|_| RejectionReason::Provider)?
                         .ok_or(RejectionReason::Provider)?;
                     if !policy.rules.authorize_reconcile(
@@ -723,14 +747,14 @@ impl MutationInner {
         );
         table.bytes += bytes;
         drop(table);
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         drop(reservation);
         let identity = receipt.identity.clone();
         let prepared = PreparedMutation {
             store: self.store.inner.clone(),
             binding: binding.clone(),
             plan,
-            #[cfg(feature = "postgres")]
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
             batch_limits,
             receipt,
             deadline: budget.deadline,
@@ -773,10 +797,11 @@ impl MutationInner {
         Ok(())
     }
     fn lookup(&self, binding: &Binding, budget: &Budget) -> Result<Option<Record>, ReadError> {
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = &self.store.inner.backend {
             budget.check()?;
-            return postgres::lookup(backend, binding, budget.deadline)
+            return backend
+                .lookup(binding, budget)
                 .map_err(|_| ReadError::Unavailable);
         }
         loop {

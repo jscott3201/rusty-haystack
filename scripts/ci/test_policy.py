@@ -13,7 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 # Independent oracle; never derive these from policy.py or observed needs.
 REQUIRED = ("ci-policy", "fmt", "clippy", "test", "current-stable", "python",
-            "deny", "core-features", "codeql", "postgres")
+            "deny", "core-features", "codeql", "postgres", "sqlite")
 PROFILES = {"dev": ["ubuntu-latest"],
             "main": ["ubuntu-latest", "macos-latest", "windows-latest"]}
 
@@ -178,6 +178,13 @@ class WorkflowContractTests(unittest.TestCase):
                 suffix = " --all-targets -- -D warnings" if command == "clippy" else ""
                 self.assertIn(f"\n      - run: cargo +1.99.0 {command} --locked -p rusty-haystack-core{flags}{suffix}\n",
                               jobs["core-features"])
+        self.assertIn("\n    runs-on: ubuntu-latest\n", jobs["sqlite"])
+        self.assertIn("cargo +1.99.0 nextest run --locked -p rusty-haystack-app --features sqlite -E 'test(sqlite::qualification) & not test(process_crash_worker)' --success-output immediate", jobs["sqlite"])
+        self.assertIn("run: python3 -m unittest discover -s scripts/sqlite -p 'test_*.py' -v", jobs["sqlite"])
+        for features in ("sqlite", "postgres,sqlite"):
+            self.assertIn(f"cargo +1.99.0 clippy --locked -p rusty-haystack-app --no-default-features --features {features} --all-targets -- -D warnings", jobs["sqlite"])
+            self.assertIn(f"cargo +1.99.0 nextest run --locked -p rusty-haystack-app --no-default-features --features {features}", jobs["sqlite"])
+        self.assertIn("cargo +1.99.0 test --locked -p rusty-haystack-app --no-default-features --features sqlite --doc", jobs["sqlite"])
         self.assertIn("\n    runs-on: ubuntu-latest\n", jobs["postgres"])
         self.assertIn("run: python3 scripts/postgres/qualify.py --docker", jobs["postgres"])
         self.assertIn("run: python3 scripts/postgres/standalone.py --docker", jobs["postgres"])
@@ -208,6 +215,7 @@ class WorkflowContractTests(unittest.TestCase):
         mutations = (
             (ci.replace(", core-features, codeql]", ", core-features]"), codeql),
             (ci.replace(", postgres,", ","), codeql),
+            (ci.replace(", sqlite,", ","), codeql),
             (ci.replace("    if: ${{ always() }}\n", ""), codeql),
             (ci.replace("fromJSON(needs.ci-policy.outputs.test-os)", "fromJSON('[\"ubuntu-latest\"]')"), codeql),
             (ci.replace("reopened, edited]", "reopened]"), codeql),

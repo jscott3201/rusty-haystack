@@ -152,3 +152,9 @@ single-submit `EntityTransport` contract. WebSocket does not implement it.
 The optional [PostgreSQL application profile](postgres-durability.md) selects durable
 entities and history together. Its read-only graph views and explicit receipt
 qualification preserve the same admission, authorization and uncertainty contracts.
+
+
+The optional Rust SQLite application selects `sqliteDurable` receipts for one
+local-file entity authority. Its Pending reservation, entity/feed/final-receipt
+transaction, publication barrier and close/reopen behavior are described in the
+[SQLite durability contract](sqlite-durability.md). It selects no history service.

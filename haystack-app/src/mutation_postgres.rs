@@ -1,53 +1,8 @@
 //! Durable selection for the same admitted entity mutation contract.
 use super::*;
 use crate::postgres::{PostgresError, storage::Backend};
-use haystack_core::{
-    codecs::{entity::EntityWire, typed},
-    kinds::Kind,
-};
 use sqlx::Row;
 
-impl Binding {
-    fn storage_key(&self) -> Result<Vec<u8>, PostgresError> {
-        let (kind, subject) = match &self.principal {
-            PrincipalKey::Anonymous => ("anonymous", ""),
-            PrincipalKey::Authenticated(s) => ("authenticated", s.as_str()),
-            PrincipalKey::Embedding(s) => ("embedding", s.as_str()),
-        };
-        typed::encode(&Kind::List(vec![
-            Kind::Str(kind.into()),
-            Kind::Str(subject.into()),
-            self.identity
-                .to_kind()
-                .map_err(|_| PostgresError::Incompatible)?,
-        ]))
-        .map_err(|_| PostgresError::Limit)
-    }
-    fn from_storage_key(bytes: &[u8]) -> Result<Self, PostgresError> {
-        let Kind::List(parts) = typed::decode(bytes).map_err(|_| PostgresError::Incompatible)?
-        else {
-            return Err(PostgresError::Incompatible);
-        };
-        let [Kind::Str(kind), Kind::Str(subject), identity] = parts.as_slice() else {
-            return Err(PostgresError::Incompatible);
-        };
-        let principal = match kind.as_str() {
-            "anonymous" if subject.is_empty() => PrincipalKey::Anonymous,
-            "authenticated" => PrincipalKey::Authenticated(subject.clone()),
-            "embedding" => PrincipalKey::Embedding(subject.clone()),
-            _ => return Err(PostgresError::Incompatible),
-        };
-        let result = Self {
-            principal,
-            identity: OperationIdentity::from_kind(identity)
-                .map_err(|_| PostgresError::Incompatible)?,
-        };
-        if result.storage_key()? != bytes {
-            return Err(PostgresError::Incompatible);
-        };
-        Ok(result)
-    }
-}
 impl EntityMutationStore {
     pub(crate) fn from_postgres(
         graph: SharedGraph,
@@ -118,7 +73,7 @@ impl EntityMutationStore {
                 graph,
                 dataset,
                 native_writes: false,
-                backend: Some(backend),
+                backend: Some(super::storage::Backend::Postgres(backend)),
                 receipts: Mutex::new(receipts),
             }),
         })
@@ -257,17 +212,6 @@ pub(super) fn settle(
         .transpose()
 }
 impl PreparedMutation {
-    fn unknown(&self) -> MutationOutcome {
-        MutationOutcome::Unknown {
-            identity: self.binding.identity.clone(),
-            cause: UnknownCause::Provider,
-        }
-    }
-    fn cache_outcome(&self, outcome: &MutationOutcome) {
-        if let Some(record) = self.store.receipts.lock().entries.get_mut(&self.binding) {
-            record.outcome = outcome.clone();
-        }
-    }
     pub(super) fn reject_postgres(
         self,
         backend: &Backend,

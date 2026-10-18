@@ -56,6 +56,50 @@ fn typed_str_envelope_preserves_rich_values_and_exact_unsigned_positions_in_all_
         receipt
     );
 }
+
+#[test]
+fn durable_entity_qualifications_survive_every_public_codec_without_changing_existing_labels() {
+    let receipt = MutationOutcome::Committed(EntityReceipt {
+        identity: identity(),
+        before_revision: 0,
+        after_revision: 1,
+        span: Some(CommitSpan { first: 1, last: 1 }),
+        qualification: ReceiptQualification::EphemeralMemory,
+    });
+    for label in [
+        "ephemeralMemory",
+        "providerProtocol",
+        "postgresDurable",
+        "sqliteDurable",
+    ] {
+        let mut fixture = receipt.to_kind().unwrap();
+        let Kind::Dict(root) = &mut fixture else {
+            panic!()
+        };
+        let Kind::Dict(mut body) = root.get("body").unwrap().clone() else {
+            panic!()
+        };
+        body.set("qualification", Kind::Str(label.into()));
+        root.set("body", Kind::Dict(body));
+        let decoded =
+            MutationOutcome::from_kind(&fixture).unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(decoded.to_kind().unwrap(), fixture);
+        for mime in [
+            "text/zinc",
+            "application/json",
+            "application/json;v=3",
+            "text/trio",
+        ] {
+            let codec = codec_for(mime).unwrap();
+            let encoded = codec
+                .encode_grid(&entity::to_grid(&decoded).unwrap())
+                .unwrap();
+            let recovered: MutationOutcome =
+                entity::from_grid(&codec.decode_grid(&encoded).unwrap()).unwrap();
+            assert_eq!(recovered.to_kind().unwrap(), fixture);
+        }
+    }
+}
 #[test]
 fn canonical_binding_retains_variants_float_bits_units_ref_display_and_operation_order() {
     let variants = [

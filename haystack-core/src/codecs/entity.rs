@@ -35,6 +35,8 @@ pub enum ReceiptQualification {
     ProviderProtocol,
     /// Acknowledged PostgreSQL transaction with required logged durability settings.
     PostgresDurable,
+    /// Acknowledged local SQLite entity transaction with verified WAL/FULL settings.
+    SqliteDurable,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityReceipt {
@@ -454,6 +456,7 @@ impl EntityWire for MutationOutcome {
                         ReceiptQualification::EphemeralMemory => "ephemeralMemory",
                         ReceiptQualification::ProviderProtocol => "providerProtocol",
                         ReceiptQualification::PostgresDurable => "postgresDurable",
+                        ReceiptQualification::SqliteDurable => "sqliteDurable",
                     }),
                 );
             }
@@ -497,6 +500,7 @@ impl EntityWire for MutationOutcome {
                         "ephemeralMemory" => ReceiptQualification::EphemeralMemory,
                         "providerProtocol" => ReceiptQualification::ProviderProtocol,
                         "postgresDurable" => ReceiptQualification::PostgresDurable,
+                        "sqliteDurable" => ReceiptQualification::SqliteDurable,
                         _ => return Err(invalid()),
                     },
                 };
