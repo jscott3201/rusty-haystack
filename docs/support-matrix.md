@@ -191,3 +191,19 @@ locally; other operating systems and architectures require separate evidence.
 This does not qualify power loss, network filesystems, multiple application owners,
 a SQLite CLI selector, or Python wheels containing SQLite. See
 [the selected SQLite contract](sqlite-durability.md).
+
+## Incremental Rust HTTP history
+
+The Rust HTTP client selects finite `bounded-history-v1` consumption over Zinc
+3.0 through `his_read_stream`. Ordinary client tests exercise loopback incremental
+decoding, exact values/provenance, terminal validation, capacity, cancellation and
+configured TLS/auth reuse. Local actual network-retirement evidence uses
+incomplete HTTP/1.1 responses; it does not qualify HTTP/2 retirement.
+
+The process-isolated RSS experiment was run explicitly on macOS arm64. It is an
+ignored native test requiring child-process RSS inspection and is not an ordinary
+workspace or hosted-CI gate. Its command, predeclared thresholds, positive control,
+measurements and native-buffer limits are documented in the
+[history client contract](history-reads.md#incremental-rust-http-consumption).
+Other formats remain buffered, and Python/CLI streaming, a local application
+provider adapter, Arrow/Parquet and progressive server encoding are not selected.

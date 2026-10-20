@@ -161,3 +161,134 @@ fractions keep their exact nanoseconds. Unsupported timestamps fail explicitly,
 including in empty read responses whose headers contain historical second-level
 offsets. Native typed collection and trusted stored timestamps retain their
 original fields and values.
+
+## Incremental Rust HTTP consumption
+
+`HaystackClient<HttpTransport>::his_read_stream(request, options)` consumes the
+same finite `bounded-history-v1` response incrementally over Zinc 3.0
+(`text/zinc`). It uses the configured client's CA trust, mTLS identity, auth and
+HTTP timeout, with redirects, automatic retries and implicit decompression
+disabled. Other configured formats fail before dispatch. The new API changes
+client consumption; the scoped server still constructs one bounded response.
+
+```rust,no_run
+use haystack_client::{HaystackClient, history::{HistoryStreamEnd, HistoryStreamOptions}};
+use haystack_core::codecs::history::HistoryReadRequest;
+# async fn read() -> Result<(), Box<dyn std::error::Error>> {
+let client = HaystackClient::connect("https://example.com/api", "user", "password").await?;
+let request = HistoryReadRequest { id: "point".into(), range: "2024-06-01".into() };
+let mut session = client.his_read_stream(&request, HistoryStreamOptions::default()).await?;
+// These are remote observations. The header's terminal is provisional.
+let metadata = &session.header().metadata;
+println!("history generation {}", metadata.history.generation);
+loop {
+    let batch = session.next().await;
+    for sample in batch.samples {
+        // Consume or persist each bounded batch without collecting the response.
+        println!("{:?}", sample);
+    }
+    if let Some(end) = batch.end {
+        match end {
+            HistoryStreamEnd::Remote(terminal) => println!("validated remote terminal: {terminal:?}"),
+            HistoryStreamEnd::Local(error) => eprintln!("partial read: {error}"),
+        }
+        break;
+    }
+}
+session.close().await;
+# Ok(())
+# }
+```
+
+Every remote metadata field is retained: schema/unit/timezone, requested and
+evaluated ranges, graph/catalog/policy observations, history identity, full
+retained coverage, bounds, returned count and declared terminal. Local batch
+boundaries do not replace those observations. `Remote(Complete)` is emitted only
+after transport EOF, exact row count, strictly ordered instants, schema, range
+and retained-endpoint/count validation. A count match alone is insufficient when
+complete coverage requires a missing retained record. `Remote(Limited(...))`,
+`Remote(Interrupted(...))` and `Remote(Failed(...))` preserve the server's outcome.
+A local protocol, transport, limit, cancellation or deadline failure is a
+separate `Local(...)` end alongside any admitted prefix; it never becomes remote
+completion. Earlier batches remain partial until the final end is observed.
+
+The selected grammar requires one Zinc 3.0 metadata line, exactly `ts,val`, and
+newline-terminated scalar rows. CRLF is admitted; a single final blank line is
+admitted. Duplicate/unknown metadata, alternate columns or column metadata,
+comments, nested/rich values, raw carriage returns or line feeds in string cells,
+surplus cells and trailing garbage are rejected. Escaped `\r` and `\n` keep their
+exact values and remain distinct from literal backslash-plus-`r` or `n`.
+Date/time scalar syntax is checked for ASCII before decoding, including
+malformed values of the wrong kind, so Unicode cannot enter fixed-byte temporal
+parsing. Non-ASCII or compound request-range syntax is rejected before dispatch.
+Strings, Bool, NA and the admitted Number representation keep
+their existing H4 semantics, including unit aliases, exact numeric bits,
+timezone spelling, historical offsets and representable minute-leap fractions.
+
+Each transport admits at most 16 opening/live sessions, rejecting excess calls
+immediately. Each session owns one task, one response and one decoder. At most
+one pull is outstanding. Abandoning a `next()` wait preserves its requested
+batch; no background decode continues after that batch is ready. The owner
+continues to observe the original absolute deadline and cancellation while the
+consumer is idle. Explicit `close()` is idempotent and joins actual owned task,
+response and parser cleanup. Abandoning a close wait preserves that join for a
+later close. Drop signals cancellation and requests task abort without claiming
+a synchronous join. Sessions own their lifetime independently of the parent
+client; closing that client does not close retained sessions. The configured
+HTTP request timeout remains an additional bound and is not renewed per batch.
+
+Default local ceilings are 16 MiB response/source bytes, 10,000 rows, a 128 KiB
+encoded metadata line, a 64 KiB encoded row, 32 KiB decoded field, 512 KiB copied
+HTTP DATA frame, 64 rows/64 KiB conservative source bytes per batch, and 256 MiB
+of work accounting. The work counter charges four times received encoded bytes
+plus admitted source bytes; source accounting reserves 512 bytes per sample.
+The typed control also retains the shared 16 KiB, depth-12, 512-node limits.
+Options can tighten the total profile ceilings. Remote response and batch
+bounds can further tighten the local selections. Limits are checked before
+extending a line or decoding a field, and cumulative semantic validation retains
+only the envelope, counters and first/last timestamps. Framing retains one
+bounded copied frame, one bounded partial line and at most one decoded sample
+that did not fit the preceding batch, in addition to the bounded ready batch.
+
+`HistoryStreamStats` reports received/admitted counts and framing/batch high
+watermarks; it is not an allocator measurement. Reqwest exposes a native DATA
+frame only after receiving it, so an oversized native frame may already exist
+before the client rejects it without copying. HTTP/TLS read-ahead, native-frame
+allocation, allocator overhead and kernel buffers are outside the batch limits.
+The qualified locked stack was reqwest 0.13.5, Hyper 1.12.0 and rustls 0.23.46;
+observed Hyper HTTP/1.1 DATA frames reached 417,792 bytes. This is dependency
+behavior, not a promised API frame size. No claim equates a batch with a TCP,
+TLS or HTTP frame.
+
+Native retained-memory qualification on macOS arm64 used separate client
+processes with two runtime workers (active during the consumer pause) and a
+fixture server in the parent process, 10,000 rows, identical
+four-row batch limits, and 1,332,264-byte versus 14,332,264-byte responses. Across
+three fresh-process pairs, post-warmup idle RSS increases were 128–240 KiB for
+the stream. The deliberately collecting control retained 2,672–2,752 KiB for the
+small response and 28,464–28,592 KiB for the large response. The predeclared
+criteria were at most 4 MiB additional streaming RSS as the body grew and at
+least 6 MiB separation in the collecting control. All pairs passed. Decoder
+counters stayed unchanged while demand was paused; large-response server writes
+stalled between 819,004 and 1,744,700 bytes and resumed after demand. This combines measured RSS,
+observed socket backpressure and bounded-state inspection; it does not measure
+kernel memory or qualify another OS/allocator/transport implementation.
+
+Run that explicit native qualification with:
+
+```sh
+cargo nextest run --locked -p rusty-haystack-client \
+  --test history_stream_memory --run-ignored ignored-only \
+  -E 'test(retained_memory_scales)' --success-output immediate
+```
+
+It needs local loopback sockets, permission to launch and inspect its own child
+processes, and a `ps -o rss= -p PID` implementation reporting KiB. It is ignored
+by ordinary tests and is not wired into hosted CI. Functional tests run normally:
+chunk splitting, malformed/partial responses, capacity recovery, cancellation,
+idle deadlines, dropped waits, Basic/SCRAM, CA/hostname and mandatory mTLS.
+The actual peer-retirement proof uses incomplete HTTP/1.1 bodies plus peer
+EOF/reset and joined handlers. It establishes that selected fixture's network
+cleanup; it does not establish HTTP/2 stream retirement. The API does not add a
+local application provider adapter, Arrow/Parquet, Python/CLI streaming, a server
+pull protocol, or an atomic remote snapshot guarantee.

@@ -83,7 +83,13 @@ impl ClientConfig {
         let mut builder = reqwest::Client::builder()
             .timeout(self.timeout)
             .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never());
+            .retry(reqwest::retry::never())
+            // Keep byte-bounded profiles on identity bytes even when another
+            // workspace consumer enables reqwest compression features.
+            .no_gzip()
+            .no_brotli()
+            .no_zstd()
+            .no_deflate();
         if let Some(tls) = &self.tls {
             builder = tls.apply(builder)?;
         }

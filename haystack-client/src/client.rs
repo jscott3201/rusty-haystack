@@ -19,6 +19,18 @@ pub struct HaystackClient<T: Transport> {
 }
 
 impl HaystackClient<HttpTransport> {
+    /// Open a demand-driven finite Zinc history response. Remote metadata is
+    /// preserved and its terminal is provisional until validated EOF. The
+    /// session owns its response independently of the client; close it to await
+    /// cleanup. Other configured formats fail before any request is dispatched.
+    pub async fn his_read_stream(
+        &self,
+        request: &haystack_core::codecs::history::HistoryReadRequest,
+        options: crate::history::HistoryStreamOptions,
+    ) -> Result<crate::history::HttpHistorySession, crate::history::HistoryStreamError> {
+        crate::history::stream::open(&self.transport, request, options).await
+    }
+
     /// Read with a byte budget checked before decoding and a strict row bound.
     /// Unlike the server's advisory limit, an over-limit response is rejected.
     pub async fn read_bounded(

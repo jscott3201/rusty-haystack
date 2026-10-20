@@ -56,9 +56,69 @@ pub struct HttpTransport {
     auth: AuthCredential,
     format: String,
     entity_submission_safe: bool,
+    history_sessions: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl HttpTransport {
+    pub(crate) fn history_stream_request(
+        &self,
+        request: &haystack_core::codecs::history::HistoryReadRequest,
+    ) -> Result<
+        (reqwest::RequestBuilder, tokio::sync::OwnedSemaphorePermit),
+        crate::history::HistoryStreamError,
+    > {
+        use crate::history::HistoryStreamError as Error;
+        self.check_history_read_policy()
+            .map_err(|_| Error::UnsupportedTransport)?;
+        if self.format != "text/zinc" {
+            return Err(Error::UnsupportedTransport);
+        }
+        crate::config::validate_http_url(&self.base_url)
+            .map_err(|_| Error::UnsupportedTransport)?;
+        // A history range is an ASCII calendar/relative date or DateTime pair,
+        // never a quoted or nested Zinc value. Reject other forms before
+        // dispatch and before shared range validation can enter fixed-byte
+        // temporal parsing in the general scalar decoder.
+        if !request.range.is_ascii()
+            || request.range.bytes().any(|byte| {
+                matches!(
+                    byte,
+                    b'"' | b'\\'
+                        | b'['
+                        | b']'
+                        | b'{'
+                        | b'}'
+                        | b'('
+                        | b')'
+                        | b'`'
+                        | b'<'
+                        | b'>'
+                        | b'\r'
+                        | b'\n'
+                )
+            })
+        {
+            return Err(Error::Protocol);
+        }
+        let body = haystack_core::codecs::history::encode_request(
+            request,
+            &haystack_core::codecs::zinc::ZincCodec,
+        )
+        .map_err(|_| Error::Protocol)?;
+        let permit = self
+            .history_sessions
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::Capacity)?;
+        let dispatch = self
+            .apply_auth(self.client.post(format!("{}/hisRead", self.base_url)))
+            .map_err(|_| Error::Credentials)?
+            .header("Content-Type", "text/zinc")
+            .header("Accept", "text/zinc")
+            .header("Accept-Encoding", "identity")
+            .body(body);
+        Ok((dispatch, permit))
+    }
     /// Separate typed route: the legacy grid codec and status mapping do not apply.
     pub(crate) async fn call_h5(
         &self,
@@ -145,6 +205,9 @@ impl HttpTransport {
             auth: AuthCredential::Bearer(zeroize::Zeroizing::new(auth_token)),
             format: format.to_string(),
             entity_submission_safe: false,
+            history_sessions: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                crate::history::MAX_HISTORY_SESSIONS,
+            )),
         }
     }
 
@@ -186,6 +249,9 @@ impl HttpTransport {
             },
             format: format.to_string(),
             entity_submission_safe: false,
+            history_sessions: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                crate::history::MAX_HISTORY_SESSIONS,
+            )),
         }
     }
 

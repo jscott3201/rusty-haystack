@@ -21,7 +21,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::oneshot,
+    sync::{mpsc, oneshot},
 };
 use tokio_rustls::TlsAcceptor;
 
@@ -195,13 +195,20 @@ pub struct Options {
     pub tokens: Tokens,
     pub final_message: Final,
     pub domain: Domain,
-    pub auth_delay: Duration,
 }
 #[derive(Default)]
 pub struct State {
     transcript: Option<String>,
     pub requests: Vec<(String, String)>,
     pub domain: usize,
+}
+/// Emitted after the request is recorded and its response is validated, before
+/// that response can be written. Receiving phase three with `valid_response`
+/// proves that the fixture checked the client's actual SCRAM proof.
+pub struct AuthPhase {
+    pub number: usize,
+    pub valid_response: bool,
+    pub release: oneshot::Sender<()>,
 }
 pub struct Server {
     pub url: String,
@@ -224,6 +231,30 @@ impl Drop for Server {
 }
 impl Server {
     pub fn start(certs: &Certificates, mtls: bool, options: Options) -> Self {
+        Self::start_with_body(certs, mtls, options, None)
+    }
+    pub fn start_with_body(
+        certs: &Certificates,
+        mtls: bool,
+        options: Options,
+        domain_body: Option<String>,
+    ) -> Self {
+        Self::start_controlled(certs, mtls, options, domain_body, None)
+    }
+    pub fn start_gated_auth(certs: &Certificates) -> (Self, mpsc::Receiver<AuthPhase>) {
+        let (events, phases) = mpsc::channel(3);
+        (
+            Self::start_controlled(certs, false, Options::default(), None, Some(events)),
+            phases,
+        )
+    }
+    fn start_controlled(
+        certs: &Certificates,
+        mtls: bool,
+        options: Options,
+        domain_body: Option<String>,
+        auth_events: Option<mpsc::Sender<AuthPhase>>,
+    ) -> Self {
         haystack_client::ensure_crypto_provider();
         let builder = rustls::ServerConfig::builder();
         let builder = if mtls {
@@ -257,6 +288,7 @@ impl Server {
                 .unwrap();
             runtime.block_on(async move {
                 let listener = TcpListener::from_std(listener).unwrap();
+                let mut phase = 0;
                 loop {
                     tokio::select! {
                         _ = &mut stopped => break,
@@ -283,8 +315,18 @@ impl Server {
                                 }
                                 let authorization = headers.lines().find_map(|l| l.split_once(':').filter(|(key, _)| key.eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim())).unwrap_or("");
                                 let request = headers.lines().next().unwrap();
-                                let response = response(&shared, options, request, authorization);
-                                if authorization.starts_with("HELLO ") || authorization.starts_with("SCRAM ") { tokio::time::sleep(options.auth_delay).await; }
+                                let response = response(&shared, options, request, authorization, domain_body.as_deref());
+                                // response() has released the state mutex. A
+                                // response gate must never hold it across await.
+                                if let Some(events) = &auth_events {
+                                    phase += 1;
+                                    assert!(phase <= 3, "unexpected extra gated request");
+                                    let expected_status = if phase < 3 { "HTTP/1.1 401 " } else { "HTTP/1.1 200 " };
+                                    let valid_response = response.as_ref().is_some_and(|response| response.starts_with(expected_status));
+                                    let (release, released) = oneshot::channel();
+                                    if events.send(AuthPhase { number: phase, valid_response, release }).await.is_err() { return; }
+                                    if released.await.is_err() { return; }
+                                }
                                 if let Some(response) = response { let _ = stream.write_all(response.as_bytes()).await; }
                                 let _ = stream.shutdown().await;
                             };
@@ -322,10 +364,11 @@ fn response(
     options: Options,
     request: &str,
     authorization: &str,
+    domain_body: Option<&str>,
 ) -> Option<String> {
     let mut state = shared.lock().unwrap();
     state.requests.push((request.into(), authorization.into()));
-    let mut body = GRID.to_string();
+    let mut body = domain_body.unwrap_or(GRID).to_string();
     let (status, extra) = if authorization.starts_with("HELLO ") {
         assert_eq!(authorization, "HELLO username=dXNlcg");
         let token = options
