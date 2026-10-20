@@ -39,6 +39,8 @@ pub enum HistoryReceiptQualification {
     ProviderProtocol,
     /// Acknowledged PostgreSQL transaction with required logged durability settings.
     PostgresDurable,
+    /// Acknowledged local SQLite history transaction with verified WAL/FULL settings.
+    SqliteDurable,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryWriteReceipt {
@@ -493,6 +495,7 @@ pub fn outcome_grid(outcome: &HistoryWriteOutcome) -> Result<HGrid, TypedPayload
                     HistoryReceiptQualification::EphemeralMemory => "ephemeralMemory",
                     HistoryReceiptQualification::ProviderProtocol => "providerProtocol",
                     HistoryReceiptQualification::PostgresDurable => "postgresDurable",
+                    HistoryReceiptQualification::SqliteDurable => "sqliteDurable",
                 }),
             );
         }
@@ -543,6 +546,7 @@ pub fn outcome_from_grid(grid: &HGrid) -> Result<HistoryWriteOutcome, TypedPaylo
                     "ephemeralMemory" => HistoryReceiptQualification::EphemeralMemory,
                     "providerProtocol" => HistoryReceiptQualification::ProviderProtocol,
                     "postgresDurable" => HistoryReceiptQualification::PostgresDurable,
+                    "sqliteDurable" => HistoryReceiptQualification::SqliteDurable,
                     _ => return Err(invalid()),
                 },
             };

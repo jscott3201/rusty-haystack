@@ -8,6 +8,8 @@
 //! compatibility API. Pure `EntityGraph` remains a trusted in-process API.
 mod budget;
 mod command;
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+mod history_storage_value;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "sqlite")]

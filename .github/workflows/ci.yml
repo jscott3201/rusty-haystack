@@ -139,7 +139,7 @@ jobs:
       - run: cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz
 
   sqlite:
-    name: SQLite 3.53.2 entity durability
+    name: SQLite 3.53.2 entity/history durability
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

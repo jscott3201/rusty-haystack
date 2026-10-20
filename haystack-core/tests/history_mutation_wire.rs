@@ -24,6 +24,44 @@ fn request() -> HistoryWriteRequest {
         }],
     }
 }
+
+#[test]
+fn sqlite_history_qualification_survives_every_supported_codec() {
+    use haystack_core::codecs::typed;
+    let identity = request().identity;
+    let outcome = HistoryWriteOutcome::Committed(HistoryWriteReceipt {
+        identity,
+        before_generation: 0,
+        after_generation: 1,
+        change_sequence: u64::MAX,
+        submitted_samples: 1,
+        unique_samples: 1,
+        retained_samples: 1,
+        evicted_samples: 0,
+        qualification: HistoryReceiptQualification::EphemeralMemory,
+    });
+    let mut grid = outcome_grid(&outcome).unwrap();
+    let Some(Kind::Str(control)) = grid.meta.get("historyWrite") else {
+        panic!()
+    };
+    let Kind::Dict(mut control) = typed::decode(control.as_bytes()).unwrap() else {
+        panic!()
+    };
+    control.set("qualification", Kind::Str("sqliteDurable".into()));
+    grid.meta.set(
+        "historyWrite",
+        Kind::Str(String::from_utf8(typed::encode(&Kind::Dict(control)).unwrap()).unwrap()),
+    );
+    for mime in ["text/zinc", "application/json;v=3", "application/json"] {
+        let codec = codec_for(mime).unwrap();
+        let wire = codec.encode_grid(&grid).unwrap();
+        let decoded =
+            decode_outcome(wire.as_bytes(), codec).expect("SQLite history durable receipt");
+        assert_eq!(outcome_grid(&decoded).unwrap(), grid);
+    }
+    let trio = codec_for("text/trio").unwrap();
+    assert!(decode_outcome(trio.encode_grid(&grid).unwrap().as_bytes(), trio).is_err());
+}
 #[test]
 fn original_order_zone_number_bits_and_unit_spelling_survive_all_h4_codecs() {
     let mut request = request();

@@ -1,4 +1,6 @@
-use super::{PostgresError, value};
+//! Backend-independent canonical history payloads. SQL projections are checked
+//! against the exact timestamp and typed value retained here.
+use crate::storage_value::{self as value, PayloadError};
 use crate::{HisItem, HistoryChangeRecord, HistoryOperationIdentity, HistoryState};
 use chrono::{DateTime, FixedOffset, SecondsFormat};
 use haystack_core::{data::HDict, kinds::Kind};
@@ -7,30 +9,30 @@ use serde::{Deserialize, Serialize};
 pub(crate) fn timestamp(ts: DateTime<FixedOffset>) -> String {
     ts.to_rfc3339_opts(SecondsFormat::Nanos, false)
 }
-pub(crate) fn parse_timestamp(ts: &str) -> Result<DateTime<FixedOffset>, PostgresError> {
-    let value = DateTime::parse_from_rfc3339(ts).map_err(|_| PostgresError::Incompatible)?;
+pub(crate) fn parse_timestamp(ts: &str) -> Result<DateTime<FixedOffset>, PayloadError> {
+    let value = DateTime::parse_from_rfc3339(ts).map_err(|_| PayloadError::Incompatible)?;
     if timestamp(value) != ts {
-        return Err(PostgresError::Incompatible);
+        return Err(PayloadError::Incompatible);
     };
     Ok(value)
 }
-pub(crate) fn encode_sample(item: &HisItem) -> Result<Vec<u8>, PostgresError> {
+pub(crate) fn encode_sample(item: &HisItem) -> Result<Vec<u8>, PayloadError> {
     let mut row = HDict::new();
     row.set("ts", Kind::Str(timestamp(item.ts)));
     row.set("val", item.val.clone());
-    value::encode_dict(&row).map_err(Into::into)
+    value::encode_dict(&row)
 }
-pub(crate) fn decode_sample(bytes: &[u8]) -> Result<HisItem, PostgresError> {
+pub(crate) fn decode_sample(bytes: &[u8]) -> Result<HisItem, PayloadError> {
     let row = value::decode_dict(bytes)?;
     let Some(Kind::Str(ts)) = row.get("ts") else {
-        return Err(PostgresError::Incompatible);
+        return Err(PayloadError::Incompatible);
     };
     if row.len() != 2 {
-        return Err(PostgresError::Incompatible);
+        return Err(PayloadError::Incompatible);
     };
     Ok(HisItem {
         ts: parse_timestamp(ts)?,
-        val: row.get("val").ok_or(PostgresError::Incompatible)?.clone(),
+        val: row.get("val").ok_or(PayloadError::Incompatible)?.clone(),
     })
 }
 #[derive(Serialize, Deserialize)]
@@ -73,13 +75,13 @@ struct Change {
     evicted_through: Option<String>,
     operation_id: Option<String>,
 }
-pub(crate) fn encode_change(c: &HistoryChangeRecord) -> Result<Vec<u8>, PostgresError> {
+pub(crate) fn encode_change(c: &HistoryChangeRecord) -> Result<Vec<u8>, PayloadError> {
     if c.operation.as_ref().is_some_and(|id| {
         id.authority != c.before.authority
             || id.incarnation != c.before.incarnation
             || id.point != c.point
     }) {
-        return Err(PostgresError::Incompatible);
+        return Err(PayloadError::Incompatible);
     };
     serde_json::to_vec(&Change {
         format: 1,
@@ -94,10 +96,10 @@ pub(crate) fn encode_change(c: &HistoryChangeRecord) -> Result<Vec<u8>, Postgres
         evicted_through: c.evicted_through.map(timestamp),
         operation_id: c.operation.as_ref().map(|id| id.operation_id.clone()),
     })
-    .map_err(|_| PostgresError::Incompatible)
+    .map_err(|_| PayloadError::Incompatible)
 }
-pub(crate) fn decode_change(bytes: &[u8]) -> Result<HistoryChangeRecord, PostgresError> {
-    let c: Change = serde_json::from_slice(bytes).map_err(|_| PostgresError::Incompatible)?;
+pub(crate) fn decode_change(bytes: &[u8]) -> Result<HistoryChangeRecord, PayloadError> {
+    let c: Change = serde_json::from_slice(bytes).map_err(|_| PayloadError::Incompatible)?;
     if c.format != 1
         || c.point.is_empty()
         || c.point.len() > 256
@@ -108,7 +110,7 @@ pub(crate) fn decode_change(bytes: &[u8]) -> Result<HistoryChangeRecord, Postgre
         || c.unique > c.submitted
         || c.retained.checked_add(c.evicted).is_none()
     {
-        return Err(PostgresError::Incompatible);
+        return Err(PayloadError::Incompatible);
     };
     let record = HistoryChangeRecord {
         sequence: c.sequence,
@@ -132,7 +134,7 @@ pub(crate) fn decode_change(bytes: &[u8]) -> Result<HistoryChangeRecord, Postgre
             .transpose()?,
     };
     if encode_change(&record)? != bytes {
-        return Err(PostgresError::Incompatible);
+        return Err(PayloadError::Incompatible);
     };
     Ok(record)
 }

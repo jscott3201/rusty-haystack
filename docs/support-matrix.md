@@ -22,7 +22,7 @@ policy in `scripts/ci/policy.py` rejects an unknown event, target branch, or pro
 | Schema and generated HTTP client | Ubuntu, Python 3.12 | Ubuntu, Python 3.12 | Locked OpenAPI/JSON Schema validators and unedited openapi-python-client output against a real local fixture; part of the existing Python job |
 | MCP pipe profile | Ubuntu | Ubuntu, macOS adapter tests; Ubuntu installed fixture | Explicit `stdio`/CLI `mcp` feature tests and Ubuntu Clippy; fresh installed default H4 and opt-in Jeto discovery, independent boxed schemas/selected-value decoder, scope, EOF/signals and pipe backpressure; no Windows stdio claim |
 | MCP local HTTP profile | Ubuntu | Ubuntu, macOS adapter tests; Ubuntu installed fixture | Explicit `http`/CLI `mcp-http` and combined feature tests; default H4 and opt-in Jeto, offline RS256 fixture issuer, SDK/raw HTTP, independent boxed schemas/selected-value decoder, caller scope, cancellation and socket backpressure; local JSON-response profile only, no production TLS/IdP or external host claim |
-| SQLite 3.53.2 entity durability | Ubuntu x86_64 | Ubuntu x86_64 | Optional app SQLite and combined PostgreSQL/SQLite Clippy/tests, SQLite doctests, dependency isolation and native local-file process-crash/rollback/recovery/ownership qualification; history is not selected |
+| SQLite 3.53.2 entity/history durability | Ubuntu x86_64 | Ubuntu x86_64 | Optional app SQLite and combined PostgreSQL/SQLite Clippy/tests, SQLite doctests, dependency isolation and native local-file process-crash/rollback/recovery/ownership qualification for entities and bounded history |
 | PostgreSQL 18.6 durability | Ubuntu | Ubuntu | Optional app/CLI feature Clippy/tests, app doctests, real Docker verified-TLS durability qualification, and installed standalone auth/write/history/restart/signal cleanup |
 | Cargo Deny | Ubuntu | Ubuntu | Locked all-feature dependency advisory, license, ban and source checks |
 | CodeQL | Ubuntu, Rust/Python/Actions | Ubuntu, Rust/Python/Actions | Analysis and upload jobs completed using the existing query filters; the separate alert-results check is described below |
@@ -181,13 +181,13 @@ process-local subscription resync and explicit restore-epoch fencing. Other
 database versions, geographic replication, power-loss behavior and backup
 restoration remain separate evidence requirements.
 
-
-The optional SQLite entity profile uses the bundled SQLite 3.53.2 runtime through
-rusqlite 0.40.2, with a single application owner for one local file. Its separate
+The optional SQLite entity/history profile uses the bundled SQLite 3.53.2 runtime
+through rusqlite 0.40.2, with a single application owner for one local file. Its separate
 Ubuntu x86_64 job includes native commit/rollback and process interruption before
-and after COMMIT, durable pending/final receipts, typed payload recovery, owner
-locks and actual native cleanup. Native macOS arm64 can run the same commands
+and after COMMIT, durable pending/final receipts, typed payload recovery, bounded
+history reads/upserts, retention and generation recovery, owner locks and actual
+native cleanup. Native macOS arm64 can run the same commands
 locally; other operating systems and architectures require separate evidence.
 This does not qualify power loss, network filesystems, multiple application owners,
-history storage, a SQLite CLI selector, or Python wheels containing SQLite. See
+a SQLite CLI selector, or Python wheels containing SQLite. See
 [the selected SQLite contract](sqlite-durability.md).

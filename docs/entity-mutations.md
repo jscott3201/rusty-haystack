@@ -157,4 +157,4 @@ qualification preserve the same admission, authorization and uncertainty contrac
 The optional Rust SQLite application selects `sqliteDurable` receipts for one
 local-file entity authority. Its Pending reservation, entity/feed/final-receipt
 transaction, publication barrier and close/reopen behavior are described in the
-[SQLite durability contract](sqlite-durability.md). It selects no history service.
+[SQLite durability contract](sqlite-durability.md). Its selected history authority has separate generations, receipts and atomic commits.

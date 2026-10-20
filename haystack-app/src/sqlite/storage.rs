@@ -21,7 +21,7 @@ pub(crate) struct Stop {
     pub cancel: CancellationToken,
     pub owner_cancel: Option<CancellationToken>,
     pub owner_sealed: Option<CancellationToken>,
-    session: Option<crate::budget::SessionFence>,
+    pub(crate) session: Option<crate::budget::SessionFence>,
 }
 impl Stop {
     pub(crate) fn new(deadline: Instant, cancel: CancellationToken) -> Self {
@@ -70,6 +70,7 @@ pub(crate) struct Projection {
     pub catalog: Arc<ActivatedCatalog>,
     pub dataset: [u8; 16],
     pub schema_version: i64,
+    pub history: std::sync::Weak<crate::history_store::HistoryStoreInner>,
 }
 struct Database {
     connection: Connection,
@@ -89,6 +90,10 @@ pub(crate) struct Backend {
     pub(crate) publication_waits: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) native_busy_waits: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) history_open_waits: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) history_pull_waits: std::sync::atomic::AtomicUsize,
 }
 impl Drop for Backend {
     fn drop(&mut self) {
@@ -135,6 +140,10 @@ impl Backend {
             publication_waits: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             native_busy_waits: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            history_open_waits: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            history_pull_waits: std::sync::atomic::AtomicUsize::new(0),
         });
         let configured = backend.with_connection(stop, |connection| {
             connection.busy_timeout(QUANTUM).map_err(sql_error)?;
@@ -280,6 +289,16 @@ impl Backend {
     pub(crate) fn verify(&self, stop: &Stop) -> Result<(), SqliteError> {
         let _publication = self.publication_guard(stop)?;
         let projection = self.projection.get().ok_or(SqliteError::Unavailable)?;
+        let history = projection
+            .history
+            .upgrade()
+            .ok_or(SqliteError::Unavailable)?;
+        let history_sequence = loop {
+            stop.check()?;
+            if let Some(state) = history.state.try_lock_for(QUANTUM) {
+                break state.sequence;
+            }
+        };
         let result = self.read(stop, |connection| {
             verify_durability(connection)?;
             let meta = super::recovery::metadata(connection)?;
@@ -287,6 +306,8 @@ impl Backend {
                 || meta.state != projection.graph.state()
                 || meta.catalog != projection.catalog.selection_identity()
                 || super::recovery::schema_version(connection)? != projection.schema_version
+                || meta.history_authority != history.authority
+                || meta.history_sequence != history_sequence
             {
                 return Err(SqliteError::Incompatible);
             }

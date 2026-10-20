@@ -14,7 +14,7 @@ const APPLICATION_ID: i64 = 0x48595345;
 const SCHEMA: &[(&str, &str)] = &[
     (
         "metadata",
-        "CREATE TABLE metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1), format INTEGER NOT NULL CHECK(format=1), dataset BLOB NOT NULL CHECK(length(dataset)=16), incarnation BLOB NOT NULL CHECK(length(incarnation)=16), revision BLOB NOT NULL CHECK(length(revision)=8), catalog_generation BLOB NOT NULL CHECK(length(catalog_generation)=8), floor BLOB NOT NULL CHECK(length(floor)=8), catalog TEXT NOT NULL CHECK(length(CAST(catalog AS BLOB))<=1048576), cursor_key BLOB NOT NULL CHECK(length(cursor_key)=32)) STRICT",
+        "CREATE TABLE metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1), format INTEGER NOT NULL CHECK(format=2), dataset BLOB NOT NULL CHECK(length(dataset)=16), incarnation BLOB NOT NULL CHECK(length(incarnation)=16), revision BLOB NOT NULL CHECK(length(revision)=8), catalog_generation BLOB NOT NULL CHECK(length(catalog_generation)=8), floor BLOB NOT NULL CHECK(length(floor)=8), catalog TEXT NOT NULL CHECK(length(CAST(catalog AS BLOB))<=1048576), cursor_key BLOB NOT NULL CHECK(length(cursor_key)=32), history_authority BLOB NOT NULL CHECK(length(history_authority)=16), history_sequence BLOB NOT NULL CHECK(length(history_sequence)=8)) STRICT",
     ),
     (
         "entities",
@@ -27,6 +27,22 @@ const SCHEMA: &[(&str, &str)] = &[
     (
         "receipts",
         "CREATE TABLE receipts(binding BLOB PRIMARY KEY CHECK(length(binding)<=1048576), request BLOB NOT NULL CHECK(length(request)<=1048576), outcome BLOB NOT NULL CHECK(length(outcome)<=1048576)) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "history_points",
+        "CREATE TABLE history_points(id TEXT PRIMARY KEY CHECK(length(CAST(id AS BLOB)) BETWEEN 1 AND 256), incarnation BLOB NOT NULL CHECK(length(incarnation)=16), generation BLOB NOT NULL CHECK(length(generation)=8), evicted TEXT CHECK(length(CAST(evicted AS BLOB))<=64)) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "history_samples",
+        "CREATE TABLE history_samples(point TEXT NOT NULL REFERENCES history_points(id), seconds INTEGER NOT NULL, nanos INTEGER NOT NULL CHECK(nanos BETWEEN 0 AND 1999999999 AND (nanos<1000000000 OR seconds%60 IN (59,-1))), payload BLOB NOT NULL CHECK(length(payload)<=1048576), PRIMARY KEY(point,seconds,nanos)) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "history_changes",
+        "CREATE TABLE history_changes(sequence BLOB PRIMARY KEY CHECK(length(sequence)=8), payload BLOB NOT NULL CHECK(length(payload)<=1048576)) STRICT, WITHOUT ROWID",
+    ),
+    (
+        "history_receipts",
+        "CREATE TABLE history_receipts(binding BLOB PRIMARY KEY CHECK(length(binding)<=1048576), request BLOB NOT NULL CHECK(length(request)<=1048576), outcome BLOB NOT NULL CHECK(length(outcome)<=1048576)) STRICT, WITHOUT ROWID",
     ),
 ];
 
@@ -51,7 +67,7 @@ pub(crate) fn validate_existing_schema(connection: &Connection) -> Result<bool, 
             Err(SqliteError::Incompatible)
         };
     }
-    if version != 1
+    if version != 2
         || application != APPLICATION_ID
         || objects.len() != SCHEMA.len()
         || objects.iter().any(|(kind, name, sql)| {
@@ -80,15 +96,17 @@ pub(crate) struct Metadata {
     pub floor: u64,
     pub catalog: String,
     pub cursor_key: [u8; 32],
+    pub history_authority: [u8; 16],
+    pub history_sequence: u64,
 }
 pub(crate) fn metadata(connection: &Connection) -> Result<Metadata, SqliteError> {
-    let valid: bool = connection.query_row("SELECT count(*)=1 AND coalesce(min(singleton=1 AND format=1 AND length(dataset)=16 AND length(incarnation)=16 AND length(revision)=8 AND length(catalog_generation)=8 AND length(floor)=8 AND length(CAST(catalog AS BLOB))<=1048576 AND length(cursor_key)=32),0) FROM metadata", [], |row| row.get(0)).map_err(|_| SqliteError::Incompatible)?;
+    let valid: bool = connection.query_row("SELECT count(*)=1 AND coalesce(min(singleton=1 AND format=2 AND length(dataset)=16 AND length(incarnation)=16 AND length(revision)=8 AND length(catalog_generation)=8 AND length(floor)=8 AND length(CAST(catalog AS BLOB))<=1048576 AND length(cursor_key)=32 AND length(history_authority)=16 AND length(history_sequence)=8),0) FROM metadata", [], |row| row.get(0)).map_err(|_| SqliteError::Incompatible)?;
     if !valid {
         return Err(SqliteError::Incompatible);
     }
-    let (dataset, incarnation, rev, catalog_generation, floor, catalog, cursor_key) = connection.query_row(
-        "SELECT dataset,incarnation,revision,catalog_generation,floor,catalog,cursor_key FROM metadata WHERE singleton=1", [],
-        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, String>(5)?, row.get::<_, Vec<u8>>(6)?)))
+    let (dataset, incarnation, rev, catalog_generation, floor, catalog, cursor_key, history_authority, history_sequence) = connection.query_row(
+        "SELECT dataset,incarnation,revision,catalog_generation,floor,catalog,cursor_key,history_authority,history_sequence FROM metadata WHERE singleton=1", [],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, String>(5)?, row.get::<_, Vec<u8>>(6)?, row.get::<_, Vec<u8>>(7)?, row.get::<_, Vec<u8>>(8)?)))
         .map_err(|_| SqliteError::Incompatible)?;
     Ok(Metadata {
         dataset: value::fixed(dataset)?,
@@ -100,6 +118,8 @@ pub(crate) fn metadata(connection: &Connection) -> Result<Metadata, SqliteError>
         floor: revision(floor)?,
         catalog,
         cursor_key: value::fixed(cursor_key)?,
+        history_authority: value::fixed(history_authority)?,
+        history_sequence: revision(history_sequence)?,
     })
 }
 pub(crate) struct StoredReceipt {
@@ -112,6 +132,8 @@ pub(crate) struct Recovered {
     pub cursor_key: [u8; 32],
     pub receipts: Vec<(Vec<u8>, StoredReceipt)>,
     pub schema_version: i64,
+    pub history_authority: [u8; 16],
+    pub history_sequence: u64,
 }
 impl Backend {
     pub(crate) fn initialize_and_recover(
@@ -127,7 +149,7 @@ impl Backend {
                         .map_err(|_| SqliteError::Incompatible)?;
                 }
                 connection
-                    .pragma_update(None, "user_version", 1)
+                    .pragma_update(None, "user_version", 2)
                     .map_err(|_| SqliteError::Incompatible)?;
                 connection
                     .pragma_update(None, "application_id", APPLICATION_ID)
@@ -135,16 +157,18 @@ impl Backend {
                 let dataset: [u8; 16] = rand::random();
                 let incarnation: [u8; 16] = rand::random();
                 let cursor: [u8; 32] = rand::random();
+                let history_authority: [u8; 16] = rand::random();
                 connection
                     .execute(
-                        "INSERT INTO metadata VALUES(1,1,?1,?2,?3,?4,?3,?5,?6)",
+                        "INSERT INTO metadata VALUES(1,2,?1,?2,?3,?4,?3,?5,?6,?7,?3)",
                         params![
                             dataset.as_slice(),
                             incarnation.as_slice(),
                             0u64.to_be_bytes().as_slice(),
                             1u64.to_be_bytes().as_slice(),
                             catalog.selection_identity(),
-                            cursor.as_slice()
+                            cursor.as_slice(),
+                            history_authority.as_slice()
                         ],
                     )
                     .map_err(|_| SqliteError::Incompatible)?;
@@ -248,6 +272,8 @@ impl Backend {
             cursor_key: meta.cursor_key,
             receipts,
             schema_version: schema_version(connection)?,
+            history_authority: meta.history_authority,
+            history_sequence: meta.history_sequence,
         })
     }
 }

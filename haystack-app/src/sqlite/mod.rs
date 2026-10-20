@@ -1,4 +1,4 @@
-//! Optional local-file SQLite entity authority. History is not selected.
+//! Optional local-file SQLite entity and bounded history authority.
 mod config;
 pub(crate) mod recovery;
 pub(crate) mod storage;
@@ -48,11 +48,15 @@ impl From<crate::storage_value::PayloadError> for SqliteError {
 pub struct SqlitePolicies {
     pub reads: Arc<dyn crate::ReadPolicy>,
     pub entities: Arc<dyn crate::MutationPolicy>,
+    pub history: Arc<dyn crate::HistoryMutationPolicy>,
 }
 #[derive(Debug, Clone, Default)]
 pub struct SqliteServiceLimits {
     pub reads: crate::ReadLimits,
     pub entities: crate::MutationLimits,
+    pub history: crate::HistoryLimits,
+    pub history_mutations: crate::HistoryMutationLimits,
+    pub history_store: crate::HistoryStoreLimits,
 }
 
 struct DatabaseResource(Arc<storage::Backend>);
@@ -99,9 +103,9 @@ impl ApplicationResource for DatabaseResource {
     }
 }
 
-/// Recover a bounded entity authority and transfer its connection and owner lock
+/// Recover bounded entity/history authorities and transfer their connection and owner lock
 /// to an application. Readiness still requires `ApplicationBuilder::start`.
-/// No mutable graph or implicit history provider escapes this constructor.
+/// No mutable graph or native history write bypass escapes this constructor.
 pub async fn application(
     config: SqliteConfig,
     catalog: Catalog,
@@ -164,6 +168,8 @@ fn construct(
 ) -> Result<(ApplicationBuilder, Arc<storage::Backend>), SqliteError> {
     #[cfg(test)]
     let recovery_end = config.recovery_end.clone();
+    #[cfg(test)]
+    let history_recovery_start = config.history_recovery_start.clone();
     stop.check()?;
     let catalog =
         Arc::new(ActivatedCatalog::new(catalog, None).map_err(|_| SqliteError::Incompatible)?);
@@ -182,6 +188,18 @@ fn construct(
             stop,
         )?;
         stop.check()?;
+        #[cfg(test)]
+        if let Some(gate) = history_recovery_start {
+            gate.hold_at(stop.deadline);
+        }
+        let history_store = crate::HisStore::from_sqlite(
+            backend.clone(),
+            recovered.history_authority,
+            recovered.history_sequence,
+            limits.history_store,
+            stop,
+        )?;
+        stop.check()?;
         backend
             .projection
             .set(storage::Projection {
@@ -189,6 +207,7 @@ fn construct(
                 catalog,
                 dataset: recovered.dataset,
                 schema_version: recovered.schema_version,
+                history: Arc::downgrade(&history_store.inner),
             })
             .map_err(|_| SqliteError::Configuration)?;
         let mut builder = ApplicationBuilder::new(graph, policies.reads, limits.reads)
@@ -206,8 +225,23 @@ fn construct(
         )
         .map_err(|_| SqliteError::Configuration)?;
         stop.check()?;
+        let history = crate::HistoryService::new(
+            builder.handle().read_service(),
+            Arc::new(history_store),
+            limits.history,
+        )
+        .map_err(|_| SqliteError::Configuration)?;
+        let history_mutations = crate::HistoryMutationService::new(
+            history.clone(),
+            policies.history,
+            limits.history_mutations,
+        )
+        .map_err(|_| SqliteError::Configuration)?;
+        stop.check()?;
         let builder = builder
             .entity_mutations(mutations)
+            .and_then(|builder| builder.borrowed_history(history))
+            .and_then(|builder| builder.history_mutations(history_mutations))
             .map(|builder| builder.owned_resource(DatabaseResource(backend.clone())))
             .map_err(|_| SqliteError::Configuration)?;
         #[cfg(test)]

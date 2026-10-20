@@ -1,4 +1,7 @@
 //! Native local-file tests use the bundled SQLite runtime, with no provider mocks.
+#[path = "history_qualification.rs"]
+mod history;
+
 use super::*;
 use crate::*;
 use haystack_core::{
@@ -119,6 +122,7 @@ fn policies() -> SqlitePolicies {
     SqlitePolicies {
         reads: Arc::new(AllowAll),
         entities: Arc::new(AllowAllMutations),
+        history: Arc::new(AllowAllHistoryMutations),
     }
 }
 fn context() -> ReadContext {
@@ -180,7 +184,7 @@ async fn entity_commit_restart_keeps_receipt_and_feed() {
     let config = SqliteConfig::new(directory.path().join("entities.db"));
     let owner = open(config.clone()).await;
     let service = owner.handle().mutation_service().unwrap();
-    assert!(owner.handle().history_service().is_none());
+    assert!(owner.handle().history_service().is_some());
     assert!(service.store().native_graph().is_none());
     let cursor = service
         .changes(
