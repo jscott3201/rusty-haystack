@@ -1,9 +1,15 @@
 //! Authorized one-point history publication and retained operation receipts.
-//! The selected authority is ephemeral; provider fixtures cannot claim disk or
-//! process-crash durability. Entity and history transaction domains stay separate.
+//! Provider fixtures cannot claim disk or process-crash durability. Optional
+//! backends retain the same scoped contract in distinct entity/history domains.
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+#[path = "history_storage.rs"]
+pub(crate) mod history_storage;
 #[cfg(feature = "postgres")]
 #[path = "history_postgres.rs"]
 mod postgres;
+#[cfg(feature = "sqlite")]
+#[path = "history_sqlite.rs"]
+mod sqlite;
 use crate::{
     BudgetKind, CancellationToken, HisItem, HisStore, HistoryService, Principal, ReadAdmission,
     ReadContext, ReadError, ReadService,
@@ -18,6 +24,8 @@ use haystack_core::{
     graph::GraphState,
     kinds::offset_at,
 };
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+use history_storage as storage;
 use parking_lot::RwLock;
 use std::{
     sync::Arc,
@@ -270,7 +278,7 @@ impl HistoryMutationInner {
         let identity = request.identity.clone();
         match self.prepare_submit(&principal, request, budget) {
             Ok(outcome) => outcome,
-            #[cfg(feature = "postgres")]
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
             Err(HistoryWriteRejection::Provider) if self.store.inner.backend.is_some() => {
                 HistoryWriteOutcome::Unknown {
                     identity,
@@ -308,11 +316,10 @@ impl HistoryMutationInner {
         binding: &HistoryBinding,
         budget: &Budget,
     ) -> Result<Option<HistoryRecord>, ReadError> {
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = &self.store.inner.backend {
             budget.check()?;
-            return postgres::lookup(backend, binding, budget.deadline)
-                .map_err(|_| ReadError::Unavailable);
+            return backend.lookup(binding, budget);
         }
         loop {
             if let Some(state) = self.store.inner.state.try_lock_for(budget.wait_quantum()?) {
@@ -430,13 +437,13 @@ impl HistoryMutationInner {
             .saturating_add(canonical.len().saturating_mul(8))
             .saturating_add(principal.bytes().saturating_mul(2))
             .saturating_add(4096);
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         let mut reservation = self
             .store
             .inner
             .backend
             .as_ref()
-            .map(|backend| backend.publication_guard(budget.deadline))
+            .map(|backend| backend.publication_guard(budget))
             .transpose()
             .map_err(|_| HistoryWriteRejection::Provider)?;
         let mut state = loop {
@@ -451,9 +458,9 @@ impl HistoryMutationInner {
         };
         if let Some(record) = state.receipts.get(&binding).cloned() {
             drop(state);
-            #[cfg(feature = "postgres")]
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
             drop(reservation.take());
-            #[cfg(feature = "postgres")]
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
             let record = if self.store.inner.backend.is_some() {
                 self.lookup(&binding, budget)
                     .map_err(|_| HistoryWriteRejection::Provider)?
@@ -490,13 +497,14 @@ impl HistoryMutationInner {
                 cause: HistoryWriteUnknown::Pending,
             }
         };
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = &self.store.inner.backend {
             drop(state);
-            match postgres::reserve(backend, &binding, &canonical, &outcome, budget.deadline) {
+            match backend.reserve(&binding, &canonical, &outcome, budget) {
                 Ok(Some(_)) => {
                     drop(reservation.take());
-                    let record = postgres::lookup(backend, &binding, budget.deadline)
+                    let record = backend
+                        .lookup(&binding, budget)
                         .map_err(|_| HistoryWriteRejection::Provider)?
                         .ok_or(HistoryWriteRejection::Provider)?;
                     return self.recognized(&policy, principal, record, &canonical);
@@ -522,7 +530,7 @@ impl HistoryMutationInner {
         );
         state.receipt_bytes += bytes;
         drop(state);
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         drop(reservation);
         let Some(plan) = plan else {
             return Ok(outcome);
@@ -823,6 +831,13 @@ pub struct PreparedHistoryMutation {
     _lease: Option<Arc<crate::service::WorkLease>>,
 }
 impl PreparedHistoryMutation {
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    fn unknown(&self) -> HistoryWriteOutcome {
+        HistoryWriteOutcome::Unknown {
+            identity: self.binding.identity.clone(),
+            cause: HistoryWriteUnknown::Provider,
+        }
+    }
     pub fn identity(&self) -> &HistoryOperationIdentity {
         &self.binding.identity
     }
@@ -854,9 +869,9 @@ impl PreparedHistoryMutation {
         }
     }
     pub fn reject(self, reason: HistoryWriteRejection) -> HistoryWriteOutcome {
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = self.store.inner.backend.clone() {
-            return self.reject_postgres(&backend, reason);
+            return backend.reject(self, reason);
         }
         let outcome = HistoryWriteOutcome::Rejected {
             identity: self.binding.identity.clone(),
@@ -875,9 +890,9 @@ impl PreparedHistoryMutation {
         outcome
     }
     pub fn publish(mut self) -> HistoryWriteOutcome {
-        #[cfg(feature = "postgres")]
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if let Some(backend) = self.store.inner.backend.clone() {
-            return self.publish_postgres(&backend);
+            return backend.publish(self);
         }
         let policy_owner = self.policy.clone();
         let store = self.store.clone();

@@ -1,3 +1,4 @@
+use super::storage::{decode_outcome, encode_outcome};
 use super::*;
 use crate::{
     HistoryStoreLimits,
@@ -8,79 +9,12 @@ use crate::{
         value,
     },
 };
-use haystack_core::{codecs::typed, kinds::Kind};
 use parking_lot::Mutex;
 use sqlx::Row;
 use std::collections::{HashMap, VecDeque};
 
-fn encode_outcome(outcome: &HistoryWriteOutcome) -> Result<Vec<u8>, PostgresError> {
-    typed::encode(&Kind::Grid(Box::new(
-        outcome_grid(outcome).map_err(|_| PostgresError::Incompatible)?,
-    )))
-    .map_err(|_| PostgresError::Limit)
-}
-fn decode_outcome(bytes: &[u8]) -> Result<HistoryWriteOutcome, PostgresError> {
-    let Kind::Grid(grid) = typed::decode(bytes).map_err(|_| PostgresError::Incompatible)? else {
-        return Err(PostgresError::Incompatible);
-    };
-    let outcome = outcome_from_grid(&grid).map_err(|_| PostgresError::Incompatible)?;
-    if encode_outcome(&outcome)? != bytes {
-        return Err(PostgresError::Incompatible);
-    };
-    Ok(outcome)
-}
-impl HistoryBinding {
-    fn storage_key(&self) -> Result<Vec<u8>, PostgresError> {
-        let (kind, subject) = match &self.principal {
-            PrincipalKey::Anonymous => ("anonymous", ""),
-            PrincipalKey::Authenticated(s) => ("authenticated", s.as_str()),
-            PrincipalKey::Embedding(s) => ("embedding", s.as_str()),
-        };
-        typed::encode(&Kind::List(vec![
-            Kind::Str(kind.into()),
-            Kind::Str(subject.into()),
-            Kind::Grid(Box::new(
-                lookup_grid(&self.identity).map_err(|_| PostgresError::Incompatible)?,
-            )),
-        ]))
-        .map_err(|_| PostgresError::Limit)
-    }
-    fn from_storage_key(bytes: &[u8]) -> Result<Self, PostgresError> {
-        let Kind::List(parts) = typed::decode(bytes).map_err(|_| PostgresError::Incompatible)?
-        else {
-            return Err(PostgresError::Incompatible);
-        };
-        let [Kind::Str(kind), Kind::Str(subject), Kind::Grid(grid)] = parts.as_slice() else {
-            return Err(PostgresError::Incompatible);
-        };
-        let principal = match kind.as_str() {
-            "anonymous" if subject.is_empty() => PrincipalKey::Anonymous,
-            "authenticated" => PrincipalKey::Authenticated(subject.clone()),
-            "embedding" => PrincipalKey::Embedding(subject.clone()),
-            _ => return Err(PostgresError::Incompatible),
-        };
-        let result = Self {
-            principal,
-            identity: lookup_from_grid(grid).map_err(|_| PostgresError::Incompatible)?,
-        };
-        if result.storage_key()? != bytes {
-            return Err(PostgresError::Incompatible);
-        };
-        Ok(result)
-    }
-}
 fn record(stored: StoredReceipt, binding: &HistoryBinding) -> Result<HistoryRecord, PostgresError> {
-    let request =
-        decode_canonical_request(&stored.request).map_err(|_| PostgresError::Incompatible)?;
-    let outcome = decode_outcome(&stored.outcome)?;
-    if request.identity != binding.identity || outcome.identity() != &binding.identity {
-        return Err(PostgresError::Incompatible);
-    };
-    Ok(HistoryRecord {
-        canonical: stored.request.into(),
-        request: Arc::new(request),
-        outcome,
-    })
+    storage::record(stored.request, stored.outcome, binding).map_err(Into::into)
 }
 pub(super) fn lookup(
     backend: &Backend,
@@ -186,7 +120,7 @@ impl HisStore {
                 .map(|bytes| {
                     String::from_utf8(bytes)
                         .map_err(|_| PostgresError::Incompatible)
-                        .and_then(|s| history_value::parse_timestamp(&s))
+                        .and_then(|s| history_value::parse_timestamp(&s).map_err(Into::into))
                 })
                 .transpose()?;
             let series = Series {
@@ -323,7 +257,7 @@ impl HisStore {
         Ok(Self {
             inner: Arc::new(HistoryStoreInner {
                 authority,
-                backend: Some(backend),
+                backend: Some(storage::Backend::Postgres(backend)),
                 limits,
                 state: Mutex::new(AuthorityState {
                     points,
@@ -338,12 +272,6 @@ impl HisStore {
 }
 
 impl PreparedHistoryMutation {
-    fn unknown(&self) -> HistoryWriteOutcome {
-        HistoryWriteOutcome::Unknown {
-            identity: self.binding.identity.clone(),
-            cause: HistoryWriteUnknown::Provider,
-        }
-    }
     pub(super) fn reject_postgres(
         self,
         backend: &Backend,

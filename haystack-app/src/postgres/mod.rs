@@ -1,7 +1,7 @@
 //! Optional bounded PostgreSQL authority for the shared application services.
 pub mod admin;
 mod config;
-pub(crate) mod history_value;
+pub(crate) use crate::history_storage_value as history_value;
 mod recovery;
 mod refresh;
 pub(crate) mod storage;

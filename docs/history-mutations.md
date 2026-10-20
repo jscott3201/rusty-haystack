@@ -207,3 +207,14 @@ scoped receipt wrappers are not introduced by this slice.
 The optional [PostgreSQL application profile](postgres-durability.md) persists the
 same authorized history mutations, original intent bindings and change sequence.
 Its ordinary history reads remain explicitly bounded live reads.
+
+The optional [SQLite application profile](sqlite-durability.md) selects the same
+one-point timestamp-upsert contract with `sqliteDurable` receipts. Format 2
+retains a history authority, point incarnations/generations, samples, retention
+watermarks, bounded change records and principal-bound original intent in one
+local file. Native COMMIT and in-memory publication share the entity writer gate,
+while entity revisions/feeds and history generations/sequences remain separate.
+History reads remain `BOUNDED_LIVE`; no SQL transaction spans consumer pulls.
+Legacy entity-only format 1 is rejected unchanged rather than automatically
+migrated. CLI/Python SQLite selections and cross-backend migration are outside
+this profile.

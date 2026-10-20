@@ -9,8 +9,15 @@ pub struct SqliteLimits {
     /// Fresh rollback, receipt proof, publication and close cleanup allowance.
     pub cleanup_timeout: Duration,
     pub recovery: haystack_core::graph::RecoveryLimits,
+    /// Persistent receipt limits apply independently to entity and history domains.
     pub max_receipts: usize,
     pub max_receipt_bytes: usize,
+    /// Global sample count, in addition to the history store's per-point retention.
+    pub max_history_samples: usize,
+    /// Encoded history points, samples and changes; receipts have their own cap.
+    pub max_history_bytes: usize,
+    /// Bounded recovery/serialization work across history data and receipts.
+    pub max_history_work: usize,
 }
 impl Default for SqliteLimits {
     fn default() -> Self {
@@ -20,6 +27,9 @@ impl Default for SqliteLimits {
             recovery: Default::default(),
             max_receipts: 1024,
             max_receipt_bytes: 64 * 1024 * 1024,
+            max_history_samples: 100_000,
+            max_history_bytes: 64 * 1024 * 1024,
+            max_history_work: 64_000_000,
         }
     }
 }
@@ -33,6 +43,8 @@ pub struct SqliteConfig {
     pub limits: SqliteLimits,
     #[cfg(test)]
     pub(crate) recovery_end: Option<std::sync::Arc<super::qualification::Gate>>,
+    #[cfg(test)]
+    pub(crate) history_recovery_start: Option<std::sync::Arc<super::qualification::Gate>>,
 }
 impl SqliteConfig {
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -41,6 +53,8 @@ impl SqliteConfig {
             limits: SqliteLimits::default(),
             #[cfg(test)]
             recovery_end: None,
+            #[cfg(test)]
+            history_recovery_start: None,
         }
     }
     pub(crate) fn validate(&self) -> Result<(), SqliteError> {
@@ -62,6 +76,12 @@ impl SqliteConfig {
             || self.limits.max_receipts > 100_000
             || self.limits.max_receipt_bytes == 0
             || self.limits.max_receipt_bytes > 256 * 1024 * 1024
+            || self.limits.max_history_samples == 0
+            || self.limits.max_history_samples > 1_000_000
+            || self.limits.max_history_bytes == 0
+            || self.limits.max_history_bytes > 256 * 1024 * 1024
+            || self.limits.max_history_work == 0
+            || self.limits.max_history_work > 256_000_000
         {
             return Err(SqliteError::Configuration);
         }
