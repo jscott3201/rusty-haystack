@@ -602,13 +602,14 @@ pub fn result_grid(result: &HistoryReadResult) -> Result<HGrid, TypedPayloadErro
         rows,
     ))
 }
-pub fn result_from_grid(grid: &HGrid) -> Result<HistoryReadResult, TypedPayloadError> {
+/// Decode the two-line grid envelope independently of sample collection.
+/// Its terminal/count declarations remain provisional until validated EOF.
+pub fn result_header_from_grid(grid: &HGrid) -> Result<HistoryReadHeader, TypedPayloadError> {
     fields(&grid.meta, &[CONTROL, "id", "hisStart", "hisEnd"])?;
     if grid.cols.len() != 2
         || grid.cols[0].name != "ts"
         || grid.cols[1].name != "val"
         || grid.cols.iter().any(|col| !col.meta.is_empty())
-        || grid.rows.len() > MAX_ROWS
     {
         return Err(invalid());
     }
@@ -620,7 +621,6 @@ pub fn result_from_grid(grid: &HGrid) -> Result<HistoryReadResult, TypedPayloadE
         || control.get("atomicMetadata") != Some(&Kind::Bool(false))
         || control.get("nativeValues") != Some(&Kind::Bool(false))
         || string(&control, "completeBasis")? != "retainedRecords"
-        || number(&control, "returnedCount")? != grid.rows.len() as u64
     {
         return Err(invalid());
     }
@@ -678,6 +678,21 @@ pub fn result_from_grid(grid: &HGrid) -> Result<HistoryReadResult, TypedPayloadE
             evicted_through: optional_date(&control, "evictedThrough")?,
         },
     };
+    let header = HistoryReadHeader {
+        metadata,
+        terminal: parse_terminal(&control)?,
+        returned_count: number(&control, "returnedCount")?,
+    };
+    HistoryReadValidator::new(header.clone())?;
+    Ok(header)
+}
+
+pub fn result_from_grid(grid: &HGrid) -> Result<HistoryReadResult, TypedPayloadError> {
+    let header = result_header_from_grid(grid)?;
+    if header.returned_count != grid.rows.len() as u64 {
+        return Err(invalid());
+    }
+    let metadata = header.metadata;
     // Source-sized, bounded admission before cloning any untrusted row values.
     let mut budget = crate::graph::size::ValueBudget::new(MAX_ROWS * 8, MAX_GRID_BYTES, 8);
     let mut source_bytes = 0u64;
@@ -709,7 +724,7 @@ pub fn result_from_grid(grid: &HGrid) -> Result<HistoryReadResult, TypedPayloadE
     let result = HistoryReadResult {
         metadata,
         samples,
-        terminal: parse_terminal(&control)?,
+        terminal: header.terminal,
     };
     validate_result(&result)?;
     Ok(result)
@@ -757,115 +772,182 @@ fn validate_time(time: &HDateTime, zone: &str) -> Result<(), TypedPayloadError> 
     }
     Ok(())
 }
-pub fn validate_result(result: &HistoryReadResult) -> Result<(), TypedPayloadError> {
-    let m = &result.metadata;
-    let c = &m.coverage;
-    let zone = &m.schema.timezone;
-    let bounds = m.bounds;
-    if bounds.batch_rows == 0
-        || bounds.batch_rows > bounds.total_rows
-        || bounds.total_rows > MAX_ROWS as u64
-        || bounds.batch_bytes == 0
-        || bounds.batch_bytes > bounds.total_bytes
-        || bounds.total_bytes > MAX_GRID_BYTES as u64
-        || bounds.total_work == 0
-        || bounds.total_work > 256 * 1024 * 1024
-        || bounds.response_bytes == 0
-        || bounds.response_bytes > MAX_GRID_BYTES as u64
-        || result.samples.len() as u64 > bounds.total_rows
-    {
-        return Err(invalid());
+/// Unverified remote envelope. Only `HistoryReadValidator::finish` can confirm
+/// the declared terminal after all rows and the transport EOF have been seen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryReadHeader {
+    pub metadata: HistoryMetadata,
+    pub terminal: HistoryTerminal,
+    pub returned_count: u64,
+}
+impl HistoryReadHeader {
+    pub fn validate_for_request(
+        &self,
+        request: &HistoryReadRequest,
+    ) -> Result<(), TypedPayloadError> {
+        if self.metadata.id != request.id || self.metadata.requested_range != request.range {
+            return Err(invalid());
+        }
+        validate_range(&self.metadata)
     }
-    if m.id.is_empty()
-        || m.id.len() > 256
-        || m.requested_range.is_empty()
-        || m.requested_range.len() > 1024
-        || zone.len() > 128
-        || zone == "Rel"
-        || zone.contains('/')
-        || crate::kinds::tz_for(zone).is_none()
-        || m.start.dt > m.end.dt
-        || m.capabilities != HistoryCapabilities::BOUNDED_LIVE
-        || !valid_terminal(result.terminal)
-        || result.samples.len() > MAX_ROWS
-        || result.samples.len() as u64 > c.retained_count
-        || (c.retained_count == 0) != (c.retained_start.is_none() && c.retained_end.is_none())
-        || c.retained_start.is_some() != c.retained_end.is_some()
-    {
-        return Err(invalid());
-    }
-    if (m.schema.kind == HistoryKind::Number && m.schema.unit.is_none())
-        || m.schema.unit.as_ref().is_some_and(|unit| {
-            unit.len() > 128 || m.schema.kind != HistoryKind::Number || unit_for(unit).is_none()
-        })
-    {
-        return Err(invalid());
-    }
-    for time in [&m.start, &m.end, &m.evaluated_at]
-        .into_iter()
-        .chain(c.retained_start.iter())
-        .chain(c.retained_end.iter())
-        .chain(c.evicted_through.iter())
-    {
-        validate_time(time, zone)?;
-    }
-    if let (Some(start), Some(end)) = (&c.retained_start, &c.retained_end) {
-        if start.dt > end.dt
-            || (c.retained_count == 1 && start.dt != end.dt)
-            || c.evicted_through
-                .as_ref()
-                .is_some_and(|through| through.dt >= start.dt)
+}
+/// Constant-space semantic validator shared by collected and incremental reads.
+/// Feeding a sample does not retain it; callers own their batch storage.
+pub struct HistoryReadValidator {
+    header: HistoryReadHeader,
+    rows: u64,
+    source_bytes: u64,
+    first: Option<HDateTime>,
+    last: Option<HDateTime>,
+}
+impl HistoryReadValidator {
+    pub fn new(header: HistoryReadHeader) -> Result<Self, TypedPayloadError> {
+        let m = &header.metadata;
+        let c = &m.coverage;
+        let zone = &m.schema.timezone;
+        let bounds = m.bounds;
+        if bounds.batch_rows == 0
+            || bounds.batch_rows > bounds.total_rows
+            || bounds.total_rows > MAX_ROWS as u64
+            || bounds.batch_bytes == 0
+            || bounds.batch_bytes > bounds.total_bytes
+            || bounds.total_bytes > MAX_GRID_BYTES as u64
+            || bounds.total_work == 0
+            || bounds.total_work > 256 * 1024 * 1024
+            || bounds.response_bytes == 0
+            || bounds.response_bytes > MAX_GRID_BYTES as u64
+            || header.returned_count > bounds.total_rows
         {
             return Err(invalid());
         }
-        if result.terminal == HistoryTerminal::Complete {
-            let includes_first = m.start.dt <= start.dt && start.dt < m.end.dt;
-            let includes_last = m.start.dt <= end.dt && end.dt < m.end.dt;
-            if (includes_first
-                && result.samples.first().map(|sample| sample.ts.dt) != Some(start.dt))
-                || (includes_last
-                    && result.samples.last().map(|sample| sample.ts.dt) != Some(end.dt))
-                || (includes_first
-                    && includes_last
-                    && result.samples.len() as u64 != c.retained_count)
-            {
-                return Err(invalid());
-            }
+        if m.id.is_empty()
+            || m.id.len() > 256
+            || m.requested_range.is_empty()
+            || m.requested_range.len() > 1024
+            || zone.len() > 128
+            || zone == "Rel"
+            || zone.contains('/')
+            || crate::kinds::tz_for(zone).is_none()
+            || m.start.dt > m.end.dt
+            || m.capabilities != HistoryCapabilities::BOUNDED_LIVE
+            || !valid_terminal(header.terminal)
+            || header.returned_count > MAX_ROWS as u64
+            || header.returned_count > c.retained_count
+            || (c.retained_count == 0) != (c.retained_start.is_none() && c.retained_end.is_none())
+            || c.retained_start.is_some() != c.retained_end.is_some()
+        {
+            return Err(invalid());
+        }
+        if (m.schema.kind == HistoryKind::Number && m.schema.unit.is_none())
+            || m.schema.unit.as_ref().is_some_and(|unit| {
+                unit.len() > 128 || m.schema.kind != HistoryKind::Number || unit_for(unit).is_none()
+            })
+        {
+            return Err(invalid());
+        }
+        for time in [&m.start, &m.end, &m.evaluated_at]
+            .into_iter()
+            .chain(c.retained_start.iter())
+            .chain(c.retained_end.iter())
+            .chain(c.evicted_through.iter())
+        {
+            validate_time(time, zone)?;
+        }
+        if let (Some(start), Some(end)) = (&c.retained_start, &c.retained_end)
+            && (start.dt > end.dt
+                || (c.retained_count == 1 && start.dt != end.dt)
+                || c.evicted_through
+                    .as_ref()
+                    .is_some_and(|through| through.dt >= start.dt))
+        {
+            return Err(invalid());
+        }
+
+        Ok(Self {
+            header,
+            rows: 0,
+            source_bytes: 0,
+            first: None,
+            last: None,
+        })
+    }
+    pub fn header(&self) -> &HistoryReadHeader {
+        &self.header
+    }
+    /// Conservative source accounting, independent of encoded text size.
+    pub fn sample_bytes(sample: &HistorySample) -> u64 {
+        512 + match &sample.val {
+            Kind::Str(value) => value.len() as u64,
+            Kind::Number(value) => value.unit.as_ref().map_or(0, |unit| unit.len() as u64),
+            _ => 0,
         }
     }
-    let mut budget = crate::graph::size::ValueBudget::new(MAX_ROWS * 8, MAX_GRID_BYTES, 8);
-    let mut previous = None;
-    let mut admitted_bytes = 0u64;
-    for sample in &result.samples {
-        validate_time(&sample.ts, zone)?;
+    pub fn accept(&mut self, sample: &HistorySample) -> Result<(), TypedPayloadError> {
+        let m = &self.header.metadata;
+        let c = &m.coverage;
+        validate_time(&sample.ts, &m.schema.timezone)?;
         if sample.ts.dt < m.start.dt
             || sample.ts.dt >= m.end.dt
-            || previous.is_some_and(|previous| sample.ts.dt <= previous)
+            || self
+                .last
+                .as_ref()
+                .is_some_and(|previous| sample.ts.dt <= previous.dt)
             || c.retained_start
                 .as_ref()
                 .is_none_or(|start| sample.ts.dt < start.dt)
             || c.retained_end
                 .as_ref()
                 .is_none_or(|end| sample.ts.dt > end.dt)
+            || !valid_value(&sample.val, &m.schema)
+            || self.rows >= self.header.returned_count
         {
             return Err(invalid());
         }
-        previous = Some(sample.ts.dt);
-        budget.value(&sample.val, 0).map_err(|_| invalid())?;
-        if !valid_value(&sample.val, &m.schema) {
+        let bytes = self.source_bytes.saturating_add(Self::sample_bytes(sample));
+        if bytes > m.bounds.total_bytes || bytes > m.bounds.total_work {
             return Err(invalid());
         }
-        admitted_bytes = admitted_bytes.saturating_add(
-            512 + match &sample.val {
-                Kind::Str(value) => value.len() as u64,
-                Kind::Number(value) => value.unit.as_ref().map_or(0, |unit| unit.len() as u64),
-                _ => 0,
-            },
-        );
-        if admitted_bytes > bounds.total_bytes || admitted_bytes > bounds.total_work {
-            return Err(invalid());
+        if self.first.is_none() {
+            self.first = Some(sample.ts.clone());
         }
+        self.last = Some(sample.ts.clone());
+        self.source_bytes = bytes;
+        self.rows += 1;
+        Ok(())
     }
+    /// Call only at validated transport EOF. A header's Complete claim alone is
+    /// insufficient, including when no sample rows have been delivered yet.
+    pub fn finish(&self) -> Result<HistoryTerminal, TypedPayloadError> {
+        if self.rows != self.header.returned_count {
+            return Err(invalid());
+        }
+        let m = &self.header.metadata;
+        let c = &m.coverage;
+        if let (Some(start), Some(end)) = (&c.retained_start, &c.retained_end)
+            && self.header.terminal == HistoryTerminal::Complete
+        {
+            let includes_first = m.start.dt <= start.dt && start.dt < m.end.dt;
+            let includes_last = m.start.dt <= end.dt && end.dt < m.end.dt;
+            if (includes_first && self.first.as_ref().map(|time| time.dt) != Some(start.dt))
+                || (includes_last && self.last.as_ref().map(|time| time.dt) != Some(end.dt))
+                || (includes_first && includes_last && self.rows != c.retained_count)
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(self.header.terminal)
+    }
+}
+pub fn validate_result(result: &HistoryReadResult) -> Result<(), TypedPayloadError> {
+    let mut validator = HistoryReadValidator::new(HistoryReadHeader {
+        metadata: result.metadata.clone(),
+        terminal: result.terminal,
+        returned_count: result.samples.len() as u64,
+    })?;
+    for sample in &result.samples {
+        validator.accept(sample)?;
+    }
+    validator.finish()?;
     Ok(())
 }
 /// Bind a response to this exact requested point/range. Never infer success or
@@ -878,11 +960,10 @@ pub fn validate_for_request(
     if result.metadata.id != request.id || result.metadata.requested_range != request.range {
         return Err(invalid());
     }
-    validate_range(result)
+    validate_range(&result.metadata)
 }
-fn validate_range(result: &HistoryReadResult) -> Result<(), TypedPayloadError> {
+fn validate_range(m: &HistoryMetadata) -> Result<(), TypedPayloadError> {
     use chrono::{NaiveDate, NaiveTime};
-    let m = &result.metadata;
     let boundary =
         |source: &str, actual: &HDateTime, inclusive_date: bool| -> Result<(), TypedPayloadError> {
             if let Ok(date) = NaiveDate::parse_from_str(source.trim(), "%Y-%m-%d") {

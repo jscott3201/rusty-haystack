@@ -425,3 +425,101 @@ fn second_review_every_read_timestamp_is_checked_before_projection() {
         assert!(result_grid(&value).is_err(), "{field}");
     }
 }
+
+#[test]
+fn incremental_header_preserves_observations_and_requires_count_and_coverage_at_finish() {
+    let expected = result();
+    let grid = result_grid(&expected).unwrap();
+    let header = result_header_from_grid(&grid).unwrap();
+    assert_eq!(header.metadata, expected.metadata);
+    assert_eq!(header.returned_count, 3);
+    header.validate_for_request(&request()).unwrap();
+    let mut validator = HistoryReadValidator::new(header.clone()).unwrap();
+    assert!(
+        validator.finish().is_err(),
+        "header Complete is provisional"
+    );
+    for sample in &expected.samples {
+        validator.accept(sample).unwrap();
+    }
+    assert_eq!(validator.finish().unwrap(), HistoryTerminal::Complete);
+    assert!(
+        validator.accept(&expected.samples[2]).is_err(),
+        "no surplus rows"
+    );
+    let mut missing_middle = header;
+    missing_middle.returned_count = 2;
+    let mut validator = HistoryReadValidator::new(missing_middle).unwrap();
+    validator.accept(&expected.samples[0]).unwrap();
+    validator.accept(&expected.samples[2]).unwrap();
+    assert!(
+        validator.finish().is_err(),
+        "matching returned count cannot replace retained coverage"
+    );
+}
+
+#[test]
+fn incremental_and_collected_validation_reject_the_same_semantic_corruptions() {
+    let expected = result();
+    let header = result_header_from_grid(&result_grid(&expected).unwrap()).unwrap();
+    for case in 0..8 {
+        let mut changed = expected.clone();
+        match case {
+            0 => changed.samples[1].ts = changed.samples[0].ts.clone(),
+            1 => changed.samples[1].val = Kind::Null,
+            2 => changed.samples[1].val = Kind::Number(Number::new(f64::NAN, Some("°C".into()))),
+            3 => changed.samples[1].val = Kind::Number(Number::new(1.0, Some("°F".into()))),
+            4 => changed.samples[1].ts = changed.metadata.end.clone(),
+            5 => changed.samples[1].ts.tz_name = "GMT".into(),
+            6 => {
+                changed.samples[1].val =
+                    Kind::Number(Number::unitless(f64::from_bits(0x7ff8000000000001)))
+            }
+            7 => changed.samples[1].val = Kind::Str("NA".into()),
+            _ => unreachable!(),
+        }
+        assert!(validate_result(&changed).is_err(), "collected case {case}");
+        let mut validator = HistoryReadValidator::new(header.clone()).unwrap();
+        assert!(
+            changed
+                .samples
+                .iter()
+                .try_for_each(|s| validator.accept(s))
+                .is_err(),
+            "incremental case {case}"
+        );
+    }
+    for terminal in [
+        HistoryTerminal::Limited(HistoryReason::Bytes),
+        HistoryTerminal::Interrupted(HistoryReason::PolicyChanged),
+        HistoryTerminal::Failed(HistoryReason::Provider),
+    ] {
+        let mut header = header.clone();
+        header.returned_count = 1;
+        header.terminal = terminal;
+        let mut validator = HistoryReadValidator::new(header).unwrap();
+        validator.accept(&expected.samples[0]).unwrap();
+        assert_eq!(validator.finish().unwrap(), terminal);
+    }
+}
+
+#[test]
+fn incremental_header_enforces_schema_and_cumulative_source_bounds() {
+    let expected = result();
+    let header = result_header_from_grid(&result_grid(&expected).unwrap()).unwrap();
+    let mut unknown = header.clone();
+    unknown.metadata.schema.unit = None;
+    assert!(HistoryReadValidator::new(unknown).is_err());
+    let mut bounded = header.clone();
+    bounded.metadata.bounds.total_bytes = 600;
+    bounded.metadata.bounds.batch_bytes = 600;
+    let mut validator = HistoryReadValidator::new(bounded).unwrap();
+    validator.accept(&expected.samples[0]).unwrap();
+    assert!(validator.accept(&expected.samples[1]).is_err());
+    let mut foreign = request();
+    foreign.id = "other".into();
+    assert!(header.validate_for_request(&foreign).is_err());
+    foreign = request();
+    foreign.range = "2024-06-02".into();
+    assert!(header.validate_for_request(&foreign).is_err());
+}

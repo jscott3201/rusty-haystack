@@ -13,6 +13,7 @@ This README describes the **0.9.0 source on `dev`**. Build this checkout to use 
 - **Embed a bounded application.** Share authorization, catalog observations, paging, cancellation and resource limits across Rust reads and scoped HTTP adapters. Select entity mutations, history reads/writes, state subscriptions and local point-write simulation when your application needs them.
 - **Use typed contracts and generated clients.** Admitted Xeto signatures drive argument defaults, fitting, discovery and encoding. Scoped applications export OpenAPI 3.1 and JSON Schema 2020-12; an independent generated-client fixture exercises the selected contract over real HTTP.
 - **Choose storage and access profiles.** Use process-memory services or explicitly select PostgreSQL durability or a local SQLite entity and history authority. Python offers semantic values, graph APIs, an async HTTP client and a controlled embedded application. MCP exposes two authorized read tools over stdio or protected local HTTP.
+- **Consume remote history incrementally in Rust.** The Zinc `his_read_stream` session preserves remote observations, delivers bounded batches and validates completion at EOF. [History client contract](docs/history-reads.md#incremental-rust-http-consumption).
 
 ![An admitted catalog supplies the executable registry. Scoped application requests share policy, budgets and lifecycle ownership across Rust and HTTP adapters and schema export; optional service owners are selected by the application.](docs/images/admitted-api.svg)
 
