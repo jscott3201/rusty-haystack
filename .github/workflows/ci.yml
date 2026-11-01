@@ -211,7 +211,7 @@ jobs:
       # the extension is built against does not drift. pyo3 is configured
       # without abi3, making every build interpreter-specific.
       - run: uv venv --python 3.12
-      - run: uv pip install maturin==1.15.0 pytest
+      - run: uv pip install maturin==1.16.0 pytest
       # The Clippy job above excludes this crate because `cargo clippy --locked --workspace`
       # needs an interpreter to resolve the pyo3 build script. This job has one, so
       # the exclusion is about where the lint runs, not whether it runs.

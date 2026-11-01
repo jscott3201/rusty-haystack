@@ -18,8 +18,9 @@ Workspace dependency versions live in the root manifest; members declare their o
 additional features. `Cargo.lock` records the tested resolution. Change that file
 intentionally with `cargo update`, then run the locked gate below.
 
-The refresh keeps the existing dependency families, including PyO3 0.29.3, reqwest
-0.13.5 and Tokio 1.54.1. The direct rustls requirement is at least 0.23.45 to address
+The refresh keeps the existing dependency families, including reqwest 0.13.5 and
+Tokio 1.54.1; PyO3 later moved to 0.30.1 (with pyo3-async-runtimes 0.30.0) and roaring
+to 0.12.0. The direct rustls requirement is at least 0.23.45 to address
 [GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc);
 its existing `ring`, `std` and `tls12` features are preserved. Older compatible
 transitive families, including base64 0.22 and tungstenite 0.29, remain where their
@@ -34,12 +35,13 @@ policy is unchanged and does not apply to dependency internals. flate2 1.1.10 ad
 default runtime detection while retaining the miniz_oxide Rust backend. Its optional
 zlib-rs dependency appears in the lockfile but is not enabled in the workspace build.
 
-The refreshed dependency graph's highest declared Rust requirement is 1.90, below
-the workspace floor; some dependencies do not declare an MSRV. License policy is
-unchanged: the newly resolved optional zlib-rs package uses the already allowed Zlib
-license, and two existing dependencies only normalize their MIT/Apache SPDX spelling.
-Python's declared support range and the release interpreter matrix are unchanged;
-the existing build lanes now pin Rust 1.99.1 and Maturin 1.15.0.
+The refreshed dependency graph's highest declared Rust requirement is 1.90 (roaring
+0.12.0), below the workspace floor; some dependencies do not declare an MSRV. License
+policy is unchanged: the newly resolved optional zlib-rs package uses the already
+allowed Zlib license, two existing dependencies only normalize their MIT/Apache SPDX
+spelling, and roaring 0.12's new fearless_simd and libm dependencies are MIT/Apache-2.0
+and MIT. Python's declared support range and the release interpreter matrix are
+unchanged; the existing build lanes now pin Rust 1.99.1 and Maturin 1.16.0.
 
 ## Build and test
 
@@ -159,7 +161,7 @@ locally, drop the exclusion and use it.
 
 ```bash
 uv venv --python 3.12
-uv pip install maturin==1.15.0 pytest
+uv pip install maturin==1.16.0 pytest
 source .venv/bin/activate
 maturin develop --locked --release -m rusty-haystack/Cargo.toml
 pytest rusty-haystack/tests -q

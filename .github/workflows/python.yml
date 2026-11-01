@@ -93,7 +93,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          python -m pip install maturin==1.15.0
+          python -m pip install maturin==1.16.0
           mkdir -p target
           python scripts/release/artifacts.py tools --repo "$GITHUB_WORKSPACE" --target "$TARGET" --python "$(command -v python)" --maturin maturin --output target/builder.json --environment-file target/builder.env
           cat target/builder.env >> "$GITHUB_ENV"
@@ -102,7 +102,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           rust-toolchain: "1.99.1"
-          maturin-version: "v1.15.0"
+          maturin-version: "v1.16.0"
           target: ${{ matrix.target }}
           container: ${{ steps.container.outputs.image }}
           args: --locked --release --out target/release-candidate/files -m rusty-haystack/Cargo.toml -i ${{ matrix.python.version }}
@@ -153,7 +153,7 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
-      - run: python -m pip install maturin==1.15.0
+      - run: python -m pip install maturin==1.16.0
       - run: cargo fetch --locked
       - name: Build and validate source lock transformation
         env:
