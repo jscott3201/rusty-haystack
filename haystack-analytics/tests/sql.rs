@@ -13,8 +13,9 @@ use arrow::{
 use haystack_analytics::{
     Error, Export, ExportOptions, Limits, MANIFEST_NAME,
     sql::{
-        MAX_OUTPUT_ROWS, MAX_SNAPSHOTS, MAX_SQL_BYTES, QUERY_TIMEOUT, QueryOptions, QueryOutput,
-        SNAPSHOTS_TABLE, SqlEngine,
+        CANCEL_GRACE, MAX_OUTPUT_ROWS, MAX_SNAPSHOTS, MAX_SQL_BYTES, MAX_SQL_CTES, MAX_SQL_JOINS,
+        MAX_SQL_RELATIONS, MAX_SQL_SET_OPERATIONS, MAX_SQL_TOKENS, QUERY_MEMORY_BYTES,
+        QUERY_TIMEOUT, QueryOptions, QueryOutput, SNAPSHOTS_TABLE, SQL_RECURSION_LIMIT, SqlEngine,
     },
 };
 use haystack_client::history::{HistoryStreamLimits, HistoryStreamOptions};
@@ -912,10 +913,7 @@ async fn cancellation_deadline_capacity_and_options_release_admission() {
         cancel.cancel();
     });
     let started = std::time::Instant::now();
-    let options = QueryOptions {
-        cancellation: token,
-        ..Default::default()
-    };
+    let options = QueryOptions::new().with_cancellation(token);
     assert_eq!(
         engine.query(SLOW, options).await.unwrap_err(),
         Error::Cancelled
@@ -923,10 +921,7 @@ async fn cancellation_deadline_capacity_and_options_release_admission() {
     assert!(started.elapsed() < Duration::from_secs(3));
 
     let started = std::time::Instant::now();
-    let options = QueryOptions {
-        timeout: Duration::from_millis(200),
-        ..Default::default()
-    };
+    let options = QueryOptions::new().with_timeout(Duration::from_millis(200));
     assert_eq!(
         engine.query(SLOW, options).await.unwrap_err(),
         Error::Deadline
@@ -936,18 +931,12 @@ async fn cancellation_deadline_capacity_and_options_release_admission() {
     // An already-cancelled token and a looser timeout never run.
     let token = CancellationToken::new();
     token.cancel();
-    let options = QueryOptions {
-        cancellation: token,
-        ..Default::default()
-    };
+    let options = QueryOptions::new().with_cancellation(token);
     assert_eq!(
         engine.query("SELECT 1", options).await.unwrap_err(),
         Error::Cancelled
     );
-    let options = QueryOptions {
-        timeout: QUERY_TIMEOUT + Duration::from_millis(1),
-        ..Default::default()
-    };
+    let options = QueryOptions::new().with_timeout(QUERY_TIMEOUT + Duration::from_millis(1));
     assert_eq!(
         engine.query("SELECT 1", options).await.unwrap_err(),
         Error::Options
@@ -959,10 +948,7 @@ async fn cancellation_deadline_capacity_and_options_release_admission() {
     let mut running = vec![];
     for _ in 0..2 {
         let engine = engine.clone();
-        let options = QueryOptions {
-            cancellation: token.clone(),
-            ..Default::default()
-        };
+        let options = QueryOptions::new().with_cancellation(token.clone());
         running.push(tokio::spawn(
             async move { engine.query(SLOW, options).await },
         ));
@@ -1015,7 +1001,19 @@ async fn memory_and_output_caps_are_limit_errors() {
     assert_eq!(
         engine
             .query(
-                &format!("SELECT {wide} || CAST(utc_seconds AS VARCHAR) AS w FROM big"),
+                &format!("SELECT {wide} AS w, utc_seconds FROM big"),
+                query_options()
+            )
+            .await
+            .unwrap_err(),
+        Error::Limit
+    );
+    // Join output rows over MAX_JOIN_ROWS (rows² on the constant point id),
+    // although the pool, the output and every batch are small.
+    assert_eq!(
+        engine
+            .query(
+                "SELECT count(*) AS n FROM big a JOIN big b ON a.point_id = b.point_id",
                 query_options()
             )
             .await
@@ -1104,17 +1102,33 @@ async fn side_effects_files_and_oversize_or_deep_sql_are_rejected() {
             .unwrap_err(),
         Error::Limit
     );
-    // Deep nesting is a rejected statement, not a stack overflow.
+    // Nesting within the token cap but past the parser's recursion limit is
+    // rejected by the parser; long chains are covered by
+    // `long_chains_are_limits_before_planning_and_never_overflow`.
+    let depth = SQL_RECURSION_LIMIT + 10;
+    let deep = format!("SELECT {}1{}", "(".repeat(depth), ")".repeat(depth));
+    assert!(tokens(&deep) <= MAX_SQL_TOKENS);
+    assert_eq!(
+        engine.query(&deep, query_options()).await.unwrap_err(),
+        Error::Sql
+    );
+    // Past the token cap, nothing is parsed.
     let depth = 5_000;
     let deep = format!("SELECT {}1{}", "(".repeat(depth), ")".repeat(depth));
     assert!(deep.len() <= MAX_SQL_BYTES);
     assert_eq!(
         engine.query(&deep, query_options()).await.unwrap_err(),
-        Error::Sql
+        Error::Limit
     );
-    let deep = format!("SELECT {}1", "-".repeat(MAX_SQL_BYTES - 10));
+    let deep = format!("SELECT {}1", "- ".repeat((MAX_SQL_BYTES - 10) / 2));
     assert_eq!(
         engine.query(&deep, query_options()).await.unwrap_err(),
+        Error::Limit
+    );
+    // `--` starts a comment: one token, rejected as SQL rather than counted.
+    let comment = format!("SELECT {}1", "-".repeat(MAX_SQL_BYTES - 10));
+    assert_eq!(
+        engine.query(&comment, query_options()).await.unwrap_err(),
         Error::Sql
     );
     assert!(
@@ -1304,4 +1318,415 @@ async fn table_names_are_validated_unique_and_bounded() {
     )
     .await;
     assert_eq!(i64s(&out, "n"), [Some(1), Some(1)]);
+}
+
+/// Non-whitespace tokens, counted with the tokenizer DataFusion parses with.
+fn tokens(sql: &str) -> usize {
+    use datafusion::sql::sqlparser::{
+        dialect::GenericDialect,
+        tokenizer::{Token, Tokenizer},
+    };
+    Tokenizer::new(&GenericDialect {}, sql)
+        .tokenize()
+        .unwrap()
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .count()
+}
+fn joined(items: impl Iterator<Item = String>, separator: &str) -> String {
+    items.collect::<Vec<_>>().join(separator)
+}
+type Shape = Box<dyn Fn(usize) -> String>;
+
+/// A four-row Number snapshot `t` of point `t`.
+async fn small(dir: &Path) -> SqlEngine {
+    let value = point(
+        "t",
+        HistoryKind::Number,
+        Some("°F"),
+        (0..4).map(|i| number(i as f64)).collect(),
+    );
+    capture(&value, &dir.join("t"), 2).await;
+    engine(&[("t", &dir.join("t"))]).await
+}
+
+/// Left-deep chains are built by the parser without recursion, so its
+/// recursion limit never sees them, and every later pass recurses once per
+/// term. At the token cap each shape plans and runs (or is rejected for what
+/// it is) on the engine's runtime; this suite runs unoptimized, where frames
+/// are largest. One more term is `Error::Limit` before parsing. Before the
+/// cap, 600 terms of `1+1+…` aborted the process with a stack overflow.
+#[tokio::test]
+async fn long_chains_are_limits_before_planning_and_never_overflow() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = small(dir.path()).await;
+    const X: &str = "FROM (SELECT number_value AS x FROM t) q";
+    let shapes: Vec<(&str, Shape, Option<Error>)> = vec![
+        (
+            "1+1+…",
+            Box::new(|n| format!("SELECT {}", vec!["1"; n].join("+"))),
+            None,
+        ),
+        (
+            "x+x+…",
+            Box::new(|n| format!("SELECT sum({}) {X}", vec!["x"; n].join("+"))),
+            None,
+        ),
+        (
+            "x*1*…",
+            Box::new(|n| format!("SELECT sum(x{}) {X}", "*1".repeat(n))),
+            None,
+        ),
+        (
+            "OR chain",
+            Box::new(|n| {
+                let terms = joined((0..n).map(|i| format!("x = {i}")), " OR ");
+                format!("SELECT count(*) {X} WHERE {terms}")
+            }),
+            None,
+        ),
+        (
+            "cast chain",
+            Box::new(|n| format!("SELECT 1{}", "::bigint".repeat(n))),
+            None,
+        ),
+        (
+            "|| chain",
+            Box::new(|n| {
+                let terms = vec!["s"; n].join("||");
+                format!("SELECT length({terms}) FROM (SELECT point_id AS s FROM t) q")
+            }),
+            Some(Error::Sql),
+        ),
+    ];
+    for (name, shape, at_cap) in &shapes {
+        let mut n = 1;
+        while tokens(&shape(n + 1)) <= MAX_SQL_TOKENS {
+            n += 1;
+        }
+        assert!(n > 200, "{name}: only {n} terms fit");
+        let result = engine.query(&shape(n), query_options()).await;
+        match at_cap {
+            None => assert!(result.is_ok(), "{name} at {n} terms: {result:?}"),
+            Some(error) => assert_eq!(result.unwrap_err(), *error, "{name} at {n} terms"),
+        }
+        assert_eq!(
+            engine
+                .query(&shape(n + 1), query_options())
+                .await
+                .unwrap_err(),
+            Error::Limit,
+            "{name} at {} terms",
+            n + 1
+        );
+    }
+}
+
+/// Joins, set operations, CTEs and relations are counted on the parsed
+/// statement, with CTE references expanded, before any planning: planning
+/// cannot be cancelled, and a 300-way join chain spent over 25 s in one
+/// optimizer rule. At each cap the statement runs; one over is
+/// `Error::Limit`, returned quickly.
+#[tokio::test]
+async fn planning_bounds_reject_wide_statements_quickly() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = small(dir.path()).await;
+    let shapes: Vec<(&str, Shape, usize)> = vec![
+        (
+            "JOIN chain",
+            Box::new(|n| {
+                let joins = joined(
+                    (1..=n).map(|i| format!("JOIN t j{i} ON j{i}.ts = j0.ts")),
+                    " ",
+                );
+                format!("SELECT count(*) AS n FROM t j0 {joins}")
+            }),
+            MAX_SQL_JOINS,
+        ),
+        (
+            "comma joins",
+            Box::new(|n| {
+                let tables = joined((0..=n).map(|i| format!("t c{i}")), ", ");
+                let keys = joined((1..=n).map(|i| format!("c{i}.ts = c0.ts")), " AND ");
+                format!("SELECT count(*) AS n FROM {tables} WHERE {keys}")
+            }),
+            MAX_SQL_JOINS,
+        ),
+        (
+            "UNION ALL",
+            Box::new(|n| vec!["SELECT 1 AS a"; n + 1].join(" UNION ALL ")),
+            MAX_SQL_SET_OPERATIONS,
+        ),
+        (
+            "EXCEPT",
+            Box::new(|n| vec!["SELECT 1 AS a"; n + 1].join(" EXCEPT ")),
+            MAX_SQL_SET_OPERATIONS,
+        ),
+        (
+            "CTE chain",
+            Box::new(|n| {
+                let ctes = joined(
+                    (1..n).map(|i| format!("a{i} AS (SELECT * FROM a{})", i - 1)),
+                    ", ",
+                );
+                format!(
+                    "WITH a0 AS (SELECT * FROM t), {ctes} SELECT count(*) AS n FROM a{}",
+                    n - 1
+                )
+            }),
+            MAX_SQL_CTES,
+        ),
+        (
+            // Each `IN (SELECT … FROM t)` is a subquery and a table: 1 + 2k.
+            "IN subqueries",
+            Box::new(|k| {
+                let terms = joined(
+                    (0..k).map(|_| "utc_seconds IN (SELECT utc_seconds FROM t)".to_owned()),
+                    " AND ",
+                );
+                format!("SELECT count(*) AS n FROM t WHERE {terms}")
+            }),
+            (MAX_SQL_RELATIONS - 1) / 2,
+        ),
+    ];
+    for (name, shape, cap) in &shapes {
+        assert!(tokens(&shape(cap + 1)) <= MAX_SQL_TOKENS, "{name}");
+        let result = engine.query(&shape(*cap), query_options()).await;
+        assert!(result.is_ok(), "{name} at {cap}: {result:?}");
+        for sql in [shape(cap + 1), format!("EXPLAIN {}", shape(cap + 1))] {
+            let started = std::time::Instant::now();
+            assert_eq!(
+                engine.query(&sql, query_options()).await.unwrap_err(),
+                Error::Limit,
+                "{name} at {}",
+                cap + 1
+            );
+            assert!(started.elapsed() < Duration::from_secs(1), "{name}");
+        }
+    }
+
+    // A CTE referenced twice by the next doubles the plan at each level:
+    // a_i expands to 2 * (a_{i-1} + 1) relations, so a3 is 22 (plus its
+    // reference, 23) and a4 is 46. Counting only the text would see 9.
+    let doubling = |levels: usize| {
+        let ctes = joined(
+            (1..=levels).map(|i| {
+                format!(
+                    "a{i} AS (SELECT * FROM a{p} UNION ALL SELECT * FROM a{p})",
+                    p = i - 1
+                )
+            }),
+            ", ",
+        );
+        format!("WITH a0 AS (SELECT * FROM t), {ctes} SELECT count(*) AS n FROM a{levels}")
+    };
+    let out = run(&engine, &doubling(3)).await;
+    assert_eq!(i64s(&out, "n"), [Some(4 * 8)]);
+    assert_eq!(
+        engine
+            .query(&doubling(4), query_options())
+            .await
+            .unwrap_err(),
+        Error::Limit
+    );
+
+    // The reviewer's 300-way join chain: rejected without planning.
+    let wide = {
+        let joins = joined(
+            (1..300).map(|i| format!("JOIN t j{i} ON j{i}.ts = j0.ts")),
+            " ",
+        );
+        format!("SELECT count(*) FROM t j0 {joins}")
+    };
+    let started = std::time::Instant::now();
+    assert_eq!(
+        engine.query(&wide, query_options()).await.unwrap_err(),
+        Error::Limit
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+/// Clauses DataFusion would plan exponentially (`CUBE` of N expressions is
+/// 2^N groupings) or silently ignore (`TABLESAMPLE`, locking clauses) are
+/// rejected before planning, as is anything but a query.
+#[tokio::test]
+async fn grouping_sets_samples_locks_and_non_queries_are_rejected() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = small(dir.path()).await;
+    // `Debug` shows identities only.
+    let debug = format!("{engine:?}");
+    assert!(
+        debug.starts_with("SqlEngine") && debug.contains("table: \"t\""),
+        "{debug}"
+    );
+    for sql in [
+        "SELECT count(*) FROM t GROUP BY CUBE(utc_seconds)",
+        "SELECT count(*) FROM t GROUP BY ROLLUP(utc_seconds, present)",
+        "SELECT count(*) FROM t GROUP BY GROUPING SETS ((utc_seconds), (present))",
+        "SELECT count(*) FROM t GROUP BY utc_seconds WITH ROLLUP",
+        "SELECT count(*) FROM t TABLESAMPLE BERNOULLI (50)",
+        "SELECT count(*) FROM t TABLESAMPLE SYSTEM (10 ROWS)",
+        "SELECT * FROM t FOR UPDATE",
+        "SELECT * FROM t FOR SHARE",
+        "SHOW TABLES",
+        "DESCRIBE t",
+        "EXPLAIN COPY t TO 'out.csv'",
+    ] {
+        assert_eq!(
+            engine.query(sql, query_options()).await.unwrap_err(),
+            Error::Sql,
+            "{sql}"
+        );
+    }
+    let out = run(
+        &engine,
+        "SELECT present, count(*) AS n FROM t GROUP BY present",
+    )
+    .await;
+    assert_eq!(i64s(&out, "n"), [Some(4)]);
+    assert!(
+        engine
+            .query("EXPLAIN SELECT count(*) FROM t", query_options())
+            .await
+            .is_ok()
+    );
+}
+
+/// String building is not available: `||` and every function whose output
+/// can outgrow its input are rejected, including those the SQL planner
+/// constructs without the registry (`OVERLAY … PLACING`, struct literals).
+/// Inspection, slicing and case work. (`SUBSTRING`, `POSITION … IN` and
+/// `EXTRACT` need DataFusion's `unicode_expressions`/`datetime_expressions`
+/// planners, which this build does not enable; they were never available.)
+#[tokio::test]
+async fn string_building_functions_and_operators_are_rejected() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = small(dir.path()).await;
+    for sql in [
+        "SELECT 'a' || 'b'",
+        "SELECT point_id || 'x' FROM t",
+        "SELECT count(*) FROM t WHERE point_id = 'a' || 'b'",
+        "SELECT concat(point_id, 'x') FROM t",
+        "SELECT concat_ws(',', point_id, tz) FROM t",
+        "SELECT replace(point_id, 't', 'tt') FROM t",
+        "SELECT regexp_replace(point_id, 't', 'tt') FROM t",
+        "SELECT overlay(point_id PLACING 'xx' FROM 1) FROM t",
+        "SELECT translate(point_id, 't', 'u') FROM t",
+        "SELECT to_hex(utc_seconds) FROM t",
+        "SELECT encode(point_id, 'hex') FROM t",
+        "SELECT to_char(ts, '%Y') FROM t",
+        "SELECT levenshtein(point_id, tz) FROM t",
+        "SELECT repeat('x', 3)",
+        "SELECT lpad('x', 10)",
+        "SELECT rpad('x', 10)",
+        "SELECT arrow_cast(1, 'Int8')",
+        "SELECT count(arrow_cast(NULL, 'FixedSizeBinary(100000000)')) FROM t",
+        "SELECT named_struct('a', 1)",
+        "SELECT struct(1, 2)",
+        "SELECT version()",
+    ] {
+        assert_eq!(
+            engine.query(sql, query_options()).await.unwrap_err(),
+            Error::Sql,
+            "{sql}"
+        );
+    }
+    let out = run(
+        &engine,
+        "SELECT upper(point_id) AS u, lower(tz) AS l, length(point_id) AS n, \
+         CAST(strpos(point_id, 't') AS BIGINT) AS p, TRIM(point_id) AS tr, left(point_id, 1) AS lf, \
+         right(point_id, 1) AS rt, split_part(point_id, 'x', 1) AS sp, reverse(point_id) AS rv, \
+         regexp_like(point_id, '^t') AS rl, date_part('year', ts) AS y, \
+         date_trunc('hour', ts) AS h, abs(number_value) AS a, coalesce(number_value, 0) AS c, \
+         round(number_value) AS r, arrow_typeof(ts) AS ty FROM t ORDER BY utc_seconds",
+    )
+    .await;
+    assert_eq!(strings(&out, "u"), vec![Some("T".to_owned()); 4]);
+    for column in ["tr", "lf", "rt", "sp", "rv"] {
+        assert_eq!(
+            strings(&out, column),
+            vec![Some("t".to_owned()); 4],
+            "{column}"
+        );
+    }
+    assert_eq!(i64s(&out, "p"), [Some(1); 4]);
+}
+
+/// Window operators buffer their input without reserving it; the engine
+/// reserves every input batch from the query's pool, so `UNION ALL` fan-out
+/// into `count(*) OVER ()` is `Error::Limit` at the pool instead of
+/// gigabytes of unaccounted memory.
+#[tokio::test]
+async fn window_input_beyond_the_pool_is_a_limit() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    const ROWS: usize = 4000;
+    const LEN: usize = 1029;
+    let value = point(
+        "s",
+        HistoryKind::Str,
+        None,
+        (0..ROWS)
+            .map(|i| Kind::Str(format!("{i:05}{}", "x".repeat(LEN - 5))))
+            .collect(),
+    );
+    capture(&value, &dir.path().join("s"), 1024).await;
+    let engine = engine(&[("s", &dir.path().join("s"))]).await;
+    let fan = |copies: usize| {
+        let union = vec!["SELECT * FROM s"; copies].join(" UNION ALL ");
+        format!(
+            "SELECT max(length(string_value) + c) AS m FROM \
+             (SELECT string_value, count(*) OVER () AS c FROM ({union}) u) q"
+        )
+    };
+    let output = engine.query(&fan(2), query_options()).await.unwrap();
+    assert_eq!(i64s(&all(&output), "m"), [Some((LEN + 2 * ROWS) as i64)]);
+    assert!(
+        output.pool_peak_bytes >= 2 * ROWS * LEN,
+        "window input not reserved: {}",
+        output.pool_peak_bytes
+    );
+    let copies = QUERY_MEMORY_BYTES / (ROWS * LEN) + 2;
+    assert!(copies <= MAX_SQL_SET_OPERATIONS);
+    assert_eq!(
+        engine
+            .query(&fan(copies), query_options())
+            .await
+            .unwrap_err(),
+        Error::Limit
+    );
+}
+
+/// A filtered equi-join whose predicate matches nothing never produces an
+/// output batch: it evaluates rows² candidate pairs inside its own loop and
+/// polls the probe side only once per batch, so Tokio's cooperative budget
+/// alone would let it run to completion (seconds, unoptimized) after its
+/// deadline while holding its admission permit. Leaves yield before every
+/// batch, so the abort lands within one probe batch and the permit is back
+/// before the call returns.
+#[tokio::test]
+async fn a_join_that_matches_nothing_still_stops_at_its_deadline() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = big(dir.path()).await;
+    let sql = "SELECT count(*) AS n FROM big a JOIN big b ON a.point_id = b.point_id \
+               AND sqrt(a.number_value) * ln(b.number_value + 2) < -1";
+    let started = std::time::Instant::now();
+    let options = QueryOptions::new().with_timeout(Duration::from_millis(200));
+    assert_eq!(
+        engine.query(sql, options).await.unwrap_err(),
+        Error::Deadline
+    );
+    assert!(started.elapsed() < Duration::from_millis(200) + CANCEL_GRACE);
+    let (x, y) = tokio::join!(
+        engine.query("SELECT COUNT(*) AS n FROM big", query_options()),
+        engine.query("SELECT COUNT(*) AS n FROM big", query_options())
+    );
+    for output in [x.unwrap(), y.unwrap()] {
+        assert_eq!(i64s(&all(&output), "n"), [Some(MAX_ROWS as i64)]);
+    }
 }

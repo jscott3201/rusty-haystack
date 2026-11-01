@@ -99,6 +99,11 @@ jobs:
         run: |
           cargo +1.99.1 test --locked -p rusty-haystack-mcp --features stdio,http
           cargo +1.99.1 test --locked -p rusty-haystack-cli --features mcp,mcp-http
+      # Compile-only on macOS and Windows: the optional analytics SQL feature
+      # is linted and tested on Ubuntu by core-features.
+      - name: Check the analytics SQL feature compiles
+        if: runner.os != 'Linux'
+        run: cargo +1.99.1 check --locked -p rusty-haystack-analytics --features sql
 
   # Separate package invocations prevent workspace members from unifying extra
   # dependency features into core's supported minimal/default builds, and
@@ -106,6 +111,7 @@ jobs:
   core-features:
     name: Core minimal and default features
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master

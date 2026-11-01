@@ -181,6 +181,10 @@ class WorkflowContractTests(unittest.TestCase):
         for command, suffix in (("clippy", " --all-targets -- -D warnings"), ("test", "")):
             self.assertIn(f"\n      - run: cargo +1.99.1 {command} --locked -p rusty-haystack-analytics --features sql{suffix}\n",
                           jobs["core-features"])
+        self.assertIn("\n    timeout-minutes: 45\n", jobs["core-features"])
+        self.assertIn("\n        if: runner.os != 'Linux'\n"
+                      "        run: cargo +1.99.1 check --locked -p rusty-haystack-analytics --features sql\n",
+                      jobs["test"])
         self.assertIn("\n    runs-on: ubuntu-latest\n", jobs["sqlite"])
         self.assertIn("cargo +1.99.1 nextest run --locked -p rusty-haystack-app --features sqlite -E 'test(sqlite::qualification) & not test(process_crash_worker)' --success-output immediate", jobs["sqlite"])
         self.assertIn("run: python3 -m unittest discover -s scripts/sqlite -p 'test_*.py' -v", jobs["sqlite"])

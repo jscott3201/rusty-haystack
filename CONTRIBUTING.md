@@ -127,7 +127,7 @@ See the [support matrix](docs/support-matrix.md) for those evidence boundaries.
 | CI policy | `python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v`, then the validated dev/main matrix plan |
 | Rustfmt (Rust 1.99.1) | `cargo +1.99.1 fmt --all --check` |
 | Clippy (MSRV, Rust 1.99.1) | `cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
-| Test (MSRV, Rust 1.99.1) | `cargo +1.99.1 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz` |
+| Test (MSRV, Rust 1.99.1) | `cargo +1.99.1 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz`<br>on macOS and Windows only, the compile-only `cargo +1.99.1 check --locked -p rusty-haystack-analytics --features sql` |
 | Core minimal and default features (Ubuntu, Rust 1.99.1) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features`; then `cargo +1.99.1 clippy --locked -p rusty-haystack-analytics --features sql --all-targets -- -D warnings` and `cargo +1.99.1 test --locked -p rusty-haystack-analytics --features sql` for the optional snapshot SQL feature |
 | Current stable (Ubuntu, Rust 1.99.1) | The same two Clippy and two test commands above, using `cargo +1.99.1` |
 | Python Bindings (Rust 1.99.1) | clippy on the excluded crate, then `maturin develop` and `pytest` |
@@ -229,7 +229,7 @@ limit at all. Find them at their definitions:
 | Graph changelog capacity | `haystack-core/src/graph/changelog.rs` |
 | Client in-flight requests, decompressed payload size | `haystack-client/src/transport/ws.rs` |
 | Parquet history export and readback | `haystack-analytics/src/format.rs` (`Limits::default`, `MIN_*`, `MAX_GROUPS_PER_PART`, `writer_reserve`/`encoded_ceiling`, `MAX_HEADER_BYTES`), `export.rs` (`MAX_CONCURRENT_EXPORTS`, `DEFAULT_EXPORT_TIMEOUT`), `writer.rs` (`DATA_PAGE_BYTES`), `reader.rs` (`COMPACT_*`, `FOOTER_MAX_SCHEMA_ELEMENTS`); source and row ceilings reuse `MAX_GRID_BYTES`/`MAX_ROWS` from `haystack-core/src/codecs/history.rs` |
-| Snapshot SQL (analytics `sql` feature) | `haystack-analytics/src/sql/mod.rs` (`SQL_QUERIES`, `SQL_WORKER_THREADS`, `QUERY_MEMORY_BYTES`, `QUERY_TIMEOUT`, `CANCEL_GRACE`, `MAX_OUTPUT_ROWS`, `MAX_OUTPUT_BYTES`, `MAX_SQL_BYTES`, `SQL_RECURSION_LIMIT`, `MAX_SNAPSHOTS`, `MAX_SNAPSHOT_BYTES`, `MAX_ENGINE_BYTES`, `SQL_BATCH_ROWS`, `MAX_TABLE_NAME_BYTES`, `REMOVED_FUNCTIONS`) |
+| Snapshot SQL (analytics `sql` feature) | `haystack-analytics/src/sql/mod.rs` (`SQL_QUERIES`, `SQL_WORKER_THREADS`, `QUERY_MEMORY_BYTES`, `QUERY_TIMEOUT`, `CANCEL_GRACE`, `MAX_OUTPUT_ROWS`, `MAX_OUTPUT_BYTES`, `MAX_SQL_BYTES`, `MAX_SQL_TOKENS`, `MAX_SQL_RELATIONS`, `MAX_SQL_JOINS`, `MAX_SQL_SET_OPERATIONS`, `MAX_SQL_CTES`, `SQL_RECURSION_LIMIT`, `SQL_THREAD_STACK_BYTES`, `MAX_SNAPSHOTS`, `MAX_SNAPSHOT_BYTES`, `MAX_ENGINE_BYTES`, `SQL_BATCH_ROWS`, `MAX_BATCH_BYTES`, `MAX_PLAN_BYTES`, `MAX_JOIN_ROWS`, `MAX_TABLE_NAME_BYTES`, `ALLOWED_FUNCTIONS`, `ALLOWED_OPERATORS`) |
 
 If you change one, change it at the definition and let the test suite tell you who cared.
 

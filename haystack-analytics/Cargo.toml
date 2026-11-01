@@ -15,6 +15,9 @@ workspace = true
 [lib]
 name = "haystack_analytics"
 
+[package.metadata.docs.rs]
+features = ["sql"]
+
 [features]
 default = []
 # Bounded read-only SQL over sealed, fully validated snapshots (DataFusion).
@@ -23,11 +26,15 @@ sql = ["dep:datafusion", "dep:arrow", "dep:async-trait", "dep:futures-util"]
 [dependencies]
 haystack-core = { workspace = true, features = ["chrono-tz"] }
 haystack-client.workspace = true
+arrow = { workspace = true, optional = true }
 arrow-array.workspace = true
 arrow-schema.workspace = true
-parquet.workspace = true
+async-trait = { workspace = true, optional = true }
 bytes.workspace = true
 chrono.workspace = true
+datafusion = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+parquet.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
@@ -35,10 +42,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-util.workspace = true
 uuid = { workspace = true, features = ["v4"] }
-arrow = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
-datafusion = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW` / `O_NONBLOCK` for `OpenOptionsExt::custom_flags`; no unsafe.

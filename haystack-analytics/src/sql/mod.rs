@@ -16,11 +16,12 @@ mod table;
 mod tests;
 
 use crate::{Dataset, Error, Result};
+use arrow::array::Array;
 use datafusion::{
     common::tree_node::{Transformed, TreeNode, TreeNodeRecursion},
     error::DataFusionError,
     execution::{
-        SessionStateDefaults,
+        SessionStateDefaults, TaskContext,
         disk_manager::{DiskManagerBuilder, DiskManagerMode},
         memory_pool::{
             GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
@@ -29,20 +30,39 @@ use datafusion::{
         runtime_env::RuntimeEnvBuilder,
         session_state::SessionStateBuilder,
     },
-    logical_expr::LogicalPlan,
+    logical_expr::{Expr, LogicalPlan, Operator},
     physical_plan::{
-        ExecutionPlan,
+        DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
+        SendableRecordBatchStream,
         coop::CooperativeExec,
-        joins::{CrossJoinExec, NestedLoopJoinExec, PiecewiseMergeJoinExec},
+        joins::{
+            CrossJoinExec, HashJoinExec, NestedLoopJoinExec, PiecewiseMergeJoinExec,
+            SortMergeJoinExec,
+        },
         recursive_query::RecursiveQueryExec,
+        stream::RecordBatchStreamAdapter,
+        windows::{BoundedWindowAggExec, WindowAggExec},
     },
     prelude::{SQLOptions, SessionConfig, SessionContext},
+    sql::{
+        parser::Statement as DfStatement,
+        sqlparser::{
+            ast::{
+                Expr as SqlExpr, GroupByExpr, Query, Select, SetExpr, Statement as SqlStatement,
+                TableFactor, Visit, Visitor,
+            },
+            dialect::GenericDialect,
+            tokenizer::{Token, Tokenizer},
+        },
+    },
 };
 use futures_util::StreamExt;
 use std::{
     any::Any,
     collections::{BTreeSet, HashMap},
+    fmt,
     num::NonZeroUsize,
+    ops::ControlFlow,
     path::PathBuf,
     sync::{
         Arc,
@@ -83,25 +103,221 @@ pub const MAX_OUTPUT_ROWS: usize = 10_000;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 /// SQL text length in bytes, checked before parsing.
 pub const MAX_SQL_BYTES: usize = 16 * 1024;
-/// `datafusion.sql_parser.recursion_limit`: parser nesting depth.
+/// Non-whitespace tokens of the SQL text, counted by an iterative tokenizer
+/// before parsing (`Error::Limit`). This bounds the depth of every syntax
+/// tree DataFusion builds and walks recursively after parsing: a left-deep
+/// chain such as `1+1+…`, `a OR b OR …` or `x::bigint::bigint…` has about
+/// one level per two tokens, which the parser builds without recursion and
+/// [`SQL_RECURSION_LIMIT`] therefore does not see. At this cap the deepest
+/// chain (512 terms) is far inside [`SQL_THREAD_STACK_BYTES`]: an
+/// unoptimized build planned 4,000 terms for 30 s without overflowing, and
+/// overflowed at 7,900. Planning time is also superlinear in chain length
+/// (2,000 terms took 7 s unoptimized).
+pub const MAX_SQL_TOKENS: usize = 1024;
+/// Relations a query may reference after expanding CTEs (`Error::Limit`):
+/// table references, derived tables and subquery expressions, each CTE
+/// reference counted as its whole body. Expansion is counted because a CTE
+/// referenced twice by the next CTE doubles the plan at each level.
+pub const MAX_SQL_RELATIONS: usize = 32;
+/// Joins after expanding CTEs, explicit and comma-separated (`Error::Limit`):
+/// enough to join every snapshot of a full engine and the `snapshots` table.
+/// Join planning is superlinear in the join count (a 300-way chain spent
+/// over 25 s in one optimizer rule) and cannot be cancelled.
+pub const MAX_SQL_JOINS: usize = MAX_SNAPSHOTS;
+/// `UNION`/`INTERSECT`/`EXCEPT` operations after expanding CTEs
+/// (`Error::Limit`). Bounds planning work and the fan-out of one scan.
+pub const MAX_SQL_SET_OPERATIONS: usize = 32;
+/// CTE definitions in one statement, at any nesting (`Error::Limit`).
+pub const MAX_SQL_CTES: usize = 16;
+/// `datafusion.sql_parser.recursion_limit`: parser nesting depth, such as
+/// parentheses and nested function calls.
 pub const SQL_RECURSION_LIMIT: usize = 50;
+/// Stack of each thread of an engine's query runtime. Planning, optimizing,
+/// displaying and dropping a plan recurse once per tree level; the default
+/// 2 MiB overflows, unoptimized, on a 600-term `1+1+…`. The token cap keeps
+/// every tree far inside this. Reserved address space, committed on use.
+pub const SQL_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 /// Snapshots per engine (the `snapshots` provenance table is not counted).
 pub const MAX_SNAPSHOTS: usize = 16;
 /// Sealed Arrow memory of one snapshot (`get_array_memory_size`).
 pub const MAX_SNAPSHOT_BYTES: usize = 96 * 1024 * 1024;
 /// Sealed Arrow memory of all snapshots of one engine.
 pub const MAX_ENGINE_BYTES: usize = 256 * 1024 * 1024;
-/// `datafusion.execution.batch_size`.
-pub const SQL_BATCH_ROWS: usize = 1024;
+/// `datafusion.execution.batch_size`. Small, because abort and the deadline
+/// take effect only at a yield, and an operator does up to one input
+/// batch's work between yields (leaves yield before every batch): a filtered
+/// equi-join evaluates its predicate for every candidate pair of a probe
+/// batch in one poll.
+pub const SQL_BATCH_ROWS: usize = 256;
+/// Arrow bytes of one batch produced by any operator with an input
+/// (`Error::Limit`). Measured as the referenced slice, not shared buffers.
+/// The check runs after the batch exists, so it limits how far an oversized
+/// intermediate propagates, not its first allocation.
+pub const MAX_BATCH_BYTES: usize = 32 * 1024 * 1024;
+/// Arrow bytes produced by all operators with an input, summed over the
+/// whole query (`Error::Limit`). A work bound rather than a residency bound:
+/// it stops fan-out (one scan fed through many `UNION ALL` branches) that
+/// neither the join-row cap nor the pool sees. Eight full passes over
+/// [`MAX_ENGINE_BYTES`].
+pub const MAX_PLAN_BYTES: usize = 8 * MAX_ENGINE_BYTES;
+/// Rows produced by all hash and sort-merge joins of a query, summed
+/// (`Error::Limit`). An equi-join on a low-cardinality key produces rows²
+/// output that the pool does not see; this is a thousand times
+/// `haystack_core`'s `MAX_ROWS`, the largest capture.
+pub const MAX_JOIN_ROWS: usize = 10_000_000;
 /// Session time zone (`datafusion.execution.time_zone`).
 pub const SESSION_TIME_ZONE: &str = "+00:00";
 /// Reserved name of the read-only provenance table.
 pub const SNAPSHOTS_TABLE: &str = "snapshots";
 /// Longest table name; names match `^[a-z][a-z0-9_]{0,62}$`.
 pub const MAX_TABLE_NAME_BYTES: usize = 63;
-/// Scalar functions removed from the session: each turns a short literal
-/// into a value of up to 2 GiB in one call, outside the memory pool.
-pub const REMOVED_FUNCTIONS: [&str; 3] = ["lpad", "repeat", "rpad"];
+/// The only scalar functions the session registers and the logical plan may
+/// call, by canonical name (DataFusion's aliases of these, such as `pow`,
+/// `length` or `substring`, come with them). Anything else is `Error::Sql`,
+/// including a function a DataFusion upgrade adds and one the SQL planner
+/// constructs directly (`OVERLAY`, struct literals).
+///
+/// Left out because their output can outgrow their input, outside the
+/// memory pool: string building (`concat`, `concat_ws`, `replace`,
+/// `regexp_replace`, `overlay`, `translate`, `repeat`, `lpad`, `rpad`,
+/// `to_hex`, `encode`, `to_char`/`date_format`, whose format may expand);
+/// arbitrary target types (`arrow_cast`, `arrow_try_cast`, `cast_to_type`,
+/// `try_cast_to_type`); quadratic work per row (`levenshtein`). Also left
+/// out as unneeded surface: `decode`, struct, union, metadata and file
+/// functions, and `version`. Aggregate and window functions are DataFusion's
+/// defaults; their state is reserved from the pool.
+pub const ALLOWED_FUNCTIONS: &[&str] = &[
+    // Math.
+    "abs",
+    "acos",
+    "acosh",
+    "asin",
+    "asinh",
+    "atan",
+    "atan2",
+    "atanh",
+    "cbrt",
+    "ceil",
+    "cos",
+    "cosh",
+    "cot",
+    "degrees",
+    "exp",
+    "factorial",
+    "floor",
+    "gcd",
+    "isnan",
+    "iszero",
+    "lcm",
+    "ln",
+    "log",
+    "log10",
+    "log2",
+    "nanvl",
+    "pi",
+    "power",
+    "radians",
+    "random",
+    "round",
+    "signum",
+    "sin",
+    "sinh",
+    "sqrt",
+    "tan",
+    "tanh",
+    "trunc",
+    // Conditional.
+    "coalesce",
+    "greatest",
+    "least",
+    "nullif",
+    "nvl",
+    "nvl2",
+    // Strings: inspection, slicing and case; none outgrows its input by more
+    // than Unicode case mapping's small constant factor.
+    "ascii",
+    "bit_length",
+    "btrim",
+    "character_length",
+    "chr",
+    "contains",
+    "ends_with",
+    "find_in_set",
+    "initcap",
+    "left",
+    "lower",
+    "ltrim",
+    "octet_length",
+    "reverse",
+    "right",
+    "rtrim",
+    "split_part",
+    "starts_with",
+    "strpos",
+    "substr",
+    "substr_index",
+    "upper",
+    "regexp_count",
+    "regexp_instr",
+    "regexp_like",
+    "regexp_match",
+    // Date and time.
+    "current_date",
+    "current_time",
+    "date_bin",
+    "date_part",
+    "date_trunc",
+    "from_unixtime",
+    "make_date",
+    "make_time",
+    "now",
+    "to_date",
+    "to_local_time",
+    "to_time",
+    "to_timestamp",
+    "to_timestamp_micros",
+    "to_timestamp_millis",
+    "to_timestamp_nanos",
+    "to_timestamp_seconds",
+    "to_unixtime",
+    // Other.
+    "arrow_typeof",
+    "uuid",
+];
+/// The only binary operators the logical plan may use: comparison,
+/// arithmetic, boolean, bitwise and pattern matching. `||`
+/// (`Operator::StringConcat`) is not among them (see [`ALLOWED_FUNCTIONS`]);
+/// neither are the array and JSON operators.
+pub const ALLOWED_OPERATORS: &[Operator] = &[
+    Operator::Eq,
+    Operator::NotEq,
+    Operator::Lt,
+    Operator::LtEq,
+    Operator::Gt,
+    Operator::GtEq,
+    Operator::Plus,
+    Operator::Minus,
+    Operator::Multiply,
+    Operator::Divide,
+    Operator::Modulo,
+    Operator::And,
+    Operator::Or,
+    Operator::IsDistinctFrom,
+    Operator::IsNotDistinctFrom,
+    Operator::RegexMatch,
+    Operator::RegexIMatch,
+    Operator::RegexNotMatch,
+    Operator::RegexNotIMatch,
+    Operator::LikeMatch,
+    Operator::ILikeMatch,
+    Operator::NotLikeMatch,
+    Operator::NotILikeMatch,
+    Operator::BitwiseAnd,
+    Operator::BitwiseOr,
+    Operator::BitwiseXor,
+    Operator::BitwiseShiftRight,
+    Operator::BitwiseShiftLeft,
+];
 /// Memory consumers named in a `TrackConsumersPool` report.
 const TRACKED_CONSUMERS: usize = 5;
 
@@ -119,7 +335,9 @@ pub struct SnapshotIdentity {
 }
 
 /// Per-query options. `timeout` may only be tightened from [`QUERY_TIMEOUT`].
+/// Start from [`QueryOptions::new`] (or `Default`) and the `with_` setters.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct QueryOptions {
     pub timeout: Duration,
     pub cancellation: CancellationToken,
@@ -132,6 +350,20 @@ impl Default for QueryOptions {
         }
     }
 }
+impl QueryOptions {
+    /// [`QUERY_TIMEOUT`] and a fresh, uncancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+}
 
 /// A complete, capped query result.
 #[derive(Clone, Debug)]
@@ -142,8 +374,12 @@ pub struct QueryOutput {
     /// Snapshots the query's logical plan scans, by table name. Reading only
     /// the `snapshots` provenance table contributes none.
     pub sources: Vec<SnapshotIdentity>,
-    /// Largest memory-pool reservation the query reached.
-    pub peak_memory_bytes: usize,
+    /// Largest reservation the query's memory pool reached. It counts only
+    /// what operators reserve from the pool (hash tables, sort buffers,
+    /// aggregate and window state); expression temporaries and batches in
+    /// flight are not reserved and not included, so this is not the query's
+    /// memory use.
+    pub pool_peak_bytes: usize,
 }
 
 /// Collects snapshots for an immutable [`SqlEngine`]. A failed registration
@@ -152,6 +388,14 @@ pub struct QueryOutput {
 pub struct SqlEngineBuilder {
     snapshots: Vec<Arc<Snapshot>>,
     bytes: usize,
+}
+impl fmt::Debug for SqlEngineBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SqlEngineBuilder")
+            .field("snapshots", &self.snapshots())
+            .field("bytes", &self.bytes)
+            .finish()
+    }
 }
 impl SqlEngineBuilder {
     /// Opens and fully validates the committed capture at `directory`, then
@@ -186,10 +430,14 @@ impl SqlEngineBuilder {
     }
     /// Starts the engine's dedicated query runtime.
     pub fn build(self) -> Result<SqlEngine> {
+        // Before the runtime exists: a failure here must not drop a runtime,
+        // which panics when the caller is itself inside one.
+        let provenance = Arc::new(Provenance::new(&self.snapshots)?);
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder
             .worker_threads(SQL_WORKER_THREADS)
             .max_blocking_threads(SQL_WORKER_THREADS)
+            .thread_stack_size(SQL_THREAD_STACK_BYTES)
             .thread_name("haystack-sql")
             .enable_time();
         #[cfg(test)]
@@ -206,7 +454,6 @@ impl SqlEngineBuilder {
                 });
         }
         let runtime = builder.build().map_err(|_| Error::Runtime)?;
-        let provenance = Arc::new(Provenance::new(&self.snapshots)?);
         Ok(SqlEngine {
             inner: Arc::new(Inner {
                 snapshots: self.snapshots,
@@ -236,6 +483,14 @@ pub struct SqlEngine {
     #[cfg(test)]
     threads: Arc<AtomicUsize>,
 }
+impl fmt::Debug for SqlEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SqlEngine")
+            .field("snapshots", &self.snapshots())
+            .field("running", &self.runtime.is_some())
+            .finish()
+    }
+}
 impl Drop for SqlEngine {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
@@ -257,20 +512,26 @@ impl SqlEngine {
     }
     /// Plans and runs one read-only query on the engine's runtime.
     ///
-    /// Rejections happen before execution: text over [`MAX_SQL_BYTES`]
-    /// (`Error::Limit`), a timeout above [`QUERY_TIMEOUT`] (`Error::Options`),
-    /// no free slot (`Error::Capacity`), and DDL, DML, statements, cross
-    /// joins, non-equi joins and recursive queries (`Error::Sql`). During
-    /// execution, memory or output over its cap is `Error::Limit`, and the
-    /// deadline and cancellation token are `Error::Deadline` and
-    /// `Error::Cancelled`. DataFusion's message text is never returned,
-    /// because it can echo data. Dropping the returned future aborts the
-    /// query. The deadline is timed on the caller's runtime, which must have
-    /// its timer enabled.
+    /// Rejections happen before execution: text over [`MAX_SQL_BYTES`] or
+    /// [`MAX_SQL_TOKENS`], or a statement over a planning bound
+    /// ([`MAX_SQL_RELATIONS`], [`MAX_SQL_JOINS`], [`MAX_SQL_SET_OPERATIONS`],
+    /// [`MAX_SQL_CTES`]) is `Error::Limit`; a timeout above [`QUERY_TIMEOUT`]
+    /// is `Error::Options`; no free slot is `Error::Capacity`; anything but
+    /// a query (or `EXPLAIN` of one), a function or operator outside
+    /// [`ALLOWED_FUNCTIONS`] and [`ALLOWED_OPERATORS`], `CUBE`, `ROLLUP`,
+    /// `GROUPING SETS`, `TABLESAMPLE`, locking clauses, cross joins,
+    /// non-equi joins and recursive queries are `Error::Sql`. During
+    /// execution, memory, intermediate or output over its cap is
+    /// `Error::Limit`, and the deadline and cancellation token are
+    /// `Error::Deadline` and `Error::Cancelled`. DataFusion's message text is
+    /// never returned, because it can echo data. Dropping the returned future
+    /// aborts the query. The deadline is timed on the caller's runtime, which
+    /// must have its timer enabled.
     pub async fn query(&self, sql: &str, options: QueryOptions) -> Result<QueryOutput> {
         if sql.len() > MAX_SQL_BYTES {
             return Err(Error::Limit);
         }
+        check_tokens(sql)?;
         if options.timeout > QUERY_TIMEOUT {
             return Err(Error::Options);
         }
@@ -355,14 +616,14 @@ fn session(inner: &Inner, pool: Arc<dyn MemoryPool>) -> Result<SessionContext> {
             &SQL_RECURSION_LIMIT.to_string(),
         )
         .map_err(|_| Error::Query)?;
-    // Default functions and planners, except no table functions (no
-    // `generate_series`/`range` row generators), none of
-    // `REMOVED_FUNCTIONS`, no table factories (no `CREATE EXTERNAL TABLE`
-    // target even if DDL were allowed) and no file formats. URL tables are
-    // never enabled.
+    // Default planners and aggregate/window functions, only the scalar
+    // functions in `ALLOWED_FUNCTIONS`, no table functions (no
+    // `generate_series`/`range` row generators), no table factories (no
+    // `CREATE EXTERNAL TABLE` target even if DDL were allowed) and no file
+    // formats. URL tables are never enabled.
     let functions = SessionStateDefaults::default_scalar_functions()
         .into_iter()
-        .filter(|f| !REMOVED_FUNCTIONS.contains(&f.name()))
+        .filter(|f| ALLOWED_FUNCTIONS.contains(&f.name()))
         .collect();
     let state = SessionStateBuilder::new_with_default_features()
         .with_scalar_functions(functions)
@@ -386,29 +647,35 @@ fn session(inner: &Inner, pool: Arc<dyn MemoryPool>) -> Result<SessionContext> {
 
 async fn execute(inner: &Inner, sql: &str, pool: Arc<PeakPool>) -> Result<QueryOutput> {
     let context = session(inner, pool.clone())?;
-    let plan = context
-        .state()
-        .create_logical_plan(sql)
+    let state = context.state();
+    let dialect = state.config().options().sql_parser.dialect;
+    let statement = state
+        .sql_to_statement(sql, &dialect)
+        .map_err(|e| classify(&e))?;
+    check_statement(&statement)?;
+    let plan = state
+        .statement_to_plan(statement)
         .await
         .map_err(|e| classify(&e))?;
     sql_options().verify_plan(&plan).map_err(|_| Error::Sql)?;
+    check_expressions(&plan)?;
     let sources = sources(inner, &plan)?;
     let frame = context
         .execute_logical_plan(plan)
         .await
         .map_err(|e| classify(&e))?;
-    let state = frame.task_ctx();
+    let task = frame.task_ctx();
     let optimized = frame.into_optimized_plan().map_err(|e| classify(&e))?;
+    check_expressions(&optimized)?;
     reject_keyless_joins(&optimized)?;
-    let physical = context
-        .state()
+    let physical = state
         .create_physical_plan(&optimized)
         .await
         .map_err(|e| classify(&e))?;
     reject_runaway(&physical)?;
-    let physical = cooperative(physical)?;
+    let physical = guarded(physical, &Arc::new(Budget::default()))?;
     let schema = physical.schema();
-    let mut stream = datafusion::physical_plan::execute_stream(physical, Arc::new(state))
+    let mut stream = datafusion::physical_plan::execute_stream(physical, Arc::new(task))
         .map_err(|e| classify(&e))?;
     let (mut rows, mut bytes, mut batches) = (0usize, 0usize, Vec::new());
     while let Some(batch) = stream.next().await {
@@ -428,7 +695,7 @@ async fn execute(inner: &Inner, sql: &str, pool: Arc<PeakPool>) -> Result<QueryO
         schema,
         batches,
         sources,
-        peak_memory_bytes: pool.peak(),
+        pool_peak_bytes: pool.peak(),
     })
 }
 
@@ -493,21 +760,436 @@ fn reject_runaway(plan: &Arc<dyn ExecutionPlan>) -> Result<()> {
     Ok(())
 }
 
-/// Wraps every operator that has inputs in a `CooperativeExec`, so each
-/// output batch it produces consumes Tokio's cooperative budget. DataFusion
-/// 55 makes only leaves cooperative; an equi-join on a low-cardinality key
-/// can emit millions of rows per probe batch without polling a leaf, and
-/// would otherwise ignore abort for that long.
-fn cooperative(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+/// Counts non-whitespace tokens with sqlparser's tokenizer, which is a loop
+/// over the text with no recursion, so this runs before anything recursive
+/// sees the SQL.
+fn check_tokens(sql: &str) -> Result<()> {
+    let tokens = Tokenizer::new(&GenericDialect {}, sql)
+        .tokenize()
+        .map_err(|_| Error::Sql)?;
+    let count = tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .count();
+    if count > MAX_SQL_TOKENS {
+        Err(Error::Limit)
+    } else {
+        Ok(())
+    }
+}
+
+/// Accepts only a query, or `EXPLAIN` of one, within the planning bounds,
+/// before any planning. DataFusion's statements (`COPY`, `CREATE EXTERNAL
+/// TABLE`, `RESET`) and every other SQL statement are `Error::Sql` here;
+/// `SQLOptions` refuses them again after planning.
+fn check_statement(statement: &DfStatement) -> Result<()> {
+    let statement = match statement {
+        DfStatement::Statement(statement) => statement.as_ref(),
+        DfStatement::Explain(explain) => return check_statement(&explain.statement),
+        _ => return Err(Error::Sql),
+    };
+    if !matches!(statement, SqlStatement::Query(_)) {
+        return Err(Error::Sql);
+    }
+    match statement.visit(&mut Gate::default()) {
+        ControlFlow::Continue(()) => Ok(()),
+        ControlFlow::Break(error) => Err(error),
+    }
+}
+
+/// Planning size of a query or CTE body, with each CTE reference counted as
+/// that CTE's whole body plus one.
+#[derive(Clone, Copy, Default)]
+struct Size {
+    relations: usize,
+    joins: usize,
+    set_operations: usize,
+}
+impl Size {
+    fn add(&mut self, other: Size) {
+        self.relations = self.relations.saturating_add(other.relations);
+        self.joins = self.joins.saturating_add(other.joins);
+        self.set_operations = self.set_operations.saturating_add(other.set_operations);
+    }
+    fn max(self, other: Size) -> Size {
+        Size {
+            relations: self.relations.max(other.relations),
+            joins: self.joins.max(other.joins),
+            set_operations: self.set_operations.max(other.set_operations),
+        }
+    }
+    fn check(&self) -> ControlFlow<Error> {
+        if self.relations > MAX_SQL_RELATIONS
+            || self.joins > MAX_SQL_JOINS
+            || self.set_operations > MAX_SQL_SET_OPERATIONS
+        {
+            ControlFlow::Break(Error::Limit)
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+}
+
+/// One pass over the parsed statement. The tree it walks is bounded by
+/// [`MAX_SQL_TOKENS`]; each node costs a constant. CTE names are matched
+/// case-insensitively and across scopes, taking the largest body of a
+/// name, so shadowing can only overcount.
+#[derive(Default)]
+struct Gate {
+    /// Sizes of the queries being visited, innermost last.
+    open: Vec<Size>,
+    /// CTE bodies awaiting their size, by address of their `Query`.
+    bodies: Vec<(*const Query, String)>,
+    /// Size of each CTE body, by lowercased name.
+    ctes: HashMap<String, Size>,
+    defined: usize,
+}
+impl Gate {
+    fn top(&mut self) -> &mut Size {
+        if self.open.is_empty() {
+            self.open.push(Size::default());
+        }
+        let last = self.open.len() - 1;
+        &mut self.open[last]
+    }
+}
+impl Visitor for Gate {
+    type Break = Error;
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Error> {
+        // `FOR UPDATE`/`FOR SHARE`, `FOR XML`/`FOR JSON` and dialect clauses
+        // that DataFusion would otherwise ignore.
+        if !query.locks.is_empty()
+            || query.for_clause.is_some()
+            || query.settings.is_some()
+            || query.format_clause.is_some()
+            || !query.pipe_operators.is_empty()
+        {
+            return ControlFlow::Break(Error::Sql);
+        }
+        if let Some(with) = &query.with {
+            if with.recursive {
+                return ControlFlow::Break(Error::Sql);
+            }
+            for cte in &with.cte_tables {
+                self.defined += 1;
+                if self.defined > MAX_SQL_CTES {
+                    return ControlFlow::Break(Error::Limit);
+                }
+                self.bodies.push((
+                    std::ptr::from_ref(cte.query.as_ref()),
+                    cte.alias.name.value.to_lowercase(),
+                ));
+            }
+        }
+        let mut size = Size::default();
+        let mut pending = vec![query.body.as_ref()];
+        while let Some(body) = pending.pop() {
+            if let SetExpr::SetOperation { left, right, .. } = body {
+                size.set_operations += 1;
+                pending.push(left);
+                pending.push(right);
+            }
+        }
+        self.open.push(size);
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, query: &Query) -> ControlFlow<Error> {
+        let size = self.open.pop().unwrap_or_default();
+        size.check()?;
+        let address = std::ptr::from_ref(query);
+        if let Some(i) = self.bodies.iter().position(|(body, _)| *body == address) {
+            let (_, name) = self.bodies.swap_remove(i);
+            let entry = self.ctes.entry(name).or_default();
+            *entry = entry.max(size);
+        } else if let Some(parent) = self.open.last_mut() {
+            parent.add(size);
+            parent.check()?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Error> {
+        // CUBE, ROLLUP and GROUPING SETS plan one grouping per subset: 2^N
+        // groupings for CUBE of N expressions, before any limit applies.
+        if let GroupByExpr::All(modifiers) | GroupByExpr::Expressions(_, modifiers) =
+            &select.group_by
+            && !modifiers.is_empty()
+        {
+            return ControlFlow::Break(Error::Sql);
+        }
+        let joins = select
+            .from
+            .iter()
+            .map(|from| from.joins.len())
+            .sum::<usize>()
+            .saturating_add(select.from.len().saturating_sub(1));
+        let top = self.top();
+        top.joins = top.joins.saturating_add(joins);
+        top.check()
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Error> {
+        let mut size = Size {
+            relations: 1,
+            ..Size::default()
+        };
+        match factor {
+            TableFactor::Table { name, sample, .. } => {
+                if sample.is_some() {
+                    return ControlFlow::Break(Error::Sql);
+                }
+                if let [part] = name.0.as_slice()
+                    && let Some(ident) = part.as_ident()
+                    && let Some(body) = self.ctes.get(&ident.value.to_lowercase())
+                {
+                    size.add(*body);
+                }
+            }
+            TableFactor::Derived { sample, .. } if sample.is_some() => {
+                return ControlFlow::Break(Error::Sql);
+            }
+            _ => {}
+        }
+        let top = self.top();
+        top.add(size);
+        top.check()
+    }
+
+    fn pre_visit_expr(&mut self, expr: &SqlExpr) -> ControlFlow<Error> {
+        match expr {
+            SqlExpr::Cube(_) | SqlExpr::Rollup(_) | SqlExpr::GroupingSets(_) => {
+                ControlFlow::Break(Error::Sql)
+            }
+            SqlExpr::Subquery(_) | SqlExpr::InSubquery { .. } | SqlExpr::Exists { .. } => {
+                let top = self.top();
+                top.relations = top.relations.saturating_add(1);
+                top.check()
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    }
+}
+
+/// Every scalar function and binary operator of `plan`, including inside
+/// subqueries, must be allowed. Checked on the planned and the optimized
+/// plan, because the SQL planner and the optimizer construct functions
+/// directly rather than through the session registry.
+fn check_expressions(plan: &LogicalPlan) -> Result<()> {
+    let mut allowed = true;
+    plan.apply_with_subqueries(|node| {
+        node.apply_expressions(|expr| {
+            expr.apply(|expr| {
+                allowed &= match expr {
+                    Expr::ScalarFunction(call) => ALLOWED_FUNCTIONS.contains(&call.func.name()),
+                    Expr::BinaryExpr(binary) => ALLOWED_OPERATORS.contains(&binary.op),
+                    _ => true,
+                };
+                Ok(if allowed {
+                    TreeNodeRecursion::Continue
+                } else {
+                    TreeNodeRecursion::Stop
+                })
+            })
+        })
+    })
+    .map_err(|_| Error::Query)?;
+    if allowed { Ok(()) } else { Err(Error::Sql) }
+}
+
+/// Per-query counters shared by every [`GuardExec`] of one plan.
+#[derive(Debug, Default)]
+struct Budget {
+    plan_bytes: AtomicUsize,
+    join_rows: AtomicUsize,
+}
+
+/// Bytes a batch references: the slices its arrays cover, not the whole
+/// buffers they share (a projection of a sealed batch allocates nothing).
+fn batch_bytes(batch: &RecordBatch) -> usize {
+    batch
+        .columns()
+        .iter()
+        .map(|column| {
+            column
+                .to_data()
+                .get_slice_memory_size()
+                .unwrap_or_else(|_| column.get_array_memory_size())
+        })
+        .fold(0, usize::saturating_add)
+}
+
+fn exhausted(what: &str) -> DataFusionError {
+    DataFusionError::ResourcesExhausted(format!("{what} exceeds its haystack-sql cap"))
+}
+
+/// What a [`GuardExec`] checks on the batches its input produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Watch {
+    /// The output of an operator with inputs: [`MAX_BATCH_BYTES`] per batch
+    /// and [`MAX_PLAN_BYTES`] over the plan; for a hash or sort-merge join,
+    /// also [`MAX_JOIN_ROWS`].
+    Output { join: bool },
+    /// The input of a window operator, which buffers it without reserving:
+    /// every batch is reserved from the query's pool until the stream ends.
+    WindowInput,
+    /// The output of a leaf: yields to the runtime before each batch. A
+    /// parent can do a whole input batch's work without producing output (a
+    /// filtered join probe that matches nothing loops internally), and
+    /// Tokio's cooperative budget lets a leaf deliver 128 batches before it
+    /// yields, so without this a query might never reach a point where abort
+    /// and the deadline take effect.
+    Leaf,
+}
+
+/// Wraps one operator's output stream and fails it with
+/// `ResourcesExhausted` (`Error::Limit`) when a [`Watch`] bound is passed.
+/// The plan runs one partition, so each guard executes once per query.
+#[derive(Debug)]
+struct GuardExec {
+    input: Arc<dyn ExecutionPlan>,
+    watch: Watch,
+    budget: Arc<Budget>,
+    properties: Arc<PlanProperties>,
+}
+impl GuardExec {
+    fn wrap(input: Arc<dyn ExecutionPlan>, watch: Watch, budget: &Arc<Budget>) -> Arc<Self> {
+        Arc::new(Self {
+            properties: input.properties().clone(),
+            input,
+            watch,
+            budget: budget.clone(),
+        })
+    }
+}
+impl DisplayAs for GuardExec {
+    fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GuardExec: {:?}", self.watch)
+    }
+}
+impl ExecutionPlan for GuardExec {
+    fn name(&self) -> &str {
+        "GuardExec"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn apply_expressions(
+        &self,
+        _: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
+    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        match (children.pop(), children.is_empty()) {
+            (Some(input), true) => Ok(GuardExec::wrap(input, self.watch, &self.budget)),
+            _ => Err(DataFusionError::Internal("GuardExec has one child".into())),
+        }
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> datafusion::error::Result<SendableRecordBatchStream> {
+        let input = self.input.execute(partition, context.clone())?;
+        let schema = input.schema();
+        if self.watch == Watch::Leaf {
+            let yielding = input.then(|batch| async move {
+                tokio::task::yield_now().await;
+                batch
+            });
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, yielding)));
+        }
+        let (watch, budget) = (self.watch, self.budget.clone());
+        let mut reservation = (watch == Watch::WindowInput).then(|| {
+            MemoryConsumer::new("haystack-sql window input").register(context.memory_pool())
+        });
+        let checked = input.map(move |batch| {
+            let batch = batch?;
+            let bytes = batch_bytes(&batch);
+            match watch {
+                Watch::Leaf => {}
+                Watch::WindowInput => {
+                    if let Some(reservation) = reservation.as_mut() {
+                        reservation.try_grow(bytes)?;
+                    }
+                }
+                Watch::Output { join } => {
+                    if bytes > MAX_BATCH_BYTES {
+                        return Err(exhausted("an intermediate batch"));
+                    }
+                    let total = budget.plan_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    if total.saturating_add(bytes) > MAX_PLAN_BYTES {
+                        return Err(exhausted("intermediate bytes"));
+                    }
+                    let rows = if join { batch.num_rows() } else { 0 };
+                    let total = budget.join_rows.fetch_add(rows, Ordering::Relaxed);
+                    if total.saturating_add(rows) > MAX_JOIN_ROWS {
+                        return Err(exhausted("join output rows"));
+                    }
+                }
+            }
+            Ok(batch)
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, checked)))
+    }
+}
+
+fn is_join(plan: &dyn ExecutionPlan) -> bool {
+    let plan: &dyn Any = plan;
+    plan.is::<HashJoinExec>() || plan.is::<SortMergeJoinExec>()
+}
+
+fn is_window(plan: &dyn ExecutionPlan) -> bool {
+    let plan: &dyn Any = plan;
+    plan.is::<WindowAggExec>() || plan.is::<BoundedWindowAggExec>()
+}
+
+/// Wraps every leaf in a yielding [`GuardExec`], every operator that has
+/// inputs in a checking one and then a `CooperativeExec`, and feeds each
+/// window operator through a reserving guard. `CooperativeExec` makes each output batch consume Tokio's
+/// cooperative budget: DataFusion 55 makes only leaves cooperative, and an
+/// equi-join on a low-cardinality key can emit millions of rows per probe
+/// batch without polling a leaf, ignoring abort for that long.
+fn guarded(plan: Arc<dyn ExecutionPlan>, budget: &Arc<Budget>) -> Result<Arc<dyn ExecutionPlan>> {
     plan.transform_up(|node| {
         let any: &dyn Any = node.as_ref();
-        Ok(
-            if node.children().is_empty() || any.is::<CooperativeExec>() {
-                Transformed::no(node)
-            } else {
-                Transformed::yes(Arc::new(CooperativeExec::new(node)) as Arc<dyn ExecutionPlan>)
-            },
-        )
+        if node.children().is_empty() {
+            return Ok(Transformed::yes(
+                GuardExec::wrap(node, Watch::Leaf, budget) as Arc<dyn ExecutionPlan>
+            ));
+        }
+        if any.is::<CooperativeExec>() || any.is::<GuardExec>() {
+            return Ok(Transformed::no(node));
+        }
+        let node = if is_window(node.as_ref()) {
+            let inputs = node
+                .children()
+                .into_iter()
+                .map(|child| {
+                    GuardExec::wrap(child.clone(), Watch::WindowInput, budget)
+                        as Arc<dyn ExecutionPlan>
+                })
+                .collect();
+            datafusion::physical_plan::replace_children_if_necessary(node, inputs)?
+        } else {
+            node
+        };
+        let join = is_join(node.as_ref());
+        let guard = GuardExec::wrap(node, Watch::Output { join }, budget);
+        Ok(Transformed::yes(
+            Arc::new(CooperativeExec::new(guard)) as Arc<dyn ExecutionPlan>
+        ))
     })
     .map(|t| t.data)
     .map_err(|_| Error::Query)

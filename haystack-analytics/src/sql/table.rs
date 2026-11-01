@@ -237,6 +237,15 @@ impl TableProvider for Snapshot {
     }
 }
 
+/// The `snapshots.kind` spelling, independent of `HistoryKind`'s `Debug`.
+fn kind_name(kind: HistoryKind) -> &'static str {
+    match kind {
+        HistoryKind::Bool => "Bool",
+        HistoryKind::Number => "Number",
+        HistoryKind::Str => "Str",
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -269,7 +278,7 @@ impl Provenance {
             text(|s| s.identity.export_id.clone()),
             text(|s| s.identity.manifest_sha256.clone()),
             text(|s| s.header.metadata.id.clone()),
-            text(|s| format!("{:?}", s.header.metadata.schema.kind)),
+            text(|s| kind_name(s.header.metadata.schema.kind).to_owned()),
             text(|s| s.header.metadata.schema.timezone.clone()),
             Arc::new(StringArray::from_iter(
                 snapshots

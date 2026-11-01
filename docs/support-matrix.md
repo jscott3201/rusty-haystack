@@ -236,15 +236,19 @@ read-only DataFusion SQL over captures that were fully drained, validated and
 sealed in memory at registration. The workspace selections above never enable
 it, so the `core-features` job runs Clippy `-D warnings` and the tests for the
 package with `--features sql`, and `./.agents/gate.sh` mirrors both. That job
-runs on Ubuntu only; macOS and Windows are not qualified for the feature.
+runs on Ubuntu only. On `main`, the `test` matrix also runs a compile-only
+`cargo check --features sql` on macOS and Windows; the feature's tests are not
+run there, so those platforms are not qualified for it.
 
 The tests compare filter, aggregate, join, NA/NaN, DST and leap-second results
 against an independent fold over the served source samples, reject every
 incomplete or corrupt capture kind, and cover cancellation, deadlines,
-admission, memory and output caps, side-effect and runaway-join rejection,
-runtime shutdown and identity after the capture directory is deleted.
-Expression-evaluation memory is not fully bounded, and the deadline is
-best-effort for operators that do not yield. `deny.toml` ignores three `zstd`
+admission, memory, intermediate and output caps, pre-planning token and
+statement-shape bounds (in an unoptimized build, at and one past each cap),
+side-effect, string-building and runaway-join rejection, runtime shutdown and
+identity after the capture directory is deleted. Expression temporaries are
+not reserved from the pool, and planning and single-poll work cannot be
+cancelled. `deny.toml` ignores three `zstd`
 advisories reachable only through Arrow IPC, which this feature never uses
 ([#131](https://github.com/jscott3201/rusty-haystack/issues/131)). No live
 pushdown, SQL server, spill, Python, CLI or MCP surface is selected. See

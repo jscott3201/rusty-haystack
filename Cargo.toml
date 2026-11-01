@@ -43,9 +43,9 @@ chrono = "0.4"
 chrono-tz = "0.10.4"
 clap = "4"
 criterion = "0.8"
+dashmap = "6"
 # Optional snapshot SQL only; not DataFusion's `parquet` feature.
 datafusion = { version = "=55.2.0", default-features = false, features = ["sql", "recursive_protection"] }
-dashmap = "6"
 env_logger = "0.11"
 flate2 = "1"
 crc32fast = "1.5.2"

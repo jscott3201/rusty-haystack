@@ -56,11 +56,24 @@
   A fixed schema maps NA to NULL with `present = false`, keeps NaN/±Infinity bits, and
   carries `ts` (UTC), `ts_local` (stored offset applied) and the exact timestamp
   components; a `snapshots` table carries provenance. Queries run on an engine-owned
-  runtime with process-wide admission, a per-query memory pool with spill disabled, a
-  timeout, output caps, an SQL length and parser-recursion bound; DDL, DML, statements,
-  table functions, URL tables, cross and non-equi joins and recursive queries are refused.
-  `Error` gains `Sql` and `Query`. The timeout is best-effort for operators that do not
-  yield, and expression-evaluation memory is not fully pool-bounded. See
+  runtime (32 MiB thread stacks) with process-wide admission, a per-query memory pool
+  with spill disabled, a timeout and output caps. Before planning, the SQL text is
+  bounded in bytes and in tokens (by an iterative tokenizer, so a long left-deep chain
+  such as `1+1+…` is `Error::Limit` rather than a stack overflow), and the parsed
+  statement in relations, joins, set operations and CTEs, with CTE references expanded;
+  only queries are accepted, and `CUBE`, `ROLLUP`, `GROUPING SETS`, `TABLESAMPLE` and
+  locking clauses are refused. During execution, window input is reserved from the pool,
+  and per-batch bytes, bytes over the whole plan and join output rows are capped; every
+  scan yields before each batch, so a join that loops without output still stops at its
+  deadline. Scalar
+  functions and binary operators are allowlisted: string building (`||`, `concat`,
+  `replace`, `regexp_replace`, `overlay`, `lpad`/`rpad`/`repeat` and similar) and
+  `arrow_cast` are not available in SQL, so concatenate after the query. DDL, DML,
+  statements, table functions, URL tables, cross and non-equi joins and recursive queries
+  are refused. `Error` gains `Sql` and `Query`, and the `Cancelled`, `Deadline`, `Limit`,
+  `Capacity`, `Runtime` and `Worker` messages no longer say "capture". The timeout is best-effort:
+  planning and work within one poll cannot be cancelled, and a stuck query keeps its
+  process-wide permit. Expression temporaries are not reserved from the pool. See
   `docs/sql-snapshots.md`.
 - `haystack_core::codecs::history::result_header_grid` encodes a validated
   `HistoryReadHeader` as the result envelope without collecting its sample rows;
