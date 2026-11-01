@@ -101,7 +101,8 @@ jobs:
           cargo +1.99.1 test --locked -p rusty-haystack-cli --features mcp,mcp-http
 
   # Separate package invocations prevent workspace members from unifying extra
-  # dependency features into core's supported minimal/default builds.
+  # dependency features into core's supported minimal/default builds, and
+  # qualify the optional analytics SQL feature on its own.
   core-features:
     name: Core minimal and default features
     runs-on: ubuntu-latest
@@ -118,6 +119,10 @@ jobs:
       - run: cargo +1.99.1 test --locked -p rusty-haystack-core --no-default-features
       - run: cargo +1.99.1 clippy --locked -p rusty-haystack-core --all-targets -- -D warnings
       - run: cargo +1.99.1 test --locked -p rusty-haystack-core
+      # The analytics `sql` feature (DataFusion) is optional; the workspace
+      # commands never enable it, so it is qualified here by package.
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-analytics --features sql --all-targets -- -D warnings
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-analytics --features sql
 
   # Keep one exact current-stable lane separate from the conditional OS matrix:
   # compatibility coverage should not multiply platform jobs.

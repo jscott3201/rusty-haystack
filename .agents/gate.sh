@@ -83,6 +83,13 @@ run "clippy (core default, MSRV 1.99.1)" \
 run "tests (core default, MSRV 1.99.1)" \
   cargo +1.99.1 test --locked -p rusty-haystack-core  # ci.yml: jobs.core-features
 
+# The analytics `sql` feature (DataFusion) is optional and never enabled by the
+# workspace commands above, so it is linted and tested by package.
+run "clippy (analytics sql, MSRV 1.99.1)" \
+  cargo +1.99.1 clippy --locked -p rusty-haystack-analytics --features sql --all-targets -- -D warnings  # ci.yml: jobs.core-features
+run "tests (analytics sql, MSRV 1.99.1)" \
+  cargo +1.99.1 test --locked -p rusty-haystack-analytics --features sql  # ci.yml: jobs.core-features
+
 # The root toolchain keeps normal development on the MSRV lane. CI also carries
 # one exact current-stable Ubuntu lane, mirrored here without multiplying OSes.
 # The two pins coincide at 1.99.1 until a later reviewed stable update.
