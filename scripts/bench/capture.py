@@ -16,7 +16,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGES = ("rusty-haystack-core", "rusty-haystack-server")
-TOOLCHAIN = "1.99.0"
+TOOLCHAIN = "1.99.1"
 
 
 def check_build_inputs(root, environ):

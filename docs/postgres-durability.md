@@ -207,7 +207,7 @@ outside this profile.
 ## Explicit qualification
 
 The baseline local gate remains unchanged. Run it and the selected PostgreSQL
-profile separately. The profile requires Docker, OpenSSL, Rust 1.99.0 and
+profile separately. The profile requires Docker, OpenSSL, Rust 1.99.1 and
 cargo-nextest 0.9.146:
 
 ```sh

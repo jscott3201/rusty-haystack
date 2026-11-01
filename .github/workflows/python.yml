@@ -12,8 +12,8 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE" --tag "$GITHUB_REF_NAME"
@@ -69,8 +69,8 @@ jobs:
             os: macos-latest
             target: aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python.version }}
       - name: Resolve immutable Linux builder image
@@ -86,7 +86,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         if: runner.os == 'macOS'
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           targets: ${{ matrix.target }}
       - name: Bind macOS compiler and builder before construction
         if: runner.os == 'macOS'
@@ -101,7 +101,7 @@ jobs:
       - name: Build one wheel and capture actual Linux builder versions
         uses: PyO3/maturin-action@v1
         with:
-          rust-toolchain: "1.99.0"
+          rust-toolchain: "1.99.1"
           maturin-version: "v1.15.0"
           target: ${{ matrix.target }}
           container: ${{ steps.container.outputs.image }}
@@ -120,7 +120,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           PYTHON_TAG: ${{ matrix.python.tag }}
         run: python scripts/release/artifacts.py seal --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --bundle target/release-candidate --kind wheel --tools target/builder.json --target "$TARGET" --python-tag "$PYTHON_TAG"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: candidate
         with:
           name: candidate-wheel-${{ matrix.target }}-${{ matrix.python.tag }}-${{ github.run_attempt }}
@@ -145,13 +145,13 @@ jobs:
       sdist: ${{ steps.candidate.outputs.artifact-id }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - run: python -m pip install maturin==1.15.0
       - run: cargo fetch --locked
@@ -159,7 +159,7 @@ jobs:
         env:
           SOURCE: ${{ github.sha }}
         run: python scripts/release/build.py sdist --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target source --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: candidate
         with:
           name: candidate-sdist-${{ github.run_attempt }}
@@ -172,7 +172,7 @@ jobs:
           ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
         run: |
           printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: sdist-build-logs-${{ github.run_attempt }}
@@ -187,13 +187,13 @@ jobs:
       proof: ${{ steps.proof.outputs.artifact-id }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - run: cargo fetch --locked
       - name: Bind downloads to successful producer artifact IDs
@@ -212,13 +212,13 @@ jobs:
           python scripts/release/qualify.py --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile python --python "$(command -v python)" --work "$RUNNER_TEMP/consumer-work" --evidence "$RUNNER_TEMP/evidence"
           python scripts/release/artifacts.py stage --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile python --evidence "$RUNNER_TEMP/evidence" --output "$RUNNER_TEMP/publication" > "$RUNNER_TEMP/stage.json"
           python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile python --receipt "$RUNNER_TEMP/stage.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: qualified
         with:
           name: qualified-python-${{ github.run_attempt }}
           path: ${{ runner.temp }}/publication
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: proof
         if: always()
         with:
@@ -241,8 +241,8 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Bind downloads to successful producer artifact IDs

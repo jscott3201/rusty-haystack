@@ -20,7 +20,7 @@ or task capability is exposed.
 ## Standalone launch
 
 ```sh
-cargo +1.99.0 install --locked --path haystack-cli --features mcp
+cargo +1.99.1 install --locked --path haystack-cli --features mcp
 haystack mcp stdio --config /absolute/path/mcp.toml
 ```
 
@@ -183,8 +183,8 @@ Tokio stdin worker can hold runtime shutdown open.
 Run focused adapter and lifecycle tests:
 
 ```sh
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features stdio
-cargo +1.99.0 nextest run --locked -p rusty-haystack-app -E 'test(joined_read_waits)'
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features stdio
+cargo +1.99.1 nextest run --locked -p rusty-haystack-app -E 'test(joined_read_waits)'
 uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify.py
 ```
 

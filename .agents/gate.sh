@@ -59,41 +59,41 @@ skip() {
 run "CI policy and workflow wiring" python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v  # ci.yml: jobs.ci-policy
 run "benchmark capture controls" python3 -m unittest discover -s scripts/bench -p 'test_capture.py' -v  # ci.yml: jobs.ci-policy
 run "artifact provenance and staging controls" python3 -m unittest discover -s scripts/release/tests -v  # ci.yml: jobs.ci-policy
-run "rustfmt (MSRV 1.99.0)" cargo +1.99.0 fmt --all --check  # ci.yml: jobs.fmt
-run "clippy (MSRV 1.99.0)" \
-  cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.clippy
-run "tests (MSRV 1.99.0)" \
-  cargo +1.99.0 test --locked --workspace --exclude rusty-haystack  # ci.yml: jobs.test
+run "rustfmt (MSRV 1.99.1)" cargo +1.99.1 fmt --all --check  # ci.yml: jobs.fmt
+run "clippy (MSRV 1.99.1)" \
+  cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.clippy
+run "tests (MSRV 1.99.1)" \
+  cargo +1.99.1 test --locked --workspace --exclude rusty-haystack  # ci.yml: jobs.test
 
 # The chrono-tz feature is default-off, so the commands above never compile the
 # timezone paths. CI checks them separately and so must this.
-run "clippy (MSRV 1.99.0, chrono-tz)" \
-  cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml: jobs.clippy
-run "tests (MSRV 1.99.0, chrono-tz)" \
-  cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz  # ci.yml: jobs.test
+run "clippy (MSRV 1.99.1, chrono-tz)" \
+  cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml: jobs.clippy
+run "tests (MSRV 1.99.1, chrono-tz)" \
+  cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz  # ci.yml: jobs.test
 
 # Separate Cargo invocations qualify core without workspace feature unification.
 # Default is currently empty, but both contracts must survive future changes.
-run "clippy (core minimal, MSRV 1.99.0)" \
-  cargo +1.99.0 clippy --locked -p rusty-haystack-core --no-default-features --all-targets -- -D warnings  # ci.yml: jobs.core-features
-run "tests (core minimal, MSRV 1.99.0)" \
-  cargo +1.99.0 test --locked -p rusty-haystack-core --no-default-features  # ci.yml: jobs.core-features
-run "clippy (core default, MSRV 1.99.0)" \
-  cargo +1.99.0 clippy --locked -p rusty-haystack-core --all-targets -- -D warnings  # ci.yml: jobs.core-features
-run "tests (core default, MSRV 1.99.0)" \
-  cargo +1.99.0 test --locked -p rusty-haystack-core  # ci.yml: jobs.core-features
+run "clippy (core minimal, MSRV 1.99.1)" \
+  cargo +1.99.1 clippy --locked -p rusty-haystack-core --no-default-features --all-targets -- -D warnings  # ci.yml: jobs.core-features
+run "tests (core minimal, MSRV 1.99.1)" \
+  cargo +1.99.1 test --locked -p rusty-haystack-core --no-default-features  # ci.yml: jobs.core-features
+run "clippy (core default, MSRV 1.99.1)" \
+  cargo +1.99.1 clippy --locked -p rusty-haystack-core --all-targets -- -D warnings  # ci.yml: jobs.core-features
+run "tests (core default, MSRV 1.99.1)" \
+  cargo +1.99.1 test --locked -p rusty-haystack-core  # ci.yml: jobs.core-features
 
 # The root toolchain keeps normal development on the MSRV lane. CI also carries
 # one exact current-stable Ubuntu lane, mirrored here without multiplying OSes.
-# The two pins coincide at 1.99.0 until a later reviewed stable update.
-run "clippy (current stable 1.99.0)" \
-  cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.current-stable
-run "clippy (current stable 1.99.0, chrono-tz)" \
-  cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml: jobs.current-stable
-run "tests (current stable 1.99.0)" \
-  cargo +1.99.0 test --locked --workspace --exclude rusty-haystack  # ci.yml: jobs.current-stable
-run "tests (current stable 1.99.0, chrono-tz)" \
-  cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz  # ci.yml: jobs.current-stable
+# The two pins coincide at 1.99.1 until a later reviewed stable update.
+run "clippy (current stable 1.99.1)" \
+  cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.current-stable
+run "clippy (current stable 1.99.1, chrono-tz)" \
+  cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings  # ci.yml: jobs.current-stable
+run "tests (current stable 1.99.1)" \
+  cargo +1.99.1 test --locked --workspace --exclude rusty-haystack  # ci.yml: jobs.current-stable
+run "tests (current stable 1.99.1, chrono-tz)" \
+  cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz  # ci.yml: jobs.current-stable
 
 # The PyO3 crate is excluded above because it needs a Python interpreter to link.
 # It is the crate users actually execute, so skipping it silently would hide real
@@ -174,8 +174,8 @@ if [[ -e .venv || -L .venv ]]; then
     fi
     # CI lints this crate here rather than in the Clippy job, because that job
     # excludes it. Running it anywhere else would leave it unlinted entirely.
-    run "clippy (pyo3, MSRV 1.99.0)" \
-      cargo +1.99.0 clippy --locked -p rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.python
+    run "clippy (pyo3, MSRV 1.99.1)" \
+      cargo +1.99.1 clippy --locked -p rusty-haystack --all-targets -- -D warnings  # ci.yml: jobs.python
   else
     printf '\033[31mFAIL\033[0m python bindings and PyO3 clippy — invalid .venv\n'
   fi
@@ -198,8 +198,8 @@ if (( FULL )); then
   # manifest. A bare `cargo deny check` inspects a narrower graph, so a crate
   # pulled in only by a non-default feature — `chrono-tz`, here — could violate
   # an advisory in CI while this printed green.
-  run "cargo-deny (MSRV 1.99.0)" \
-    cargo +1.99.0 deny --locked --all-features --manifest-path ./Cargo.toml check  # ci.yml: jobs.deny
+  run "cargo-deny (MSRV 1.99.1)" \
+    cargo +1.99.1 deny --locked --all-features --manifest-path ./Cargo.toml check  # ci.yml: jobs.deny
 else
   skip "cargo-deny" "run with --full"
 fi

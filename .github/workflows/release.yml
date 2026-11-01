@@ -16,13 +16,13 @@ jobs:
     name: Validate Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - name: Check parsed package version against tag
         run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE" --tag "$GITHUB_REF_NAME"
@@ -59,13 +59,13 @@ jobs:
             output: cli_windows_x86_64
             runner: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
@@ -87,7 +87,7 @@ jobs:
             extra=(--cross-image ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5)
           fi
           python scripts/release/build.py cli --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work" "${extra[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: candidate
         with:
           name: candidate-cli-${{ matrix.target }}-${{ github.run_attempt }}
@@ -104,7 +104,7 @@ jobs:
           test -n "$ARTIFACT_ID"
           echo "$OUTPUT_KEY=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
           printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: cli-build-logs-${{ matrix.target }}-${{ github.run_attempt }}
@@ -119,13 +119,13 @@ jobs:
       proof: ${{ steps.proof.outputs.artifact-id }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - name: Bind downloads to successful producer artifact IDs
         id: inventory
@@ -143,13 +143,13 @@ jobs:
           python scripts/release/qualify.py --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile binaries --python "$(command -v python)" --work "$RUNNER_TEMP/consumer-work" --evidence "$RUNNER_TEMP/evidence"
           python scripts/release/artifacts.py stage --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile binaries --evidence "$RUNNER_TEMP/evidence" --output "$RUNNER_TEMP/publication" > "$RUNNER_TEMP/stage.json"
           python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile binaries --receipt "$RUNNER_TEMP/stage.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: qualified
         with:
           name: qualified-binaries-${{ github.run_attempt }}
           path: ${{ runner.temp }}/publication
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: proof
         if: always()
         with:
@@ -169,10 +169,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
 
       # Crates are separately packaged from source, not the qualified CLI archive.
@@ -221,8 +221,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -245,7 +245,7 @@ jobs:
         env:
           SOURCE: ${{ github.sha }}
         run: python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile binaries --receipt "$RUNNER_TEMP/proof/stage.json"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           fail_on_unmatched_files: true

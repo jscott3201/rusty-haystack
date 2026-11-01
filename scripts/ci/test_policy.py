@@ -176,23 +176,23 @@ class WorkflowContractTests(unittest.TestCase):
         for flags in ("", " --no-default-features"):
             for command in ("clippy", "test"):
                 suffix = " --all-targets -- -D warnings" if command == "clippy" else ""
-                self.assertIn(f"\n      - run: cargo +1.99.0 {command} --locked -p rusty-haystack-core{flags}{suffix}\n",
+                self.assertIn(f"\n      - run: cargo +1.99.1 {command} --locked -p rusty-haystack-core{flags}{suffix}\n",
                               jobs["core-features"])
         self.assertIn("\n    runs-on: ubuntu-latest\n", jobs["sqlite"])
-        self.assertIn("cargo +1.99.0 nextest run --locked -p rusty-haystack-app --features sqlite -E 'test(sqlite::qualification) & not test(process_crash_worker)' --success-output immediate", jobs["sqlite"])
+        self.assertIn("cargo +1.99.1 nextest run --locked -p rusty-haystack-app --features sqlite -E 'test(sqlite::qualification) & not test(process_crash_worker)' --success-output immediate", jobs["sqlite"])
         self.assertIn("run: python3 -m unittest discover -s scripts/sqlite -p 'test_*.py' -v", jobs["sqlite"])
         for features in ("sqlite", "postgres,sqlite"):
-            self.assertIn(f"cargo +1.99.0 clippy --locked -p rusty-haystack-app --no-default-features --features {features} --all-targets -- -D warnings", jobs["sqlite"])
-            self.assertIn(f"cargo +1.99.0 nextest run --locked -p rusty-haystack-app --no-default-features --features {features}", jobs["sqlite"])
-        self.assertIn("cargo +1.99.0 test --locked -p rusty-haystack-app --no-default-features --features sqlite --doc", jobs["sqlite"])
+            self.assertIn(f"cargo +1.99.1 clippy --locked -p rusty-haystack-app --no-default-features --features {features} --all-targets -- -D warnings", jobs["sqlite"])
+            self.assertIn(f"cargo +1.99.1 nextest run --locked -p rusty-haystack-app --no-default-features --features {features}", jobs["sqlite"])
+        self.assertIn("cargo +1.99.1 test --locked -p rusty-haystack-app --no-default-features --features sqlite --doc", jobs["sqlite"])
         self.assertIn("\n    runs-on: ubuntu-latest\n", jobs["postgres"])
         self.assertIn("run: python3 scripts/postgres/qualify.py --docker", jobs["postgres"])
         self.assertIn("run: python3 scripts/postgres/standalone.py --docker", jobs["postgres"])
-        self.assertIn("cargo +1.99.0 clippy --locked -p rusty-haystack-cli --features postgres --all-targets -- -D warnings", jobs["postgres"])
-        self.assertIn("cargo +1.99.0 test --locked -p rusty-haystack-cli --features postgres", jobs["postgres"])
+        self.assertIn("cargo +1.99.1 clippy --locked -p rusty-haystack-cli --features postgres --all-targets -- -D warnings", jobs["postgres"])
+        self.assertIn("cargo +1.99.1 test --locked -p rusty-haystack-cli --features postgres", jobs["postgres"])
         self.assertIn("run: python3 -m unittest discover -s scripts/postgres -p 'test_*.py' -v", jobs["postgres"])
         self.assertIn("--features postgres --all-targets -- -D warnings", jobs["postgres"])
-        self.assertIn("cargo +1.99.0 test --locked -p rusty-haystack-app --features postgres", jobs["postgres"])
+        self.assertIn("cargo +1.99.1 test --locked -p rusty-haystack-app --features postgres", jobs["postgres"])
         self.assertIn("\n    uses: ./.github/workflows/codeql.yml\n", jobs["codeql"])
         self.assertIn("\n      security-events: write\n", jobs["codeql"])
         for trigger in ("workflow_call", "schedule", "workflow_dispatch"):

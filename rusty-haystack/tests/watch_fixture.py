@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def build_fixture():
     if os.environ.get("HAYSTACK_WATCH_FIXTURE"):
         return Path(os.environ["HAYSTACK_WATCH_FIXTURE"]).resolve()
-    subprocess.run(["cargo", "+1.99.0", "build", "--locked", "-p", "rusty-haystack-server", "--example", "python_watch_fixture"], cwd=ROOT, check=True, timeout=300)
+    subprocess.run(["cargo", "+1.99.1", "build", "--locked", "-p", "rusty-haystack-server", "--example", "python_watch_fixture"], cwd=ROOT, check=True, timeout=300)
     return ROOT / "target/debug/examples/python_watch_fixture"
 
 class Fixture:

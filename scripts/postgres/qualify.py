@@ -165,7 +165,7 @@ def main():
     parser.add_argument("--docker", action="store_true", help="create and clean disposable bounded Docker fixtures")
     parser.add_argument("--fixture", type=Path)
     parser.add_argument("--plain-fixture", type=Path)
-    parser.add_argument("--toolchain", default="1.99.0")
+    parser.add_argument("--toolchain", default="1.99.1")
     args = parser.parse_args()
     if args.docker and (args.fixture or args.plain_fixture):
         parser.error("--docker cannot consume externally owned fixtures")

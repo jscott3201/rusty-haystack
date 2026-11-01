@@ -42,7 +42,7 @@ class WorkflowContracts(unittest.TestCase):
             self.assertIn('\n'+GUARD+'\n',job)
             self.assertIn(prerequisite,self.needs(job))
         self.assertIn('Crates are separately packaged from source',release['publish-crates'])
-        for job,action,path in ((release['github-release'],'softprops/action-gh-release@v2','files: ${{ runner.temp }}/publication/*'),(python['publish-pypi'],'pypa/gh-action-pypi-publish@release/v1','packages-dir: ${{ runner.temp }}/publication')):
+        for job,action,path in ((release['github-release'],'softprops/action-gh-release@v3','files: ${{ runner.temp }}/publication/*'),(python['publish-pypi'],'pypa/gh-action-pypi-publish@release/v1','packages-dir: ${{ runner.temp }}/publication')):
             self.assertIn('artifacts.py check-staged',job)
             self.assertLess(job.index('artifacts.py check-staged'),job.index(action))
             self.assertIn(path,job)
