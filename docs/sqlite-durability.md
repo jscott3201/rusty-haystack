@@ -73,11 +73,14 @@ closing it cannot prematurely close the entity authority.
 
 ## Native durability and recovery
 
-The exact optional dependency is rusqlite **0.40.2**, using its bundled
-libsqlite3-sys **0.38.2** / SQLite **3.53.2**. First-party code uses safe APIs; the
+The exact optional dependency is rusqlite **0.41.1**, using its bundled
+libsqlite3-sys **0.39.1** / SQLite **3.54.1**. First-party code uses safe APIs; the
 existing `unsafe_code = "forbid"` workspace policy remains in force. SQLite's C
 implementation and its dependency bindings are an explicitly selected native
 dependency, not first-party unsafe code.
+Durability verification rejects any linked engine older than 3.54.1, and the
+native qualification asserts the exact `sqlite_version()` and `sqlite_source_id()`
+of the bundled build.
 
 Construction sets and reads back `journal_mode=WAL`, `synchronous=FULL`,
 `foreign_keys=ON`, `busy_timeout=5`, `fullfsync=ON` and
