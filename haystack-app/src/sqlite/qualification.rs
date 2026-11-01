@@ -1033,7 +1033,7 @@ async fn native_engine_identity_and_durability_pragmas_are_verified() {
     backend.with_connection(&stop,|connection| {
         storage::verify_durability(connection)?;
         let (version,source):(String,String)=connection.query_row("SELECT sqlite_version(),sqlite_source_id()",[],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
-        assert_eq!(version,"3.53.2");assert_eq!(source,"2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24");
+        assert_eq!(version,"3.54.1");assert_eq!(source,"2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76");
         println!("Bundled native SQLite {version}; source_id={source}");
         for name in ["journal_mode","synchronous","foreign_keys","busy_timeout","fullfsync","checkpoint_fullfsync"] {
             let value=connection.pragma_query_value(None,name,|row| match row.get_ref(0)? {rusqlite::types::ValueRef::Integer(value)=>Ok(value.to_string()),rusqlite::types::ValueRef::Text(value)=>Ok(String::from_utf8_lossy(value).into_owned()),_=>panic!("unexpected pragma value")}).unwrap();println!("{name}={value}");

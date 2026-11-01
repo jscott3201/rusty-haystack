@@ -122,7 +122,7 @@ For synchronous scripts, [`SyncHaystackClient`](rusty-haystack/README.md#owned-s
 
 ## Optional SQLite storage
 
-The application crate's `sqlite` feature selects a single-owner local file using bundled SQLite **3.53.2**. Entity CRUD, expected revisions, retained receipts and change-feed cursors survive close/reopen. Bounded live history reads and authorized one-point timestamp upserts retain samples, generations and receipts in a separate history authority. The [SQLite contract](docs/sqlite-durability.md) describes format 2, native cleanup, process-crash qualification and scope; a CLI selector and SQLite Python wheels are not selected.
+The application crate's `sqlite` feature selects a single-owner local file using bundled SQLite **3.54.1**. Entity CRUD, expected revisions, retained receipts and change-feed cursors survive close/reopen. Bounded live history reads and authorized one-point timestamp upserts retain samples, generations and receipts in a separate history authority. The [SQLite contract](docs/sqlite-durability.md) describes format 2, native cleanup, process-crash qualification and scope; a CLI selector and SQLite Python wheels are not selected.
 
 ## Optional PostgreSQL storage
 

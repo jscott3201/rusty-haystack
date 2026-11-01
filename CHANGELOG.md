@@ -54,6 +54,13 @@
 
 ### Changed
 
+- The optional SQLite profile is re-baselined from SQLite 3.53.2 to **3.54.1**:
+  `rusqlite` `=0.40.2` → `=0.41.1` (bundled `libsqlite3-sys` 0.38.2 → 0.39.1). 3.54.1 is
+  the 3.54.0 feature release plus a 32-bit heap-buffer-overflow fix and other upstream
+  fixes; nothing in either release changes WAL, `synchronous`, journal, checkpoint, busy
+  or progress-handler behaviour. Durability verification now rejects engines older than
+  3.54.1, and native qualification pins the 3.54.1 version and source ID. (#125)
+
 - Salts, nonces and the server secret are generated directly instead of by overwriting a
   zeroed buffer. Behaviour is identical; the old shape tripped a CodeQL
   `hard-coded-cryptographic-value` alert on the salt in `hash_password`, which was a false
