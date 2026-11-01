@@ -1,5 +1,5 @@
 #[path = "../tests/support/mod.rs"]
-mod support;
+pub(crate) mod support;
 use crate::{
     checkpoint::{Action, Checkpoints, Hook, Phase},
     *,

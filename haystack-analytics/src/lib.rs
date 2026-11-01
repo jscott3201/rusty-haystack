@@ -9,6 +9,8 @@ mod checkpoint;
 mod export;
 mod format;
 mod reader;
+#[cfg(feature = "sql")]
+pub mod sql;
 mod writer;
 
 pub use export::{
@@ -44,6 +46,13 @@ pub enum Error {
     Parquet,
     #[error("owned capture task failed")]
     Worker,
+    /// SQL text rejected before execution: unparsable, over a planning
+    /// bound, or a forbidden statement, table or operator.
+    #[error("SQL rejected")]
+    Sql,
+    /// Query execution failed for a reason other than a bound.
+    #[error("query execution failed")]
+    Query,
     #[error("manifest was published, but durability acknowledgment is uncertain: {export_id}")]
     PublishedUncertain { export_id: String },
 }
