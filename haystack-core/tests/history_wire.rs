@@ -523,3 +523,27 @@ fn incremental_header_enforces_schema_and_cumulative_source_bounds() {
     foreign.range = "2024-06-02".into();
     assert!(header.validate_for_request(&foreign).is_err());
 }
+
+#[test]
+fn header_only_serialization_matches_collected_header_without_claiming_eof() {
+    let expected = result();
+    let full = result_grid(&expected).unwrap();
+    let header = result_header_from_grid(&full).unwrap();
+    let empty = result_header_grid(&header).unwrap();
+    assert!(empty.rows.is_empty());
+    assert_eq!(empty.meta, full.meta);
+    assert_eq!(empty.cols, full.cols);
+    assert_eq!(result_header_from_grid(&empty).unwrap(), header);
+    assert!(HistoryReadValidator::new(header).unwrap().finish().is_err());
+    for terminal in [
+        HistoryTerminal::Limited(HistoryReason::Rows),
+        HistoryTerminal::Interrupted(HistoryReason::Cancelled),
+        HistoryTerminal::Failed(HistoryReason::Provider),
+    ] {
+        let mut expected = expected.clone();
+        expected.terminal = terminal;
+        let full = result_grid(&expected).unwrap();
+        let header = result_header_from_grid(&full).unwrap();
+        assert_eq!(result_header_grid(&header).unwrap().meta, full.meta);
+    }
+}

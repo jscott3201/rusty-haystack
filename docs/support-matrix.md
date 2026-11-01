@@ -206,4 +206,26 @@ workspace or hosted-CI gate. Its command, predeclared thresholds, positive contr
 measurements and native-buffer limits are documented in the
 [history client contract](history-reads.md#incremental-rust-http-consumption).
 Other formats remain buffered, and Python/CLI streaming, a local application
-provider adapter, Arrow/Parquet and progressive server encoding are not selected.
+provider adapter and progressive server encoding are not selected. Arrow/Parquet
+capture of one such read is the separate crate described next.
+
+## Parquet history captures
+
+The `rusty-haystack-analytics` library crate exports one completed
+`his_read_stream` session into an immutable local Parquet dataset and reopens it
+with bounded validation. It is a workspace member, so the workspace test and
+Clippy selections above include its unit and loopback integration tests:
+value/timestamp fidelity through an independent Parquet reader, injected
+failure and cancellation at every write/sync/publish boundary, no-clobber
+publication, corruption rejection, a guard-only hostile-mutation sweep, and (on
+Unix only) SIGKILL of a child process before and after the manifest commit link
+and owner-only file modes. No separate job or feature gate exists.
+
+Its retained-memory test is ignored by ordinary runs and was observed only on a
+local macOS release build; it is not a supported bound or a hosted-CI gate.
+Process-kill evidence does not qualify power loss, network filesystems or
+filesystems lacking hard links or directory `fsync`. Where the `main` profile
+runs workspace tests on Windows, directory sync is skipped and Windows
+durability is not qualified. No DataFusion, Python, CLI,
+MCP, object-store, append or resume surface is selected. See
+[Parquet history captures](parquet-history.md).
