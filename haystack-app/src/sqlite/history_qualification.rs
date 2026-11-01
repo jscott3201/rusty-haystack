@@ -1889,6 +1889,10 @@ async fn preadmitted_history_reads_drain_but_mutation_publication_is_fenced() {
     let handle = owner.handle();
     let read_guard = handle.admit().unwrap();
     let mutation_guard = handle.admit().unwrap();
+    // Consuming the two guards above lets the drain finish and stop the native
+    // backend. Hold a third across the final state check so it cannot race
+    // shutdown and observe `Stopped`.
+    let observer_guard = handle.admit().unwrap();
     let request = history_request(
         &history,
         "p",
@@ -1926,6 +1930,7 @@ async fn preadmitted_history_reads_drain_but_mutation_publication_is_fenced() {
         HistoryWriteOutcome::Committed(_)
     ));
     assert_eq!(history.store().state("p").unwrap().generation, 1);
+    drop(observer_guard);
     assert!(!owner.close().await.unwrap().drain_expired);
     assert!(owner.terminated().await.cleanup_errors.is_empty());
 }
