@@ -614,7 +614,7 @@ async fn handle_inner(
     *slot.lock() = Some(admitted.clone());
     parts.extensions.insert(Lease(admitted));
     // The wrapper has validated every Accept field and the JSON media type.
-    // rmcp 3.5.1 reads only the first field with case-sensitive comparisons;
+    // rmcp 3.8.0 reads only the first field with case-sensitive comparisons;
     // pass the canonical selected media values without losing legal HTTP forms.
     parts.headers.insert(
         "accept",
