@@ -15,14 +15,26 @@ workspace = true
 [lib]
 name = "haystack_analytics"
 
+[package.metadata.docs.rs]
+features = ["sql"]
+
+[features]
+default = []
+# Bounded read-only SQL over sealed, fully validated snapshots (DataFusion).
+sql = ["dep:datafusion", "dep:arrow", "dep:async-trait", "dep:futures-util"]
+
 [dependencies]
 haystack-core = { workspace = true, features = ["chrono-tz"] }
 haystack-client.workspace = true
+arrow = { workspace = true, optional = true }
 arrow-array.workspace = true
 arrow-schema.workspace = true
-parquet.workspace = true
+async-trait = { workspace = true, optional = true }
 bytes.workspace = true
 chrono.workspace = true
+datafusion = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+parquet.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
@@ -38,3 +50,7 @@ libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "test-util"] }
+
+[[test]]
+name = "sql"
+required-features = ["sql"]

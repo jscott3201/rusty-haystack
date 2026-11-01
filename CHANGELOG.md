@@ -48,12 +48,53 @@
   store, CLI, Python, MCP or DataFusion surface, and Windows durability is not qualified.
   `arrow-array`, `arrow-schema` and `parquet` are new dependencies, pinned exactly. See
   `docs/parquet-history.md`.
+- Snapshot SQL: the optional `sql` feature of `rusty-haystack-analytics` adds
+  `haystack_analytics::sql`, bounded read-only DataFusion SQL over Parquet history
+  captures. `SqlEngine::builder().register(name, dir)` drains and validates a capture to
+  semantic completion, then seals it in memory; queries never touch the filesystem and
+  `QueryOutput.sources` reports each scanned snapshot's export id and manifest SHA-256.
+  A fixed schema maps NA to NULL with `present = false`, keeps NaN/±Infinity bits, and
+  carries `ts` (UTC), `ts_local` (stored offset applied) and the exact timestamp
+  components; a `snapshots` table carries provenance. Queries run on an engine-owned
+  runtime (32 MiB thread stacks) with process-wide admission, a per-query memory pool
+  with spill disabled, a timeout and output caps. Before planning, the SQL text is
+  bounded in bytes and in tokens (by an iterative tokenizer, so a long left-deep chain
+  such as `1+1+…` is `Error::Limit` rather than a stack overflow), and the parsed
+  statement in relations, joins, set operations and CTEs, with CTE references expanded;
+  only queries are accepted, and `CUBE`, `ROLLUP`, `GROUPING SETS`, `TABLESAMPLE` and
+  locking clauses are refused. During execution, window input is reserved from the pool,
+  and per-batch bytes, bytes over the whole plan and join output rows are capped; every
+  scan yields before each batch, so a join that loops without output still stops at its
+  deadline. Scalar,
+  aggregate and window functions and binary operators are allowlisted: string building
+  (`||`, `concat`, `replace`, `regexp_replace`, `overlay`, `lpad`/`rpad`/`repeat` and
+  similar) and `arrow_cast` are not available in SQL, so concatenate after the query.
+  Nothing regex-backed is available either: `regexp_like`, `regexp_count`,
+  `regexp_instr`, `regexp_match`, `~`, `~*`, `!~`, `!~*`, `SIMILAR TO`, `LIKE`, `ILIKE`
+  and `~~` are rejected, because compiling and matching a pattern allocates outside the
+  pool; use `starts_with`, `ends_with`, `contains` and `strpos`. `approx_percentile_cont`
+  (whose literal centroid count aborted the process), its `_with_weight` form,
+  `array_agg`, `string_agg`, the `nth_value` aggregate and `grouping` are not
+  available; every window expression must have a fixed-width type, and the columns a
+  window adds are reserved from the pool. `substr`/`substring` are not available (use
+  `left`, `right` or `substr_index`). Joins inside parentheses count toward the join
+  bound. DDL, DML,
+  statements, table functions, URL tables, cross and non-equi joins and recursive queries
+  are refused. `Error` gains `Sql` and `Query`, and the `Cancelled`, `Deadline`, `Limit`,
+  `Capacity`, `Runtime` and `Worker` messages no longer say "capture". The timeout is best-effort:
+  planning and work within one poll cannot be cancelled, and a stuck query keeps its
+  process-wide permit. Expression temporaries are not reserved from the pool. See
+  `docs/sql-snapshots.md`.
 - `haystack_core::codecs::history::result_header_grid` encodes a validated
   `HistoryReadHeader` as the result envelope without collecting its sample rows;
   `result_grid` now builds on it.
 
 ### Changed
 
+- The Arrow/Parquet pins move from 59.3.0 to 59.3.2 to share one family with DataFusion
+  55.2.0, and `deny.toml` ignores three `zstd` advisories (RUSTSEC-2026-0391, -0398,
+  -0403) that arrive only through `arrow-ipc` under the `sql` feature and are unreachable
+  from it; tracked in #131 for removal with Arrow 60.
 - The optional SQLite profile is re-baselined from SQLite 3.53.2 to **3.54.1**:
   `rusqlite` `=0.40.2` → `=0.41.1` (bundled `libsqlite3-sys` 0.38.2 → 0.39.1). 3.54.1 is
   the 3.54.0 feature release plus a 32-bit heap-buffer-overflow fix and other upstream

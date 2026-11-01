@@ -9,6 +9,8 @@ mod checkpoint;
 mod export;
 mod format;
 mod reader;
+#[cfg(feature = "sql")]
+pub mod sql;
 mod writer;
 
 pub use export::{
@@ -24,15 +26,15 @@ pub use reader::Dataset;
 pub enum Error {
     #[error("invalid capture options")]
     Options,
-    #[error("no Tokio runtime is available to own the export")]
+    #[error("no Tokio runtime is available")]
     Runtime,
-    #[error("capture capacity exhausted")]
+    #[error("capacity exhausted")]
     Capacity,
-    #[error("capture cancelled")]
+    #[error("cancelled")]
     Cancelled,
-    #[error("capture deadline expired")]
+    #[error("deadline expired")]
     Deadline,
-    #[error("capture limit exceeded")]
+    #[error("limit exceeded")]
     Limit,
     #[error("invalid or incompatible dataset")]
     Invalid,
@@ -42,8 +44,16 @@ pub enum Error {
     Io(std::io::ErrorKind),
     #[error("Parquet operation failed")]
     Parquet,
-    #[error("owned capture task failed")]
+    #[error("owned task failed")]
     Worker,
+    /// SQL text rejected before execution: unparsable, not a query, or a
+    /// forbidden table, clause, function or operator. A statement over a
+    /// size bound is `Limit` instead.
+    #[error("SQL rejected: not a supported or valid read-only query")]
+    Sql,
+    /// Query execution failed for a reason other than a bound.
+    #[error("query execution failed")]
+    Query,
     #[error("manifest was published, but durability acknowledgment is uncertain: {export_id}")]
     PublishedUncertain { export_id: String },
 }
