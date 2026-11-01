@@ -471,7 +471,7 @@ capture tests:
   matrix of incomplete, corrupt and mismatched captures (each registers
   nothing, with a positive control); cancellation, deadline, admission
   capacity and permit release, including a filtered join that never produces
-  output; memory, output and join-row caps; window input beyond the pool;
+  output; the output caps; window input beyond the pool;
   DDL/DML/`COPY`/ `SET`/`CREATE EXTERNAL TABLE`/URL-table rejection with no
   file written; oversize SQL text and deep nesting; six left-deep chain shapes
   at the token cap (run, unoptimized, without overflow) and one term past it
@@ -493,7 +493,12 @@ capture tests:
   cancellation, deadline and a dropped future return the runtime's alive tasks
   to zero and the permits to `SQL_QUERIES`; a pool overrun is `Error::Limit`
   with the observed peak within `QUERY_MEMORY_BYTES`, reservations released and
-  temporary files disabled; the batch-byte, plan-byte and join-row guards at
+  temporary files disabled; engines default to `MAX_JOIN_ROWS` and
+  `QUERY_MEMORY_BYTES`; through the public query path, rows² joins return
+  `Error::Limit` from an engine whose join-row cap is lowered (checked at and
+  one probe row past it) or whose pool is (at the production caps these joins
+  do seconds of unoptimized work first, and raced `QUERY_TIMEOUT` on a starved
+  CPU); the batch-byte, plan-byte and join-row guards at
   and past each cap, slice accounting, and window-input reservation and its
   release, over synthetic streams; every operator with an input guarded and
   cooperative in real plans, with each window's output width reserved; the

@@ -1008,30 +1008,17 @@ async fn memory_and_output_caps_are_limit_errors() {
             .unwrap_err(),
         Error::Limit
     );
-    // Join output rows over MAX_JOIN_ROWS (rows² on the constant point id),
-    // although the pool, the output and every batch are small.
-    assert_eq!(
-        engine
-            .query(
-                "SELECT count(*) AS n FROM big a JOIN big b ON a.point_id = b.point_id",
-                query_options()
-            )
-            .await
-            .unwrap_err(),
-        Error::Limit
-    );
-    // Operator memory beyond the per-query pool, with spill disabled.
-    assert_eq!(
-        engine
-            .query(
-                "SELECT a.utc_seconds, b.utc_seconds, COUNT(*) FROM big a JOIN big b \
-                 ON a.point_id = b.point_id GROUP BY 1, 2 ORDER BY 1, 2",
-                query_options()
-            )
-            .await
-            .unwrap_err(),
-        Error::Limit
-    );
+    // Join rows over MAX_JOIN_ROWS and a hash aggregate beyond the pool are
+    // not asserted here. At the production caps those rows² joins on `big`
+    // do about 1.3 s and 10.6 s of unoptimized work before the cap fires,
+    // and on a starved CPU QUERY_TIMEOUT fired first (`Deadline`, not
+    // `Limit`). The unit tests in `src/sql/tests.rs` run the same queries
+    // end to end against an engine with a lowered cap, so the cap fires
+    // after little work:
+    //   join_rows_past_the_engine_cap_are_a_limit_error
+    //   memory_limit_is_a_limit_error_within_the_pool_and_never_spills
+    // The window tests below exceed the production pool in well under a
+    // second.
     let out = run(&engine, "SELECT COUNT(*) AS n FROM big").await;
     assert_eq!(i64s(&out, "n"), [Some(MAX_ROWS as i64)]);
 }

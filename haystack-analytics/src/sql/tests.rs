@@ -60,9 +60,16 @@ fn written(path: &std::path::Path, value: &HistoryReadResult) {
     write(path, &header, batches, true);
 }
 async fn engine(rows: usize) -> (tempfile::TempDir, SqlEngine) {
+    capped(rows, Caps::default()).await
+}
+/// An engine over `rows` numbers whose queries run under `caps`. Lowering a
+/// work cap makes it fire after little work, so which bound stops a query
+/// does not depend on how fast the CPU reaches it before the deadline.
+async fn capped(rows: usize, caps: Caps) -> (tempfile::TempDir, SqlEngine) {
     let dir = tempfile::tempdir().unwrap();
     written(&dir.path().join("t"), &numbers(rows));
     let mut builder = SqlEngine::builder();
+    builder.caps = caps;
     builder.register("t", dir.path().join("t")).await.unwrap();
     (dir, builder.build().unwrap())
 }
@@ -183,10 +190,78 @@ async fn memory_limit_is_a_limit_error_within_the_pool_and_never_spills() {
         pool.peak()
     );
     assert_eq!(pool.reserved(), 0, "reservations released");
-    // The public path reports the same bound.
+    // The public path reports the same bound, at the engine's pool. At
+    // QUERY_MEMORY_BYTES the aggregate does about 10 s of unoptimized work
+    // before it overruns, which raced QUERY_TIMEOUT on a starved CPU; a
+    // 1 MiB pool overruns after a few thousand groups. The join-row cap is
+    // lifted so that only the pool can stop this query.
+    let caps = Caps {
+        join_rows: usize::MAX,
+        memory_bytes: 1 << 20,
+    };
+    let (_small_dir, small) = capped(4000, caps).await;
+    assert_eq!(
+        small.query(sql, QueryOptions::default()).await.unwrap_err(),
+        Error::Limit
+    );
+}
+
+#[test]
+fn engines_default_to_the_published_caps() {
+    let caps = SqlEngine::builder().caps;
+    assert_eq!(caps.join_rows, MAX_JOIN_ROWS);
+    assert_eq!(caps.memory_bytes, QUERY_MEMORY_BYTES);
+    assert_eq!(caps, Caps::default());
+    assert_eq!(Budget::default().max_join_rows, MAX_JOIN_ROWS);
+}
+
+/// The join-row cap end to end, at and past an engine cap of 1,000 rows, on
+/// self-joins over the constant `point_id`. At MAX_JOIN_ROWS the rows² join
+/// does over a second of unoptimized work before the cap fires, which raced
+/// QUERY_TIMEOUT on a starved CPU; here it fires at the first join batch.
+/// The production cap is checked at and past MAX_JOIN_ROWS over synthetic
+/// streams in `guard_caps_batch_bytes_plan_bytes_and_join_rows`.
+#[tokio::test]
+async fn join_rows_past_the_engine_cap_are_a_limit_error() {
+    let _serial = SERIAL.lock().await;
+    let caps = Caps {
+        join_rows: 1000,
+        ..Caps::default()
+    };
+    let (_dir, engine) = capped(100, caps).await;
+    let join = |probe: usize| {
+        format!(
+            "SELECT count(*) AS n FROM t a JOIN t b ON a.point_id = b.point_id \
+             WHERE a.number_value < {probe}"
+        )
+    };
+    // 10 x 100 join rows: exactly the cap.
+    let output = engine
+        .query(&join(10), QueryOptions::default())
+        .await
+        .unwrap();
+    let n = output.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(n, 1000);
+    // 11 x 100: one probe row past it.
     assert_eq!(
         engine
-            .query(sql, QueryOptions::default())
+            .query(&join(11), QueryOptions::default())
+            .await
+            .unwrap_err(),
+        Error::Limit
+    );
+    // The whole rows² join, as in `tests/sql.rs`.
+    assert_eq!(
+        engine
+            .query(
+                "SELECT count(*) AS n FROM t a JOIN t b ON a.point_id = b.point_id",
+                QueryOptions::default()
+            )
             .await
             .unwrap_err(),
         Error::Limit
@@ -318,6 +393,7 @@ fn no_zstd_path_is_reachable_from_the_sql_module() {
     let inner = Inner {
         snapshots: vec![],
         provenance: Arc::new(table::Provenance::new(&[]).unwrap()),
+        caps: Caps::default(),
     };
     let context = session(&inner, Arc::new(PeakPool::new(QUERY_MEMORY_BYTES))).unwrap();
     assert!(!context.runtime_env().disk_manager.tmp_files_enabled());

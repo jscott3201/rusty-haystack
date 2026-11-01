@@ -464,6 +464,26 @@ pub struct QueryOutput {
 pub struct SqlEngineBuilder {
     snapshots: Vec<Arc<Snapshot>>,
     bytes: usize,
+    /// Always the production caps outside unit tests, which lower them so
+    /// that a cap fires after little work rather than racing the deadline.
+    pub(crate) caps: Caps,
+}
+
+/// Work caps one engine applies to each of its queries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Caps {
+    /// [`MAX_JOIN_ROWS`].
+    pub(crate) join_rows: usize,
+    /// [`QUERY_MEMORY_BYTES`].
+    pub(crate) memory_bytes: usize,
+}
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            join_rows: MAX_JOIN_ROWS,
+            memory_bytes: QUERY_MEMORY_BYTES,
+        }
+    }
 }
 impl fmt::Debug for SqlEngineBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -534,6 +554,7 @@ impl SqlEngineBuilder {
             inner: Arc::new(Inner {
                 snapshots: self.snapshots,
                 provenance,
+                caps: self.caps,
             }),
             runtime: Some(runtime),
             #[cfg(test)]
@@ -545,6 +566,7 @@ impl SqlEngineBuilder {
 struct Inner {
     snapshots: Vec<Arc<Snapshot>>,
     provenance: Arc<Provenance>,
+    caps: Caps,
 }
 
 /// Immutable set of sealed snapshots and the runtime that queries them.
@@ -624,7 +646,7 @@ impl SqlEngine {
         let permit = QUERIES.try_acquire().map_err(|_| Error::Capacity)?;
         let inner = self.inner.clone();
         let sql = sql.to_owned();
-        let pool = Arc::new(PeakPool::new(QUERY_MEMORY_BYTES));
+        let pool = Arc::new(PeakPool::new(inner.caps.memory_bytes));
         let mut task = AbortOnDrop(handle.spawn(async move {
             let _permit = permit;
             execute(&inner, &sql, pool).await
@@ -761,7 +783,7 @@ async fn execute(inner: &Inner, sql: &str, pool: Arc<PeakPool>) -> Result<QueryO
         .await
         .map_err(|e| classify(&e))?;
     reject_runaway(&physical)?;
-    let physical = guarded(physical, &Arc::new(Budget::default()))?;
+    let physical = guarded(physical, &Arc::new(Budget::new(inner.caps.join_rows)))?;
     let schema = physical.schema();
     let task = Arc::new(TaskContext::from(&state));
     let mut stream =
@@ -1188,11 +1210,27 @@ fn fixed_width(data_type: &DataType) -> Option<usize> {
     }
 }
 
-/// Per-query counters shared by every [`GuardExec`] of one plan.
-#[derive(Debug, Default)]
+/// Per-query counters shared by every [`GuardExec`] of one plan, and the
+/// join-row cap they are checked against ([`MAX_JOIN_ROWS`] by default).
+#[derive(Debug)]
 struct Budget {
     plan_bytes: AtomicUsize,
     join_rows: AtomicUsize,
+    max_join_rows: usize,
+}
+impl Budget {
+    fn new(max_join_rows: usize) -> Self {
+        Self {
+            plan_bytes: AtomicUsize::new(0),
+            join_rows: AtomicUsize::new(0),
+            max_join_rows,
+        }
+    }
+}
+impl Default for Budget {
+    fn default() -> Self {
+        Self::new(MAX_JOIN_ROWS)
+    }
 }
 
 /// Bytes a batch references: the slices its arrays cover, not the whole
@@ -1328,7 +1366,7 @@ impl ExecutionPlan for GuardExec {
                     }
                     let rows = if join { batch.num_rows() } else { 0 };
                     let total = budget.join_rows.fetch_add(rows, Ordering::Relaxed);
-                    if total.saturating_add(rows) > MAX_JOIN_ROWS {
+                    if total.saturating_add(rows) > budget.max_join_rows {
                         return Err(exhausted("join output rows"));
                     }
                 }
