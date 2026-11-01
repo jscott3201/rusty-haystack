@@ -16,9 +16,12 @@ mod table;
 mod tests;
 
 use crate::{Dataset, Error, Result};
-use arrow::array::Array;
+use arrow::{array::Array, datatypes::DataType};
 use datafusion::{
-    common::tree_node::{Transformed, TreeNode, TreeNodeRecursion},
+    common::{
+        ScalarValue,
+        tree_node::{Transformed, TreeNode, TreeNodeRecursion},
+    },
     error::DataFusionError,
     execution::{
         SessionStateDefaults, TaskContext,
@@ -30,7 +33,7 @@ use datafusion::{
         runtime_env::RuntimeEnvBuilder,
         session_state::SessionStateBuilder,
     },
-    logical_expr::{Expr, LogicalPlan, Operator},
+    logical_expr::{Expr, Like, LogicalPlan, Operator, WindowFunctionDefinition},
     physical_plan::{
         DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
         SendableRecordBatchStream,
@@ -49,7 +52,7 @@ use datafusion::{
         sqlparser::{
             ast::{
                 Expr as SqlExpr, GroupByExpr, Query, Select, SetExpr, Statement as SqlStatement,
-                TableFactor, Visit, Visitor,
+                TableFactor, TableWithJoins, Visit, Visitor,
             },
             dialect::GenericDialect,
             tokenizer::{Token, Tokenizer},
@@ -108,11 +111,13 @@ pub const MAX_SQL_BYTES: usize = 16 * 1024;
 /// tree DataFusion builds and walks recursively after parsing: a left-deep
 /// chain such as `1+1+…`, `a OR b OR …` or `x::bigint::bigint…` has about
 /// one level per two tokens, which the parser builds without recursion and
-/// [`SQL_RECURSION_LIMIT`] therefore does not see. At this cap the deepest
-/// chain (512 terms) is far inside [`SQL_THREAD_STACK_BYTES`]: an
-/// unoptimized build planned 4,000 terms for 30 s without overflowing, and
-/// overflowed at 7,900. Planning time is also superlinear in chain length
-/// (2,000 terms took 7 s unoptimized).
+/// [`SQL_RECURSION_LIMIT`] therefore does not see; a postfix chain such as
+/// `3 ! ! …` has one level per token. At this cap the deepest tree is
+/// therefore about 1,000 levels (512 for a binary chain), far inside
+/// [`SQL_THREAD_STACK_BYTES`]: an unoptimized build
+/// planned 4,000 terms for 30 s without overflowing, and overflowed at
+/// 7,900. Planning time is also superlinear in chain length (2,000 terms
+/// took 7 s unoptimized).
 pub const MAX_SQL_TOKENS: usize = 1024;
 /// Relations a query may reference after expanding CTEs (`Error::Limit`):
 /// table references, derived tables and subquery expressions, each CTE
@@ -143,7 +148,10 @@ pub const MAX_SNAPSHOTS: usize = 16;
 pub const MAX_SNAPSHOT_BYTES: usize = 96 * 1024 * 1024;
 /// Sealed Arrow memory of all snapshots of one engine.
 pub const MAX_ENGINE_BYTES: usize = 256 * 1024 * 1024;
-/// `datafusion.execution.batch_size`. Small, because abort and the deadline
+/// `datafusion.execution.batch_size`: the size of batches that operators
+/// build. The scan itself delivers the batches the snapshot was sealed with,
+/// up to the capture's `batch_rows` (at most 1,024 rows), so an operator
+/// directly over a scan sees those. Small, because abort and the deadline
 /// take effect only at a yield, and an operator does up to one input
 /// batch's work between yields (leaves yield before every batch): a filtered
 /// equi-join evaluates its predicate for every candidate pair of a probe
@@ -172,20 +180,25 @@ pub const SNAPSHOTS_TABLE: &str = "snapshots";
 /// Longest table name; names match `^[a-z][a-z0-9_]{0,62}$`.
 pub const MAX_TABLE_NAME_BYTES: usize = 63;
 /// The only scalar functions the session registers and the logical plan may
-/// call, by canonical name (DataFusion's aliases of these, such as `pow`,
-/// `length` or `substring`, come with them). Anything else is `Error::Sql`,
-/// including a function a DataFusion upgrade adds and one the SQL planner
-/// constructs directly (`OVERLAY`, struct literals).
+/// call, by canonical name (DataFusion's aliases of these, such as `pow` or
+/// `length`, come with them). Anything else is `Error::Sql`, including a
+/// function a DataFusion upgrade adds and one the SQL planner constructs
+/// directly (`OVERLAY`, struct literals).
 ///
 /// Left out because their output can outgrow their input, outside the
 /// memory pool: string building (`concat`, `concat_ws`, `replace`,
 /// `regexp_replace`, `overlay`, `translate`, `repeat`, `lpad`, `rpad`,
 /// `to_hex`, `encode`, `to_char`/`date_format`, whose format may expand);
 /// arbitrary target types (`arrow_cast`, `arrow_try_cast`, `cast_to_type`,
-/// `try_cast_to_type`); quadratic work per row (`levenshtein`). Also left
-/// out as unneeded surface: `decode`, struct, union, metadata and file
-/// functions, and `version`. Aggregate and window functions are DataFusion's
-/// defaults; their state is reserved from the pool.
+/// `try_cast_to_type`); quadratic work per row (`levenshtein`). Every
+/// regex-backed function (`regexp_like`, `regexp_count`, `regexp_instr`,
+/// `regexp_match`) is left out: compiling a pattern allocates and works
+/// outside the pool (`'(?i)\p{L}{200}'` took 5.8 s and 581 MB), and
+/// `regexp_match` builds a list per row that nested capture groups grow
+/// about 250-fold. Also left out as unneeded surface: `decode`, struct,
+/// union, metadata and file functions, and `version`. `substr` is not
+/// listed because the SQL parser turns every spelling of it into
+/// `SUBSTRING`, whose planner this build does not enable.
 pub const ALLOWED_FUNCTIONS: &[&str] = &[
     // Math.
     "abs",
@@ -233,8 +246,10 @@ pub const ALLOWED_FUNCTIONS: &[&str] = &[
     "nullif",
     "nvl",
     "nvl2",
-    // Strings: inspection, slicing and case; none outgrows its input by more
-    // than Unicode case mapping's small constant factor.
+    // Strings: inspection, slicing and case, none regex-backed. A result
+    // is a slice of its input, a number or a boolean, except that Unicode
+    // case mapping (`upper`, `lower`, `initcap`) can grow a string by a
+    // small constant factor and `chr` builds one character.
     "ascii",
     "bit_length",
     "btrim",
@@ -254,13 +269,8 @@ pub const ALLOWED_FUNCTIONS: &[&str] = &[
     "split_part",
     "starts_with",
     "strpos",
-    "substr",
     "substr_index",
     "upper",
-    "regexp_count",
-    "regexp_instr",
-    "regexp_like",
-    "regexp_match",
     // Date and time.
     "current_date",
     "current_time",
@@ -284,11 +294,85 @@ pub const ALLOWED_FUNCTIONS: &[&str] = &[
     "arrow_typeof",
     "uuid",
 ];
+/// The only aggregate functions the session registers and the logical plan
+/// may call, as aggregates or over a window, by canonical name (aliases such
+/// as `var_samp`, `stddev_samp` or `mean` come with them). Each keeps state
+/// of a fixed size, or holds at most the values it receives; as an
+/// aggregate that state is reserved from the pool.
+///
+/// Left out: `approx_percentile_cont` and
+/// `approx_percentile_cont_with_weight`, whose literal centroid count is
+/// allocated up front (`approx_percentile_cont(v, 0.5, 100000000000000)`
+/// aborted the process allocating 1.6 PB); `array_agg` and `string_agg`,
+/// which build a value from every row they receive, so over a growing
+/// window frame their output is quadratic and outside the pool; `nth_value`
+/// as an aggregate, which keeps up to a literal `n` rows of list state
+/// (the window function of that name is allowed); and `grouping`, which is
+/// meaningful only with the grouping sets that are rejected.
+pub const ALLOWED_AGGREGATES: &[&str] = &[
+    "any_value",
+    "approx_distinct",
+    "approx_median",
+    "avg",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "bool_and",
+    "bool_or",
+    "corr",
+    "count",
+    "covar_pop",
+    "covar_samp",
+    "first_value",
+    "last_value",
+    "max",
+    "median",
+    "min",
+    "percentile_cont",
+    "regr_avgx",
+    "regr_avgy",
+    "regr_count",
+    "regr_intercept",
+    "regr_r2",
+    "regr_slope",
+    "regr_sxx",
+    "regr_sxy",
+    "regr_syy",
+    "stddev",
+    "stddev_pop",
+    "sum",
+    "var",
+    "var_pop",
+];
+/// The only window functions the session registers and the logical plan
+/// may call, by canonical name. This is every DataFusion 55 default: none
+/// allocates by a literal argument (`ntile(n)` and `nth_value(x, n)` only
+/// compare against `n`, and `lead`/`lag` clamp their offset to the
+/// partition). Every window expression, including an aggregate over a
+/// window, must also return a fixed-width type (see `docs/sql-snapshots.md`):
+/// a window repeats one value per row of its partition, so
+/// `first_value('<1 KB literal>') OVER ()` over a million-row join held
+/// 2.5 GB while the pool read zero.
+pub const ALLOWED_WINDOW_FUNCTIONS: &[&str] = &[
+    "cume_dist",
+    "dense_rank",
+    "first_value",
+    "lag",
+    "last_value",
+    "lead",
+    "nth_value",
+    "ntile",
+    "percent_rank",
+    "rank",
+    "row_number",
+];
 /// The only binary operators the logical plan may use: comparison,
-/// arithmetic, boolean, bitwise and pattern matching. `||`
-/// (`Operator::StringConcat`) is not among them (see [`ALLOWED_FUNCTIONS`]);
-/// neither are the array and JSON operators.
-pub const ALLOWED_OPERATORS: &[Operator] = &[
+/// arithmetic, boolean and bitwise. `||` (`Operator::StringConcat`) is not
+/// among them (see [`ALLOWED_FUNCTIONS`]); neither are the regex operators
+/// (`~`, `~*`, `!~`, `!~*`), the `LIKE` operators (`~~` and the like), the
+/// array and the JSON operators. Crate-private because it names a
+/// DataFusion type.
+pub(crate) const ALLOWED_OPERATORS: &[Operator] = &[
     Operator::Eq,
     Operator::NotEq,
     Operator::Lt,
@@ -304,14 +388,6 @@ pub const ALLOWED_OPERATORS: &[Operator] = &[
     Operator::Or,
     Operator::IsDistinctFrom,
     Operator::IsNotDistinctFrom,
-    Operator::RegexMatch,
-    Operator::RegexIMatch,
-    Operator::RegexNotMatch,
-    Operator::RegexNotIMatch,
-    Operator::LikeMatch,
-    Operator::ILikeMatch,
-    Operator::NotLikeMatch,
-    Operator::NotILikeMatch,
     Operator::BitwiseAnd,
     Operator::BitwiseOr,
     Operator::BitwiseXor,
@@ -517,8 +593,11 @@ impl SqlEngine {
     /// ([`MAX_SQL_RELATIONS`], [`MAX_SQL_JOINS`], [`MAX_SQL_SET_OPERATIONS`],
     /// [`MAX_SQL_CTES`]) is `Error::Limit`; a timeout above [`QUERY_TIMEOUT`]
     /// is `Error::Options`; no free slot is `Error::Capacity`; anything but
-    /// a query (or `EXPLAIN` of one), a function or operator outside
-    /// [`ALLOWED_FUNCTIONS`] and [`ALLOWED_OPERATORS`], `CUBE`, `ROLLUP`,
+    /// a query (or `EXPLAIN` of one), a function outside
+    /// [`ALLOWED_FUNCTIONS`], [`ALLOWED_AGGREGATES`] and
+    /// [`ALLOWED_WINDOW_FUNCTIONS`], a window expression of variable-width
+    /// type, an operator outside the allowed set (no `||`, regex or `LIKE`
+    /// operators), `LIKE`, `ILIKE`, `SIMILAR TO`, `CUBE`, `ROLLUP`,
     /// `GROUPING SETS`, `TABLESAMPLE`, locking clauses, cross joins,
     /// non-equi joins and recursive queries are `Error::Sql`. During
     /// execution, memory, intermediate or output over its cap is
@@ -616,17 +695,27 @@ fn session(inner: &Inner, pool: Arc<dyn MemoryPool>) -> Result<SessionContext> {
             &SQL_RECURSION_LIMIT.to_string(),
         )
         .map_err(|_| Error::Query)?;
-    // Default planners and aggregate/window functions, only the scalar
-    // functions in `ALLOWED_FUNCTIONS`, no table functions (no
-    // `generate_series`/`range` row generators), no table factories (no
-    // `CREATE EXTERNAL TABLE` target even if DDL were allowed) and no file
-    // formats. URL tables are never enabled.
+    // Default planners; only the scalar, aggregate and window functions on
+    // the allowlists; no table functions (no `generate_series`/`range` row
+    // generators), no table factories (no `CREATE EXTERNAL TABLE` target
+    // even if DDL were allowed) and no file formats. URL tables are never
+    // enabled.
     let functions = SessionStateDefaults::default_scalar_functions()
         .into_iter()
         .filter(|f| ALLOWED_FUNCTIONS.contains(&f.name()))
         .collect();
+    let aggregates = SessionStateDefaults::default_aggregate_functions()
+        .into_iter()
+        .filter(|f| ALLOWED_AGGREGATES.contains(&f.name()))
+        .collect();
+    let windows = SessionStateDefaults::default_window_functions()
+        .into_iter()
+        .filter(|f| ALLOWED_WINDOW_FUNCTIONS.contains(&f.name()))
+        .collect();
     let state = SessionStateBuilder::new_with_default_features()
         .with_scalar_functions(functions)
+        .with_aggregate_functions(aggregates)
+        .with_window_functions(windows)
         .with_config(config)
         .with_runtime_env(runtime)
         .with_table_functions(HashMap::new())
@@ -658,25 +747,25 @@ async fn execute(inner: &Inner, sql: &str, pool: Arc<PeakPool>) -> Result<QueryO
         .await
         .map_err(|e| classify(&e))?;
     sql_options().verify_plan(&plan).map_err(|_| Error::Sql)?;
-    check_expressions(&plan)?;
+    check_expressions(&plan, Stage::Planned)?;
     let sources = sources(inner, &plan)?;
-    let frame = context
-        .execute_logical_plan(plan)
-        .await
-        .map_err(|e| classify(&e))?;
-    let task = frame.task_ctx();
-    let optimized = frame.into_optimized_plan().map_err(|e| classify(&e))?;
-    check_expressions(&optimized)?;
+    // Optimized exactly once, here, and the physical plan is built from this
+    // checked plan by the query planner itself: `SessionState::
+    // create_physical_plan` would optimize again, unchecked.
+    let optimized = state.optimize(&plan).map_err(|e| classify(&e))?;
+    check_expressions(&optimized, Stage::Optimized)?;
     reject_keyless_joins(&optimized)?;
     let physical = state
-        .create_physical_plan(&optimized)
+        .query_planner()
+        .create_physical_plan(&optimized, &state)
         .await
         .map_err(|e| classify(&e))?;
     reject_runaway(&physical)?;
     let physical = guarded(physical, &Arc::new(Budget::default()))?;
     let schema = physical.schema();
-    let mut stream = datafusion::physical_plan::execute_stream(physical, Arc::new(task))
-        .map_err(|e| classify(&e))?;
+    let task = Arc::new(TaskContext::from(&state));
+    let mut stream =
+        datafusion::physical_plan::execute_stream(physical, task).map_err(|e| classify(&e))?;
     let (mut rows, mut bytes, mut batches) = (0usize, 0usize, Vec::new());
     while let Some(batch) = stream.next().await {
         let batch = batch.map_err(|e| classify(&e))?;
@@ -922,8 +1011,8 @@ impl Visitor for Gate {
         let joins = select
             .from
             .iter()
-            .map(|from| from.joins.len())
-            .sum::<usize>()
+            .map(joins_in)
+            .fold(0, usize::saturating_add)
             .saturating_add(select.from.len().saturating_sub(1));
         let top = self.top();
         top.joins = top.joins.saturating_add(joins);
@@ -950,6 +1039,9 @@ impl Visitor for Gate {
             TableFactor::Derived { sample, .. } if sample.is_some() => {
                 return ControlFlow::Break(Error::Sql);
             }
+            // Parentheses around joins: its tables are visited, and its
+            // joins counted by the enclosing `SELECT`.
+            TableFactor::NestedJoin { .. } => return ControlFlow::Continue(()),
             _ => {}
         }
         let top = self.top();
@@ -972,20 +1064,54 @@ impl Visitor for Gate {
     }
 }
 
-/// Every scalar function and binary operator of `plan`, including inside
-/// subqueries, must be allowed. Checked on the planned and the optimized
-/// plan, because the SQL planner and the optimizer construct functions
-/// directly rather than through the session registry.
-fn check_expressions(plan: &LogicalPlan) -> Result<()> {
+/// Joins of one `FROM` item, including those inside parentheses
+/// (`FROM (a JOIN b …)`), which are a nested join factor rather than joins
+/// of the item. Recursion is bounded by the parser's recursion limit.
+fn joins_in(from: &TableWithJoins) -> usize {
+    let nested = |factor: &TableFactor| match factor {
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => joins_in(table_with_joins),
+        _ => 0,
+    };
+    from.joins
+        .iter()
+        .map(|join| nested(&join.relation))
+        .fold(nested(&from.relation), usize::saturating_add)
+        .saturating_add(from.joins.len())
+}
+
+/// Which logical plan [`check_expressions`] is checking.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// As the SQL planner built it: no `LIKE` at all.
+    Planned,
+    /// After optimization, where `starts_with(x, 'literal')` has become
+    /// `x LIKE 'literal%'`.
+    Optimized,
+}
+
+/// Every function, operator and pattern match of `plan`, including inside
+/// subqueries, must be allowed, and every window expression must have a
+/// fixed-width type. Checked on the planned and the optimized plan, because
+/// the SQL planner and the optimizer construct functions directly rather
+/// than through the session registry.
+fn check_expressions(plan: &LogicalPlan, stage: Stage) -> Result<()> {
     let mut allowed = true;
     plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::Window(window) = node {
+            // The window columns follow the input's in the node's schema.
+            let first = window.input.schema().fields().len();
+            allowed &= window.schema.fields()[first.min(window.schema.fields().len())..]
+                .iter()
+                .all(|field| fixed_width(field.data_type()).is_some());
+        }
+        if !allowed {
+            return Ok(TreeNodeRecursion::Stop);
+        }
         node.apply_expressions(|expr| {
             expr.apply(|expr| {
-                allowed &= match expr {
-                    Expr::ScalarFunction(call) => ALLOWED_FUNCTIONS.contains(&call.func.name()),
-                    Expr::BinaryExpr(binary) => ALLOWED_OPERATORS.contains(&binary.op),
-                    _ => true,
-                };
+                allowed &= allowed_expression(expr, stage);
                 Ok(if allowed {
                     TreeNodeRecursion::Continue
                 } else {
@@ -996,6 +1122,70 @@ fn check_expressions(plan: &LogicalPlan) -> Result<()> {
     })
     .map_err(|_| Error::Query)?;
     if allowed { Ok(()) } else { Err(Error::Sql) }
+}
+
+fn allowed_expression(expr: &Expr, stage: Stage) -> bool {
+    match expr {
+        Expr::ScalarFunction(call) => ALLOWED_FUNCTIONS.contains(&call.func.name()),
+        Expr::AggregateFunction(call) => ALLOWED_AGGREGATES.contains(&call.func.name()),
+        Expr::WindowFunction(window) => match &window.fun {
+            WindowFunctionDefinition::AggregateUDF(f) => ALLOWED_AGGREGATES.contains(&f.name()),
+            WindowFunctionDefinition::WindowUDF(f) => ALLOWED_WINDOW_FUNCTIONS.contains(&f.name()),
+        },
+        Expr::BinaryExpr(binary) => ALLOWED_OPERATORS.contains(&binary.op),
+        // `SIMILAR TO` is planned as a regex match of the pattern.
+        Expr::SimilarTo(_) => false,
+        // `LIKE` and `ILIKE` compile a general pattern into a regex, outside
+        // the pool. Only the prefix form the optimizer derives from
+        // `starts_with` is allowed, which arrow matches without a regex or
+        // with one of literals only.
+        Expr::Like(like) => stage == Stage::Optimized && prefix_like(like),
+        _ => true,
+    }
+}
+
+/// `x LIKE 'literal%'`, case-sensitive, with the default escape: the only
+/// `LIKE` the optimizer constructs (from `starts_with`).
+fn prefix_like(like: &Like) -> bool {
+    if like.case_insensitive || like.escape_char.is_some() {
+        return false;
+    }
+    let mut pattern = like.pattern.as_ref();
+    while let Expr::Cast(cast) = pattern {
+        pattern = cast.expr.as_ref();
+    }
+    let Expr::Literal(
+        ScalarValue::Utf8(Some(pattern))
+        | ScalarValue::LargeUtf8(Some(pattern))
+        | ScalarValue::Utf8View(Some(pattern)),
+        _,
+    ) = pattern
+    else {
+        return false;
+    };
+    let Some(prefix) = pattern.strip_suffix('%') else {
+        return false;
+    };
+    let mut chars = prefix.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.next().is_some() => {}
+            '%' | '_' | '\\' => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Bytes per row of a window column of `data_type`, with its validity bit
+/// rounded up, or `None` for a variable-width type, which a window would
+/// repeat for every row of its partition.
+fn fixed_width(data_type: &DataType) -> Option<usize> {
+    match data_type {
+        DataType::Null | DataType::Boolean => Some(1),
+        other if other.is_primitive() => other.primitive_width().map(|width| width + 1),
+        _ => None,
+    }
 }
 
 /// Per-query counters shared by every [`GuardExec`] of one plan.
@@ -1032,8 +1222,11 @@ enum Watch {
     /// also [`MAX_JOIN_ROWS`].
     Output { join: bool },
     /// The input of a window operator, which buffers it without reserving:
-    /// every batch is reserved from the query's pool until the stream ends.
-    WindowInput,
+    /// every batch is reserved from the query's pool until the stream ends,
+    /// together with `row_bytes` per row for the window columns the
+    /// operator will add to it (all fixed-width, see [`check_expressions`]),
+    /// before it builds them.
+    WindowInput { row_bytes: usize },
     /// The output of a leaf: yields to the runtime before each batch. A
     /// parent can do a whole input batch's work without producing output (a
     /// filtered join probe that matches nothing loops internally), and
@@ -1111,7 +1304,7 @@ impl ExecutionPlan for GuardExec {
             return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, yielding)));
         }
         let (watch, budget) = (self.watch, self.budget.clone());
-        let mut reservation = (watch == Watch::WindowInput).then(|| {
+        let mut reservation = matches!(watch, Watch::WindowInput { .. }).then(|| {
             MemoryConsumer::new("haystack-sql window input").register(context.memory_pool())
         });
         let checked = input.map(move |batch| {
@@ -1119,9 +1312,10 @@ impl ExecutionPlan for GuardExec {
             let bytes = batch_bytes(&batch);
             match watch {
                 Watch::Leaf => {}
-                Watch::WindowInput => {
+                Watch::WindowInput { row_bytes } => {
                     if let Some(reservation) = reservation.as_mut() {
-                        reservation.try_grow(bytes)?;
+                        let output = batch.num_rows().saturating_mul(row_bytes);
+                        reservation.try_grow(bytes.saturating_add(output))?;
                     }
                 }
                 Watch::Output { join } => {
@@ -1155,9 +1349,27 @@ fn is_window(plan: &dyn ExecutionPlan) -> bool {
     plan.is::<WindowAggExec>() || plan.is::<BoundedWindowAggExec>()
 }
 
+/// Bytes per row of the columns a window operator appends to its input. A
+/// variable-width column, which the logical check rejects, is charged as
+/// [`MAX_BATCH_BYTES`] so that it fails at the first row.
+fn window_row_bytes(window: &dyn ExecutionPlan) -> usize {
+    let first = window
+        .children()
+        .first()
+        .map_or(0, |input| input.schema().fields().len());
+    window
+        .schema()
+        .fields()
+        .iter()
+        .skip(first)
+        .map(|field| fixed_width(field.data_type()).unwrap_or(MAX_BATCH_BYTES))
+        .fold(0, usize::saturating_add)
+}
+
 /// Wraps every leaf in a yielding [`GuardExec`], every operator that has
 /// inputs in a checking one and then a `CooperativeExec`, and feeds each
-/// window operator through a reserving guard. `CooperativeExec` makes each output batch consume Tokio's
+/// window operator through a reserving guard. `CooperativeExec` makes each
+/// output batch consume Tokio's
 /// cooperative budget: DataFusion 55 makes only leaves cooperative, and an
 /// equi-join on a low-cardinality key can emit millions of rows per probe
 /// batch without polling a leaf, ignoring abort for that long.
@@ -1173,11 +1385,12 @@ fn guarded(plan: Arc<dyn ExecutionPlan>, budget: &Arc<Budget>) -> Result<Arc<dyn
             return Ok(Transformed::no(node));
         }
         let node = if is_window(node.as_ref()) {
+            let row_bytes = window_row_bytes(node.as_ref());
             let inputs = node
                 .children()
                 .into_iter()
                 .map(|child| {
-                    GuardExec::wrap(child.clone(), Watch::WindowInput, budget)
+                    GuardExec::wrap(child.clone(), Watch::WindowInput { row_bytes }, budget)
                         as Arc<dyn ExecutionPlan>
                 })
                 .collect();

@@ -65,10 +65,20 @@
   locking clauses are refused. During execution, window input is reserved from the pool,
   and per-batch bytes, bytes over the whole plan and join output rows are capped; every
   scan yields before each batch, so a join that loops without output still stops at its
-  deadline. Scalar
-  functions and binary operators are allowlisted: string building (`||`, `concat`,
-  `replace`, `regexp_replace`, `overlay`, `lpad`/`rpad`/`repeat` and similar) and
-  `arrow_cast` are not available in SQL, so concatenate after the query. DDL, DML,
+  deadline. Scalar,
+  aggregate and window functions and binary operators are allowlisted: string building
+  (`||`, `concat`, `replace`, `regexp_replace`, `overlay`, `lpad`/`rpad`/`repeat` and
+  similar) and `arrow_cast` are not available in SQL, so concatenate after the query.
+  Nothing regex-backed is available either: `regexp_like`, `regexp_count`,
+  `regexp_instr`, `regexp_match`, `~`, `~*`, `!~`, `!~*`, `SIMILAR TO`, `LIKE`, `ILIKE`
+  and `~~` are rejected, because compiling and matching a pattern allocates outside the
+  pool; use `starts_with`, `ends_with`, `contains` and `strpos`. `approx_percentile_cont`
+  (whose literal centroid count aborted the process), its `_with_weight` form,
+  `array_agg`, `string_agg`, the `nth_value` aggregate and `grouping` are not
+  available; every window expression must have a fixed-width type, and the columns a
+  window adds are reserved from the pool. `substr`/`substring` are not available (use
+  `left`, `right` or `substr_index`). Joins inside parentheses count toward the join
+  bound. DDL, DML,
   statements, table functions, URL tables, cross and non-equi joins and recursive queries
   are refused. `Error` gains `Sql` and `Query`, and the `Cancelled`, `Deadline`, `Limit`,
   `Capacity`, `Runtime` and `Worker` messages no longer say "capture". The timeout is best-effort:

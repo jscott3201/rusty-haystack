@@ -150,20 +150,22 @@ The constants are the documentation; they live in
 | SQL text bytes, before parsing | `MAX_SQL_BYTES` | `Error::Limit` |
 | Non-whitespace SQL tokens, by an iterative tokenizer before parsing | `MAX_SQL_TOKENS` | `Error::Limit` |
 | Relations (tables, derived tables, subqueries), CTE references expanded | `MAX_SQL_RELATIONS` | `Error::Limit` |
-| Joins (explicit and comma), CTE references expanded | `MAX_SQL_JOINS` | `Error::Limit` |
+| Joins (explicit, comma and inside parentheses), CTE references expanded | `MAX_SQL_JOINS` | `Error::Limit` |
 | `UNION`/`INTERSECT`/`EXCEPT` operations, CTE references expanded | `MAX_SQL_SET_OPERATIONS` | `Error::Limit` |
 | CTE definitions | `MAX_SQL_CTES` | `Error::Limit` |
 | Parser recursion (`datafusion.sql_parser.recursion_limit`) | `SQL_RECURSION_LIMIT` | `Error::Sql` |
 | Stack of each query-runtime thread | `SQL_THREAD_STACK_BYTES` | — |
 | Snapshots per engine | `MAX_SNAPSHOTS` | `Error::Limit` |
 | Sealed Arrow bytes per snapshot / per engine | `MAX_SNAPSHOT_BYTES`, `MAX_ENGINE_BYTES` | `Error::Limit` at registration |
-| Execution batch size | `SQL_BATCH_ROWS` | — |
+| Batch size operators build (a scan delivers the capture's own batches, up to its `batch_rows`) | `SQL_BATCH_ROWS` | — |
 | Arrow bytes of one batch from any operator with an input | `MAX_BATCH_BYTES` | `Error::Limit` |
 | Arrow bytes from all operators with an input, summed over the query | `MAX_PLAN_BYTES` | `Error::Limit` |
 | Rows from all hash and sort-merge joins, summed over the query | `MAX_JOIN_ROWS` | `Error::Limit` |
 | Table name length | `MAX_TABLE_NAME_BYTES` | `Error::Options` |
 | Scalar functions the session registers and plans may call | `ALLOWED_FUNCTIONS` | anything else is `Error::Sql` |
-| Binary operators plans may use | `ALLOWED_OPERATORS` | anything else, including `\|\|`, is `Error::Sql` |
+| Aggregate functions, as aggregates or over a window | `ALLOWED_AGGREGATES` | anything else is `Error::Sql` |
+| Window functions | `ALLOWED_WINDOW_FUNCTIONS` | anything else is `Error::Sql` |
+| Binary operators: comparison, arithmetic, boolean, bitwise | (crate-private list) | anything else, including `\|\|`, `~` and `~~`, is `Error::Sql` |
 
 The session also fixes `target_partitions = 1`, turns every repartitioning
 option off, keeps `information_schema` off and disables recursive CTEs. The
@@ -204,12 +206,15 @@ unoptimized.
 
 ### Functions and operators
 
-Plans may call only the scalar functions in `ALLOWED_FUNCTIONS` and use only
-the binary operators in `ALLOWED_OPERATORS`. The session registers only those
-functions, and both the planned and the optimized logical plan are checked,
-because the SQL planner builds some functions directly (`OVERLAY … PLACING`,
-struct literals) and an allowlist means a DataFusion upgrade cannot add one
-silently.
+Plans may call only the scalar functions in `ALLOWED_FUNCTIONS`, the
+aggregates in `ALLOWED_AGGREGATES` and the window functions in
+`ALLOWED_WINDOW_FUNCTIONS`, and may use only comparison, arithmetic, boolean
+and bitwise operators. The session registers only those functions, and both
+the planned and the optimized logical plan are checked, because the SQL
+planner builds some functions directly (`OVERLAY … PLACING`, struct
+literals) and an allowlist means a DataFusion upgrade cannot add one
+silently. The physical plan is built from that checked optimized plan;
+nothing optimizes it again.
 
 **String building is not available in SQL.** `||` and `concat`, `concat_ws`,
 `replace`, `regexp_replace`, `overlay`, `translate`, `repeat`, `lpad`, `rpad`,
@@ -220,18 +225,64 @@ of resident memory; one 1,500-term `||` expression held a thread for 8.5 s).
 Select the parts as columns and concatenate them after the query, in the
 caller. Inspection, slicing and case functions (`length`, `strpos`, `left`,
 `right`, `substr_index`, `split_part`, `btrim`, `upper`, `lower`, `reverse`,
-`regexp_like`, …) are available; Unicode case mapping can grow a string by a
-small constant factor once, never compounding. `arrow_cast` and the other
-arbitrary-type casts are rejected (`arrow_cast(NULL,
-'FixedSizeBinary(100000000)')` allocated gigabytes), as is `levenshtein`
-(quadratic work in one row). Aggregate and window functions are DataFusion's
-defaults; `string_agg` and `array_agg` build values only from rows they
-receive, and their state is reserved from the pool.
+`starts_with`, `ends_with`, `contains`, …) are available; Unicode case
+mapping can grow a string by a small constant factor once, never
+compounding. `arrow_cast` and the other arbitrary-type casts are rejected
+(`arrow_cast(NULL, 'FixedSizeBinary(100000000)')` allocated gigabytes), as is
+`levenshtein` (quadratic work in one row).
 
-The planner forms `SUBSTRING(x FROM … FOR …)`, `POSITION(a IN b)` and
-`EXTRACT(field FROM ts)` need DataFusion features this build does not enable,
-so they are `Error::Sql`, as before; use `substr_index`/`left`/`right`,
-`strpos` and `date_part('field', ts)`.
+**Regular expressions and pattern matching are not available in SQL.**
+`regexp_like`, `regexp_count`, `regexp_instr`, `regexp_match`, the operators
+`~`, `~*`, `!~`, `!~*`, `SIMILAR TO` (which DataFusion plans as a regex
+match), `LIKE`, `ILIKE`, their negations and the `~~` operator family are all
+`Error::Sql`. Compiling and running a regex allocates outside the pool and
+cannot be bounded by the pattern's length: `regexp_like(s, '(?i)\p{L}{200}')`
+took 5.8 s and 581 MB of resident memory with the pool at zero, and
+`regexp_match` with nested capture groups grew its input about 250-fold (82 MB
+to 698 MB). DataFusion evaluates `LIKE` and `ILIKE` with Arrow's kernels,
+which match a pattern with no inner wildcard (`'abc'`, `'abc%'`, `'%abc'`,
+`'%abc%'`) without a regex but compile any other pattern into one, with no
+bound but the regex crate's size limit: a 14 KB `'%a%a…'` pattern took 6.6 s
+and 327 MB. Use `starts_with`, `ends_with`, `contains`, `strpos`, `=` and
+`lower()`/`upper()` for case-insensitive tests, or match in the caller. The
+optimizer itself rewrites `starts_with(x, 'literal')` into a prefix `LIKE`
+that Arrow matches without a regex (or with a regex of literals only, when
+the prefix contains `%`, `_` or `\`); that one form is accepted in the
+optimized plan.
+
+**Aggregates.** `ALLOWED_AGGREGATES` holds the aggregates whose state has a
+fixed size or holds at most the values they receive; as an aggregate, that
+state is reserved from the pool. Left out are
+`approx_percentile_cont` and `approx_percentile_cont_with_weight`, which
+allocate their literal centroid count up front
+(`approx_percentile_cont(v, 0.5, 100000000000000)` aborted the process
+allocating 1.6 PB); `array_agg` and `string_agg`, which build a value from
+every row they receive, so over a growing window frame their output is
+quadratic and outside the pool; `nth_value` as an aggregate (the window
+function of that name is allowed), which keeps up to a literal `n` rows of
+list state; and `grouping`, which only grouping sets use.
+
+**Window functions.** Every DataFusion 55 window function is allowed: none
+allocates by a literal argument (`ntile(n)` and `nth_value(x, n)` only
+compare with `n`, and `lead`/`lag` clamp their offset to the partition).
+Every window expression, including an aggregate over a window, must return a
+fixed-width type (numbers, booleans, timestamps, dates, durations, intervals,
+decimals); a string, binary or list window is `Error::Sql`. A window
+repeats a value for every row of its partition, and its output is not
+reserved: `first_value('<1 KB literal>') OVER ()` over a million-row join
+held 2.5 GB with the pool at zero, and the same with a 15 KB literal
+overflowed Arrow's 2 GiB string offsets. Use the window to find the row
+(`row_number()`, `lag(ts)`, a fixed-width key) and join or select the string
+by it. The fixed-width columns a window adds are reserved from the pool per
+input row, as its input arrives (see below).
+
+**`SUBSTRING` is not available.** The SQL parser turns `substr(…)`,
+`substring(…)` and `SUBSTRING(x FROM … FOR …)` alike into a `SUBSTRING`
+expression, whose planner needs a DataFusion feature this build does not
+enable, so all three are `Error::Sql`. Use `left(x, n)`, `right(x, n)` or
+`substr_index(x, delimiter, count)`. `POSITION(a IN b)` and
+`EXTRACT(field FROM ts)` are `Error::Sql` for the same reason; use
+`strpos(b, a)` and `date_part('field', ts)`.
 
 ### Subqueries
 
@@ -254,8 +305,17 @@ Window operators buffer their input without reserving it. The engine wraps
 the input of every `WindowAggExec` and `BoundedWindowAggExec` in a guard that
 reserves each batch from the query's pool, cumulatively, until the stream
 ends; before this, `count(*) OVER ()` over a join or a `UNION ALL` fan-out
-held hundreds of megabytes while the pool read zero. The reservation is
-conservative for bounded windows, which release input as they go.
+held hundreds of megabytes while the pool read zero. With each batch the
+guard also reserves the window columns the operator will add for its rows
+(their fixed width plus a validity byte per row), before the operator builds
+them, so forty `sum(i) OVER ()` columns over a large join are `Error::Limit`
+at the pool rather than a gigabyte outside it. The reservation is
+conservative for bounded windows, which release input as they go. A window
+that needs its whole partition (`WindowAggExec`) also concatenates its
+buffered input once, a copy of at most the reserved bytes that is not
+itself reserved, and the state of an aggregate over a window (for example
+`median`'s values) is not reserved either; neither is larger than the
+window's input.
 
 The same guard wraps every operator that has an input and fails the query
 with `Error::Limit` past `MAX_BATCH_BYTES` in one batch, `MAX_PLAN_BYTES`
@@ -265,13 +325,14 @@ and sort-merge joins (rows² output on a low-cardinality key). Batches are
 measured by the slices they reference, so a projection of a sealed batch is
 not charged for buffers it shares.
 
-What remains unbounded is the transient memory of expression evaluation,
-which DataFusion does not account: the batch cap applies after a batch
-exists, so it limits how far an oversized intermediate propagates, not its
-first allocation. The functions that could make one disproportionately large
-are not on the allowlist, and `SQL_BATCH_ROWS` keeps each evaluation to 256
-rows. Sealed snapshot data is accounted separately by `MAX_SNAPSHOT_BYTES` and
-`MAX_ENGINE_BYTES`.
+What remains unbounded is the transient memory of expression evaluation, which
+DataFusion does not account: the batch cap applies after a batch exists, so it
+limits how far an oversized intermediate propagates, not its first allocation.
+The functions that could make one disproportionately large are not on the
+allowlists. Operators build batches of at most `SQL_BATCH_ROWS` (256) rows; an
+expression directly over a scan evaluates the snapshot's stored batches, which
+are up to the capture's `batch_rows` (at most 1,024 rows). Sealed snapshot
+data is accounted separately by `MAX_SNAPSHOT_BYTES` and `MAX_ENGINE_BYTES`.
 
 ### Panics
 
@@ -338,9 +399,11 @@ when the query task next yields, and two kinds of work never yield.
   cooperative budget lets a leaf deliver 128 batches before it yields, so such
   a join used to run to completion past its deadline (an expensive predicate
   kept a permit about 10 s past it). Every leaf is now wrapped to yield before
-  each batch, so the abort lands within one probe batch; `SQL_BATCH_ROWS` is
-  256 to keep that batch small. The work of a single batch still cannot be
-  interrupted.
+  each batch, so the abort lands within one probe batch. A probe batch is a
+  stored batch of the snapshot, up to the capture's `batch_rows` (at most
+  1,024 rows), when the join reads a scan directly, and at most
+  `SQL_BATCH_ROWS` (256) rows when it reads another operator. The work of a
+  single batch still cannot be interrupted.
 
 Tests show cancellation, task cleanup and permit release within
 `CANCEL_GRACE` for a rows² equi-join and for a filtered equi-join that matches
@@ -398,27 +461,34 @@ names an IPC reader or a spill directory mode. Without the `sql` feature,
 capture tests:
 
 - `tests/sql.rs`, over real loopback captures made with `Export`. Expected
-  values are an independent fold over the `HistoryReadResult.samples` that were
-  served, or hand-computed literals: filters and `COUNT(*)`, `COUNT(col)`,
-  `SUM`/`AVG`/`MIN`/`MAX` with NA; NaN/±Infinity/`-0.0` bits; empty strings,
-  quotes and Unicode; `COUNT(*) FILTER` over Bool; a two-snapshot equi-join on
-  `ts` against a nested-loop reference; New York DST fall-back grouped by `ts`
-  and `ts_local`; leap-second components; lossless reconstruction of the source
-  samples from the SQL columns; a rejection matrix of incomplete, corrupt and
-  mismatched captures (each registers nothing, with a positive control);
-  cancellation, deadline, admission capacity and permit release, including a
-  filtered join that never produces output; memory, output and join-row caps; window input beyond the pool; DDL/DML/`COPY`/
-  `SET`/`CREATE EXTERNAL TABLE`/URL-table rejection with no file written;
-  oversize SQL text and deep nesting; six left-deep chain shapes at the token
-  cap (run, unoptimized, without overflow) and one term past it
-  (`Error::Limit`); joins, comma joins, `UNION ALL`, `EXCEPT`, CTEs, subquery
-  relations and CTE doubling at and one past each statement bound, rejected
-  within a second; `CUBE`/`ROLLUP`/`GROUPING SETS`/`TABLESAMPLE`/locking
-  clauses and non-query statements; `||` and every string-building function
-  rejected, with allowed string functions as a control; cross, non-equi and
-  recursive query rejection; identity, the `snapshots` table and repeated
-  results after the capture is rewritten and deleted; table-name validation
-  and the snapshot count bound.
+  values are an independent fold over the `HistoryReadResult.samples` that
+  were served, or hand-computed literals: filters and `COUNT(*)`,
+  `COUNT(col)`, `SUM`/`AVG`/`MIN`/`MAX` with NA; NaN/±Infinity/`-0.0` bits;
+  empty strings, quotes and Unicode; `COUNT(*) FILTER` over Bool; a
+  two-snapshot equi-join on `ts` against a nested-loop reference; New York DST
+  fall-back grouped by `ts` and `ts_local`; leap-second components; lossless
+  reconstruction of the source samples from the SQL columns; a rejection
+  matrix of incomplete, corrupt and mismatched captures (each registers
+  nothing, with a positive control); cancellation, deadline, admission
+  capacity and permit release, including a filtered join that never produces
+  output; memory, output and join-row caps; window input beyond the pool;
+  DDL/DML/`COPY`/ `SET`/`CREATE EXTERNAL TABLE`/URL-table rejection with no
+  file written; oversize SQL text and deep nesting; six left-deep chain shapes
+  at the token cap (run, unoptimized, without overflow) and one term past it
+  (`Error::Limit`); joins, joins inside parentheses, comma joins, `UNION ALL`,
+  `EXCEPT`, CTEs, subquery relations and CTE doubling at and one past each
+  statement bound, rejected within a second; `CUBE`/`ROLLUP`/`GROUPING
+  SETS`/`TABLESAMPLE`/locking clauses and non-query statements; `||`, every
+  string-building function and every spelling of `substr` rejected, with
+  allowed string functions as a control; every regex function, regex operator,
+  `SIMILAR TO`, `LIKE` and `ILIKE` rejected, with `starts_with` and the
+  literal tests as a control; the `approx_percentile_cont` abort and the other
+  aggregates off the allowlist rejected, with allowed aggregates, aliases and
+  window functions as controls; variable-width window expressions rejected and
+  wide fixed-width windows over a large join `Error::Limit` at the pool;
+  cross, non-equi and recursive query rejection; identity, the `snapshots`
+  table and repeated results after the capture is rewritten and deleted;
+  table-name validation and the snapshot count bound.
 - Unit tests in `src/sql/tests.rs`: engine drop stops every runtime thread;
   cancellation, deadline and a dropped future return the runtime's alive tasks
   to zero and the permits to `SQL_QUERIES`; a pool overrun is `Error::Limit`
@@ -426,8 +496,10 @@ capture tests:
   temporary files disabled; the batch-byte, plan-byte and join-row guards at
   and past each cap, slice accounting, and window-input reservation and its
   release, over synthetic streams; every operator with an input guarded and
-  cooperative in real plans; the session registers exactly
-  `ALLOWED_FUNCTIONS`; hash-valid captures that fail only while draining
+  cooperative in real plans, with each window's output width reserved; the
+  physical plan is built from the checked optimized plan; the session
+  registers exactly `ALLOWED_FUNCTIONS`, `ALLOWED_AGGREGATES` and
+  `ALLOWED_WINDOW_FUNCTIONS`; hash-valid captures that fail only while draining
   (including a coverage contradiction visible only after the last row) never
   register; out-of-range timestamps; the zstd reachability evidence above.
 

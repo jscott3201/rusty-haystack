@@ -336,6 +336,36 @@ fn no_zstd_path_is_reachable_from_the_sql_module() {
     let mut allowed = ALLOWED_FUNCTIONS.to_vec();
     allowed.sort_unstable();
     assert_eq!(registered, allowed);
+    let mut registered: Vec<&str> = state
+        .aggregate_functions()
+        .values()
+        .map(|f| f.name())
+        .collect();
+    registered.sort_unstable();
+    registered.dedup();
+    let mut allowed = ALLOWED_AGGREGATES.to_vec();
+    allowed.sort_unstable();
+    assert_eq!(registered, allowed);
+    let mut registered: Vec<&str> = state
+        .window_functions()
+        .values()
+        .map(|f| f.name())
+        .collect();
+    registered.sort_unstable();
+    registered.dedup();
+    let mut allowed = ALLOWED_WINDOW_FUNCTIONS.to_vec();
+    allowed.sort_unstable();
+    assert_eq!(registered, allowed);
+    for name in [
+        "approx_percentile_cont",
+        "approx_percentile_cont_with_weight",
+        "array_agg",
+        "string_agg",
+        "nth_value",
+        "grouping",
+    ] {
+        assert!(!state.aggregate_functions().contains_key(name), "{name}");
+    }
     for name in [
         "concat",
         "concat_ws",
@@ -354,10 +384,27 @@ fn no_zstd_path_is_reachable_from_the_sql_module() {
         "arrow_try_cast",
         "cast_to_type",
         "levenshtein",
+        "regexp_like",
+        "regexp_count",
+        "regexp_instr",
+        "regexp_match",
+        "substr",
     ] {
         assert!(!state.scalar_functions().contains_key(name), "{name}");
     }
-    assert!(!ALLOWED_OPERATORS.contains(&Operator::StringConcat));
+    for op in [
+        Operator::StringConcat,
+        Operator::RegexMatch,
+        Operator::RegexIMatch,
+        Operator::RegexNotMatch,
+        Operator::RegexNotIMatch,
+        Operator::LikeMatch,
+        Operator::ILikeMatch,
+        Operator::NotLikeMatch,
+        Operator::NotILikeMatch,
+    ] {
+        assert!(!ALLOWED_OPERATORS.contains(&op), "{op}");
+    }
     let options = state.config().options();
     assert_eq!(options.execution.target_partitions, 1);
     assert_eq!(options.execution.batch_size.get(), SQL_BATCH_ROWS);
@@ -372,6 +419,33 @@ fn no_zstd_path_is_reachable_from_the_sql_module() {
     assert!(!options.catalog.information_schema);
     assert!(!options.execution.enable_recursive_ctes);
     assert!(!options.optimizer.repartition_joins);
+}
+
+/// The physical plan is built from the one optimized plan that was
+/// checked: `SessionState::create_physical_plan` and
+/// `DataFrame::into_optimized_plan` both optimize again, and that third,
+/// unchecked pass is what the physical plan used to be built from.
+#[test]
+fn the_physical_plan_is_built_from_the_checked_optimized_plan() {
+    let source = include_str!("mod.rs");
+    let execute = &source[source.find("async fn execute(").unwrap()..];
+    let execute = &execute[..execute.find("\n}\n").unwrap()];
+    for forbidden in ["into_optimized_plan", "execute_logical_plan", "DataFrame"] {
+        assert!(!source.contains(forbidden), "{forbidden}");
+    }
+    assert_eq!(execute.matches(".optimize(").count(), 1);
+    assert_eq!(execute.matches("create_physical_plan(").count(), 1);
+    let optimize = execute.find(".optimize(").unwrap();
+    let checked = execute
+        .find("check_expressions(&optimized, Stage::Optimized)")
+        .unwrap();
+    let keyless = execute.find("reject_keyless_joins(&optimized)").unwrap();
+    let planner = execute.find(".query_planner()").unwrap();
+    let physical = execute
+        .find("create_physical_plan(&optimized, &state)")
+        .unwrap();
+    assert!(optimize < checked && checked < keyless && keyless < planner && planner < physical);
+    assert!(execute[physical..].contains("reject_runaway(&physical)"));
 }
 
 /// One `Utf8` column `s` of `rows` strings of `len` bytes each.
@@ -488,11 +562,20 @@ async fn window_input_is_reserved_cumulatively_and_released() {
     let budget = Arc::new(Budget::default());
     // Within the pool: everything passes, and the reservation is released
     // when the stream ends.
-    let (rows, reserved) = drain(batches(), Watch::WindowInput, &budget, total).await;
+    let input = Watch::WindowInput { row_bytes: 0 };
+    let (rows, reserved) = drain(batches(), input, &budget, total).await;
     assert_eq!(rows.unwrap(), 8 * 64);
     assert_eq!(reserved, 0);
     // One byte short: the last batch cannot be reserved.
-    let (rows, reserved) = drain(batches(), Watch::WindowInput, &budget, total - 1).await;
+    let (rows, reserved) = drain(batches(), input, &budget, total - 1).await;
+    assert!(is_limit(&rows), "{rows:?}");
+    assert_eq!(reserved, 0);
+    // The window columns are reserved per row, before they are built: the
+    // same input with 9 bytes per row of output needs that much more.
+    let input = Watch::WindowInput { row_bytes: 9 };
+    let (rows, _) = drain(batches(), input, &budget, total + 9 * 8 * 64).await;
+    assert_eq!(rows.unwrap(), 8 * 64);
+    let (rows, reserved) = drain(batches(), input, &budget, total + 9 * 8 * 64 - 1).await;
     assert!(is_limit(&rows), "{rows:?}");
     assert_eq!(reserved, 0);
     // A window input guard does not charge the plan budget.
@@ -515,7 +598,11 @@ async fn physical_plans_are_guarded_at_every_operator() {
     ] {
         let plan = state.create_logical_plan(sql).await.unwrap();
         let plan = state.optimize(&plan).unwrap();
-        let plan = state.create_physical_plan(&plan).await.unwrap();
+        let plan = state
+            .query_planner()
+            .create_physical_plan(&plan, &state)
+            .await
+            .unwrap();
         let plan = guarded(plan, &Arc::new(Budget::default())).unwrap();
         let (mut joins, mut windows) = (0, 0);
         let mut pending = vec![(plan, None::<Arc<dyn ExecutionPlan>>)];
@@ -539,7 +626,13 @@ async fn physical_plans_are_guarded_at_every_operator() {
                 windows += 1;
                 for child in node.children() {
                     let guard = (child.as_ref() as &dyn Any).downcast_ref::<GuardExec>();
-                    assert_eq!(guard.map(|g| g.watch), Some(Watch::WindowInput), "{sql}");
+                    // One Int64 or UInt64 window column: 8 bytes and a
+                    // validity bit, rounded up.
+                    assert_eq!(
+                        guard.map(|g| g.watch),
+                        Some(Watch::WindowInput { row_bytes: 9 }),
+                        "{sql}"
+                    );
                 }
             }
             if node.children().is_empty() {

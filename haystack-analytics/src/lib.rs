@@ -49,7 +49,7 @@ pub enum Error {
     /// SQL text rejected before execution: unparsable, not a query, or a
     /// forbidden table, clause, function or operator. A statement over a
     /// size bound is `Limit` instead.
-    #[error("SQL rejected: not a supported read-only query")]
+    #[error("SQL rejected: not a supported or valid read-only query")]
     Sql,
     /// Query execution failed for a reason other than a bound.
     #[error("query execution failed")]

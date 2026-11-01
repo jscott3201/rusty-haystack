@@ -1446,6 +1446,29 @@ async fn planning_bounds_reject_wide_statements_quickly() {
             MAX_SQL_JOINS,
         ),
         (
+            // Parentheses make the chain one nested join factor.
+            "parenthesized JOIN chain",
+            Box::new(|n| {
+                let joins = joined(
+                    (1..=n).map(|i| format!("JOIN t j{i} ON j{i}.ts = j0.ts")),
+                    " ",
+                );
+                format!("SELECT count(*) AS n FROM (t j0 {joins})")
+            }),
+            MAX_SQL_JOINS,
+        ),
+        (
+            "JOIN of a parenthesized chain",
+            Box::new(|n| {
+                let joins = joined(
+                    (2..=n).map(|i| format!("JOIN t j{i} ON j{i}.ts = j1.ts")),
+                    " ",
+                );
+                format!("SELECT count(*) AS n FROM t j0 JOIN ((t j1 {joins})) ON j0.ts = j1.ts")
+            }),
+            MAX_SQL_JOINS,
+        ),
+        (
             "comma joins",
             Box::new(|n| {
                 let tables = joined((0..=n).map(|i| format!("t c{i}")), ", ");
@@ -1529,6 +1552,19 @@ async fn planning_bounds_reject_wide_statements_quickly() {
             .query(&doubling(4), query_options())
             .await
             .unwrap_err(),
+        Error::Limit
+    );
+
+    // The re-review's bypass: 30 joins inside parentheses ran.
+    let nested = {
+        let joins = joined(
+            (1..=30).map(|i| format!("JOIN t j{i} ON j{i}.ts = j0.ts")),
+            " ",
+        );
+        format!("SELECT count(*) FROM (t j0 {joins})")
+    };
+    assert_eq!(
+        engine.query(&nested, query_options()).await.unwrap_err(),
         Error::Limit
     );
 
@@ -1628,6 +1664,10 @@ async fn string_building_functions_and_operators_are_rejected() {
         "SELECT named_struct('a', 1)",
         "SELECT struct(1, 2)",
         "SELECT version()",
+        // Every spelling of `substr` becomes `SUBSTRING`, which is not planned.
+        "SELECT substr(point_id, 1, 1) FROM t",
+        "SELECT substring(point_id, 1, 1) FROM t",
+        "SELECT substring(point_id FROM 1 FOR 1) FROM t",
     ] {
         assert_eq!(
             engine.query(sql, query_options()).await.unwrap_err(),
@@ -1640,7 +1680,7 @@ async fn string_building_functions_and_operators_are_rejected() {
         "SELECT upper(point_id) AS u, lower(tz) AS l, length(point_id) AS n, \
          CAST(strpos(point_id, 't') AS BIGINT) AS p, TRIM(point_id) AS tr, left(point_id, 1) AS lf, \
          right(point_id, 1) AS rt, split_part(point_id, 'x', 1) AS sp, reverse(point_id) AS rv, \
-         regexp_like(point_id, '^t') AS rl, date_part('year', ts) AS y, \
+         starts_with(point_id, 't') AS sw, date_part('year', ts) AS y, \
          date_trunc('hour', ts) AS h, abs(number_value) AS a, coalesce(number_value, 0) AS c, \
          round(number_value) AS r, arrow_typeof(ts) AS ty FROM t ORDER BY utc_seconds",
     )
@@ -1729,4 +1769,197 @@ async fn a_join_that_matches_nothing_still_stops_at_its_deadline() {
     for output in [x.unwrap(), y.unwrap()] {
         assert_eq!(i64s(&all(&output), "n"), [Some(MAX_ROWS as i64)]);
     }
+}
+
+/// Aggregates and window functions are allowlisted like scalars. Before,
+/// `approx_percentile_cont`'s literal centroid count was allocated up front
+/// and the first query below aborted the process (`memory allocation of
+/// 1600000000000000 bytes failed`). `array_agg` and `string_agg` build a
+/// value from every row, which a growing window frame makes quadratic.
+#[tokio::test]
+async fn aggregates_and_windows_outside_the_allowlists_are_rejected() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = small(dir.path()).await;
+    for sql in [
+        "SELECT approx_percentile_cont(number_value, 0.5, 100000000000000) FROM t",
+        "SELECT approx_percentile_cont_with_weight(number_value, 1.0, 0.5, 1000000000) FROM t",
+        "SELECT approx_percentile_cont(0.5, 100000000000000) WITHIN GROUP (ORDER BY number_value) \
+         FROM t",
+        "SELECT approx_percentile_cont(number_value, 0.5, 100000000000000) OVER () FROM t",
+        "SELECT approx_percentile_cont(number_value, 0.5) FROM t",
+        "SELECT array_agg(number_value) FROM t",
+        "SELECT count(*) FROM (SELECT array_agg(number_value) OVER (ORDER BY ts) AS a FROM t) q",
+        "SELECT string_agg(point_id, ',') FROM t",
+        "SELECT nth_value(number_value, 2 ORDER BY ts) FROM t",
+        "SELECT grouping(present) FROM t GROUP BY present",
+    ] {
+        assert_eq!(
+            engine.query(sql, query_options()).await.unwrap_err(),
+            Error::Sql,
+            "{sql}"
+        );
+    }
+    // Controls: allowed aggregates, including through aliases, and allowed
+    // window functions and aggregates over windows.
+    let out = run(
+        &engine,
+        "SELECT count(*) AS n, sum(number_value) AS s, avg(number_value) AS a, \
+         median(number_value) AS m, var_samp(number_value) AS v, \
+         approx_median(number_value) AS am, approx_distinct(utc_seconds) AS ad, \
+         percentile_cont(0.5) WITHIN GROUP (ORDER BY number_value) AS p FROM t",
+    )
+    .await;
+    assert_eq!(i64s(&out, "n"), [Some(4)]);
+    assert_eq!(f64s(&out, "s"), [Some(6f64.to_bits())]);
+    assert_eq!(f64s(&out, "m"), [Some(1.5f64.to_bits())]);
+    assert_eq!(f64s(&out, "p"), [Some(1.5f64.to_bits())]);
+    let out = run(
+        &engine,
+        "SELECT number_value - lag(number_value) OVER (ORDER BY ts) AS d, \
+         sum(number_value) OVER (ORDER BY ts) AS s, \
+         nth_value(number_value, 2) OVER (ORDER BY ts) AS nv, \
+         CAST(row_number() OVER (ORDER BY ts) AS BIGINT) AS r, \
+         CAST(ntile(2) OVER (ORDER BY ts) AS BIGINT) AS nt, \
+         count(*) OVER () AS c FROM t ORDER BY ts",
+    )
+    .await;
+    assert_eq!(
+        f64s(&out, "d"),
+        [
+            None,
+            Some(1f64.to_bits()),
+            Some(1f64.to_bits()),
+            Some(1f64.to_bits())
+        ]
+    );
+    assert_eq!(
+        f64s(&out, "s"),
+        [0f64, 1., 3., 6.].map(|v| Some(v.to_bits()))
+    );
+    assert_eq!(
+        f64s(&out, "nv"),
+        [
+            None,
+            Some(1f64.to_bits()),
+            Some(1f64.to_bits()),
+            Some(1f64.to_bits())
+        ]
+    );
+    assert_eq!(i64s(&out, "r"), [1, 2, 3, 4].map(Some));
+    assert_eq!(i64s(&out, "nt"), [1, 1, 2, 2].map(Some));
+    assert_eq!(i64s(&out, "c"), [Some(4); 4]);
+}
+
+/// A window repeats a value for every row of its partition, outside the
+/// pool, so every window expression must be of a fixed-width type: before,
+/// `first_value('<1 KB literal>') OVER ()` over a million-row join held
+/// 2.5 GB with the pool at zero. The fixed-width columns a window adds are
+/// reserved per row as its input arrives, so many of them over a large
+/// join are `Error::Limit` at the pool.
+#[tokio::test]
+async fn window_outputs_are_fixed_width_and_reserved() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = small(dir.path()).await;
+    let literal = "x".repeat(1000);
+    for sql in [
+        "SELECT first_value(point_id) OVER () FROM t".to_owned(),
+        "SELECT max(point_id) OVER () FROM t".to_owned(),
+        "SELECT lag(point_id) OVER (ORDER BY ts) FROM t".to_owned(),
+        "SELECT lag(string_value, 1, 'x') OVER (ORDER BY ts) FROM t".to_owned(),
+        format!("SELECT count(*) FROM (SELECT first_value('{literal}') OVER () AS v FROM t) q"),
+        format!("SELECT max(length(v)) FROM (SELECT max('{literal}') OVER () AS v FROM t) q"),
+    ] {
+        assert_eq!(
+            engine.query(&sql, query_options()).await.unwrap_err(),
+            Error::Sql,
+            "{sql}"
+        );
+    }
+    let out = run(
+        &engine,
+        "SELECT first_value(ts) OVER (ORDER BY ts) = min(ts) OVER () AS f, \
+         last_value(present) OVER (ORDER BY ts) AS l FROM t",
+    )
+    .await;
+    assert_eq!(out.num_rows(), 4);
+
+    let dir = tempfile::tempdir().unwrap();
+    let engine = big(dir.path()).await;
+    // A million join rows; each `sum(i) OVER ()` adds 9 bytes per row.
+    let wide = |columns: usize| {
+        let inner = joined(
+            (0..columns).map(|i| format!("sum({i}) OVER () AS c{i}")),
+            ", ",
+        );
+        let outer = joined((0..columns).map(|i| format!("max(c{i}) AS m{i}")), ", ");
+        format!(
+            "SELECT {outer} FROM (SELECT {inner} FROM big a JOIN big b \
+             ON a.point_id = b.point_id WHERE a.number_value < 100) q"
+        )
+    };
+    let output = engine.query(&wide(1), query_options()).await.unwrap();
+    assert_eq!(i64s(&all(&output), "m0"), [Some(0)]);
+    assert!(
+        output.pool_peak_bytes >= 9 * 100 * MAX_ROWS,
+        "window output not reserved: {}",
+        output.pool_peak_bytes
+    );
+    let columns = QUERY_MEMORY_BYTES / (9 * 100 * MAX_ROWS) + 1;
+    assert_eq!(
+        engine
+            .query(&wide(columns), query_options())
+            .await
+            .unwrap_err(),
+        Error::Limit
+    );
+}
+
+/// Regex compilation and matching allocate outside the pool and can take
+/// seconds for one short pattern (`regexp_like(s, '(?i)\p{L}{200}')` took
+/// 5.8 s and 581 MB; a 14 KB `LIKE` pattern took 6.6 s and 327 MB), and
+/// `regexp_match` with nested groups grew its input about 250-fold. Every
+/// regex-backed function, operator and pattern match is rejected; the
+/// literal tests are the alternative, including `starts_with`, which the
+/// optimizer itself turns into a prefix `LIKE`.
+#[tokio::test]
+async fn regex_functions_operators_and_pattern_matches_are_rejected() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = small(dir.path()).await;
+    for sql in [
+        "SELECT regexp_like(point_id, '^t') FROM t",
+        "SELECT regexp_count(point_id, 't') FROM t",
+        "SELECT regexp_instr(point_id, 't') FROM t",
+        "SELECT regexp_match(point_id, '((.*))') FROM t",
+        "SELECT count(*) FROM t WHERE point_id ~ '^t'",
+        "SELECT count(*) FROM t WHERE point_id ~* '^T'",
+        "SELECT count(*) FROM t WHERE point_id !~ '^x'",
+        "SELECT count(*) FROM t WHERE point_id !~* '^X'",
+        "SELECT count(*) FROM t WHERE point_id SIMILAR TO 't%'",
+        "SELECT count(*) FROM t WHERE point_id NOT SIMILAR TO 'x%'",
+        "SELECT count(*) FROM t WHERE point_id LIKE 't%'",
+        "SELECT count(*) FROM t WHERE point_id LIKE '%a%a%a'",
+        "SELECT count(*) FROM t WHERE point_id NOT LIKE 'x'",
+        "SELECT count(*) FROM t WHERE point_id ILIKE 'T%'",
+        "SELECT count(*) FROM t WHERE point_id NOT ILIKE 'x%'",
+        "SELECT count(*) FROM t WHERE point_id LIKE point_id",
+        "SELECT count(*) FROM t WHERE point_id ~~ 't%'",
+        "SELECT count(*) FROM t WHERE point_id !~~* 'x%'",
+    ] {
+        assert_eq!(
+            engine.query(sql, query_options()).await.unwrap_err(),
+            Error::Sql,
+            "{sql}"
+        );
+    }
+    let out = run(
+        &engine,
+        "SELECT count(*) AS n FROM t WHERE starts_with(point_id, 't') AND \
+         NOT starts_with(point_id, '%_\\') AND ends_with(point_id, 't') AND \
+         contains(point_id, 't') AND strpos(point_id, 't') = 1 AND lower(point_id) = 't'",
+    )
+    .await;
+    assert_eq!(i64s(&out, "n"), [Some(4)]);
 }
