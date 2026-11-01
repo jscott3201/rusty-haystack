@@ -27,11 +27,23 @@
   offset by a fixed count and then sliced the string inside a multi-byte char. The server
   decodes untrusted request bodies with this parser and has no catch-panic layer, so the
   panic was reachable from a single request; Trio values, filter literals and the client's
-  history decoder reach the same parser. The UTC offset, the time after `T`, time seconds,
-  `\uXXXX` escapes and `C(lat,lng)` now check their bytes before advancing, and the parser's
-  position accessors fail closed on a misaligned offset, so such input is a parse error.
-  An XStr whose `(` is not followed by a quote — `Foo(x")` — is now an error too; it used
-  to skip that byte unchecked and decode as `Foo("")`.
+  history decoder reach the same parser. The UTC offset, the time after `T` and time
+  seconds now check their bytes are ASCII digits before advancing; `\uXXXX` escapes and the
+  date slice with `str::get`, which refuses a range that ends inside a char; `C(lat,lng)`
+  scans by char rather than by byte; `ZincParser::new_at` clamps its starting position to
+  the input and moves it back to a char boundary; and the parser's position accessors fail
+  closed on a misaligned offset. Such input is now a parse error.
+- Some malformed Zinc that used to decode is now an error. Time fields were taken as
+  fixed-width slices without digit checks, and chrono tolerates leading whitespace, so
+  `12:30: 5`, `2024-06-01T 0:00:00Z` and `2024-06-01T00:00:0 Z` — with a space, tab, `\n` or
+  `\r` at any time or UTC-offset digit — parsed; reading one value from `12:30:\t2024-06-01`
+  decoded `Time(12:30:02)` and left the rest unread. An XStr whose `(` is not followed by a
+  quote swallowed one arbitrary character: `Bin( text/plain")` decoded as
+  `Bin("ext/plain")` and `Bin(:text/plain")` as `Bin("text/plain")`. In Trio such a value
+  now falls back to a plain string, `Str("Bin( text/plain\")")`, as other unparseable Trio
+  values do. `"\u+041"` decoded as `"A"` because the hex parse accepted a leading `+`; a
+  `\u` escape now requires four hex digits. `C(lat,lng)` trimmed any Unicode whitespace
+  around its numbers, such as U+00A0; it now trims ASCII whitespace only.
 
 ## 0.9.0
 

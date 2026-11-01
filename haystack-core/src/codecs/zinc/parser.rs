@@ -34,8 +34,18 @@ impl<'a> ZincParser<'a> {
         }
     }
 
-    /// Create a new parser starting at the given position within the source.
+    /// Create a new parser starting at the given byte position within the
+    /// source.
+    ///
+    /// `pos` is normalised so the parser never starts off a char boundary: a
+    /// position past the end is clamped to `src.len()`, and one inside a
+    /// multi-byte char is moved back to the start of that char. Without this,
+    /// the reads that slice `src[start..pos]` panicked on such a position.
     pub fn new_at(src: &'a str, pos: usize) -> Self {
+        let mut pos = pos.min(src.len());
+        while !src.is_char_boundary(pos) {
+            pos -= 1;
+        }
         Self { src, pos, depth: 0 }
     }
 
@@ -65,9 +75,11 @@ impl<'a> ZincParser<'a> {
     // advance (`pos += 5` for `HH:MM`, and the like) stepped into the middle of
     // a multi-byte char, and the server decodes untrusted request bodies with
     // this parser. The fixed-width sites now check their ASCII bytes before
-    // advancing; these accessors are the backstop. A misaligned position reads
-    // as "no char here" — never as end of input — so every caller fails closed
-    // with a parse error rather than panicking or accepting a truncated value.
+    // advancing (or slice with `get`, or scan by char), and `new_at` normalises
+    // its starting position, so `pos` stays on a boundary. These accessors are
+    // the backstop: a misaligned position reads as "no char here" — never as
+    // end of input — so a caller would fail closed with a parse error rather
+    // than panicking or accepting a truncated value.
     fn peek(&self) -> Option<char> {
         self.remaining().chars().next()
     }
@@ -442,9 +454,10 @@ impl<'a> ZincParser<'a> {
 
     fn read_time_str(&mut self) -> Result<String, CodecError> {
         let start = self.pos;
-        // HH:MM — checked byte by byte before the fixed-width advance; chrono
-        // would reject anything else anyway, but only after the advance had
-        // already sliced into whatever followed.
+        // HH:MM — checked byte by byte before the fixed-width advance, which
+        // also keeps the slice handed to chrono on a char boundary. These are
+        // digit checks, not just ASCII checks: chrono tolerates leading
+        // whitespace in a field, so `12:30: 5` used to parse as 12:30:05.
         if !self.at_ascii_pattern(b"dd:dd") {
             return Err(self.err("expected time HH:MM"));
         }
@@ -573,6 +586,10 @@ impl<'a> ZincParser<'a> {
                     .src
                     .get(self.pos..self.pos + 4)
                     .ok_or_else(|| self.err("invalid unicode escape"))?;
+                // `from_str_radix` alone would accept a leading `+` (`\u+041`).
+                if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(self.err(format!("invalid unicode escape: {hex}")));
+                }
                 self.pos += 4;
                 let code = u32::from_str_radix(hex, 16)
                     .map_err(|_| self.err(format!("invalid unicode escape: {hex}")))?;
@@ -662,8 +679,10 @@ impl<'a> ZincParser<'a> {
         if self.peek() != Some(',') {
             return Err(self.err("unterminated coord literal, expected ','"));
         }
+        // ASCII whitespace only: `str::trim` would also accept U+00A0 and the
+        // like, which Zinc does not treat as whitespace.
         let lat: f64 = self.src[start..self.pos]
-            .trim()
+            .trim_matches(|c: char| c.is_ascii_whitespace())
             .parse()
             .map_err(|_| self.err("invalid coord latitude"))?;
         if !(-90.0..=90.0).contains(&lat) {
@@ -678,7 +697,7 @@ impl<'a> ZincParser<'a> {
             return Err(self.err("unterminated coord literal, expected ')'"));
         }
         let lng: f64 = self.src[start..self.pos]
-            .trim()
+            .trim_matches(|c: char| c.is_ascii_whitespace())
             .parse()
             .map_err(|_| self.err("invalid coord longitude"))?;
         if !(-180.0..=180.0).contains(&lng) {

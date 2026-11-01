@@ -11,8 +11,10 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use chrono::NaiveTime;
 use haystack_core::codecs::{trio, zinc};
 use haystack_core::filter::parse_filter;
+use haystack_core::kinds::{Coord, Kind};
 use haystack_core::xeto::parse_xeto;
 
 /// Run `f`, turning a panic into a test failure that names the input.
@@ -142,11 +144,106 @@ fn coord_with_non_ascii_components_is_an_error() {
 fn xstr_without_an_opening_quote_is_an_error() {
     // `read_str` skips its opening quote unchecked; the XStr path used to call
     // it without looking, so it skipped half a char here, or an ASCII byte.
-    for x in ["Foo(é\")", "Foo(€\")", "Foo(x\")", "Foo(1)"] {
+    for x in [
+        "Foo(é\")",
+        "Foo(€\")",
+        "Foo(x\")",
+        "Foo(1)",
+        "Bin( text/plain\")",
+        "Bin(:text/plain\")",
+    ] {
         zinc_scalar_err(x);
     }
     // The well-formed spelling still decodes.
     assert!(zinc::decode_scalar("Foo(\"bar\")").is_ok());
+}
+
+#[test]
+fn xstr_without_an_opening_quote_in_trio_falls_back_to_a_string() {
+    // Trio decodes a value it cannot parse as Zinc as a plain string. Before
+    // the XStr check this decoded as `Bin("ext/plain")`, having swallowed the
+    // byte after `(`.
+    let grid = trio::decode_grid("v: Bin( text/plain\")\n").unwrap();
+    assert_eq!(
+        grid.row(0).unwrap().get("v"),
+        Some(&Kind::Str("Bin( text/plain\")".to_string()))
+    );
+}
+
+#[test]
+fn whitespace_inside_fixed_width_time_fields_is_an_error() {
+    // The time fields used to be taken as fixed-width slices without digit
+    // checks, and chrono tolerates leading whitespace, so these parsed.
+    let mut cases = vec!["12:30:\t2024-06-01".to_string()];
+    for ws in [' ', '\t', '\n', '\r'] {
+        cases.push(format!("12:30:{ws}5"));
+        cases.push(format!("12:{ws}0"));
+        cases.push(format!("{ws}2:30"));
+        for (i, _) in "00:00:00".char_indices().filter(|&(_, c)| c != ':') {
+            let mut time = "00:00:00".to_string();
+            time.replace_range(i..=i, &ws.to_string());
+            cases.push(format!("2024-06-01T{time}Z"));
+        }
+        for (i, _) in "+05:30".char_indices().filter(|&(_, c)| c.is_ascii_digit()) {
+            let mut offset = "+05:30".to_string();
+            offset.replace_range(i..=i, &ws.to_string());
+            cases.push(format!("2024-06-01T00:00:00{offset}"));
+            cases.push(format!("2024-06-01T00:00:00{offset} Kolkata"));
+        }
+    }
+    for input in &cases {
+        zinc_scalar_err(input);
+    }
+    // `read_val` stops after one value instead of requiring end of input; it
+    // used to decode the first input as `Time(12:30:02)` and leave the rest.
+    let mut parser = zinc::ZincParser::new("12:30:\t2024-06-01");
+    assert!(parser.read_val().is_err());
+}
+
+#[test]
+fn unicode_escape_must_be_four_hex_digits() {
+    // `u32::from_str_radix` accepts a leading `+`, so this decoded as "A".
+    for s in [r#""\u+041""#, r#""\u-041""#, r#""\u 041""#] {
+        zinc_scalar_err(s);
+    }
+    assert_eq!(
+        zinc::decode_scalar(r#""\u0041""#).unwrap(),
+        Kind::Str("A".to_string())
+    );
+}
+
+#[test]
+fn coord_accepts_only_ascii_whitespace() {
+    for c in [
+        "C(\u{a0}37.55,-77.45)",
+        "C(37.55\u{a0},-77.45)",
+        "C(37.55,\u{2003}-77.45)",
+        "C(37.55,-77.45\u{3000})",
+    ] {
+        zinc_scalar_err(c);
+    }
+    assert_eq!(
+        zinc::decode_scalar("C( 37.55 ,\t-77.45 )").unwrap(),
+        Kind::Coord(Coord::new(37.55, -77.45))
+    );
+}
+
+#[test]
+fn new_at_normalises_a_misaligned_or_out_of_range_position() {
+    // Inside the `é`: floored to its start.
+    let mut parser = zinc::ZincParser::new_at("é1", 1);
+    assert_eq!(parser.pos(), 0);
+    assert_eq!(parser.read_id(), "é1");
+    // Past the end: clamped.
+    let mut parser = zinc::ZincParser::new_at("abc", 99);
+    assert_eq!(parser.pos(), 3);
+    assert_eq!(parser.read_id(), "");
+    // `read_val` at end of input is Null, as it is for `new("")`.
+    assert_eq!(parser.read_val().unwrap(), Kind::Null);
+    // Inside a four-byte char.
+    let mut parser = zinc::ZincParser::new_at("x😀y", 3);
+    assert_eq!(parser.pos(), 1);
+    assert!(no_panic("read_val", "x😀y", || parser.read_val()).is_err());
 }
 
 #[test]
@@ -193,21 +290,43 @@ fn non_ascii_after_every_sigil_never_panics() {
 
 #[test]
 fn existing_accepted_datetimes_still_decode() {
+    // Datetimes round-trip through the encoder, which pins the instant, the
+    // fractional seconds and the tz name together.
     for s in [
-        "2024-06-01T00:00:00Z",
-        "2024-06-01T00:00:00Z UTC",
+        "2024-06-01T00:00:00+00:00 UTC",
         "2024-06-01T00:00:00+05:30 Kolkata",
         "2024-06-01T00:00:00-04:00 New_York",
         "2024-06-01T00:00:00.123-04:00 New_York",
         "2024-06-30T12:00:00+00:00 GMT+5",
-        "12:30",
-        "12:30:45",
-        "12:30:45.5",
-        "\"\\u00e9\"",
-        "C(37.5,-77.4)",
     ] {
-        assert!(zinc::decode_scalar(s).is_ok(), "{s:?} no longer decodes");
+        let val = zinc::decode_scalar(s).unwrap_or_else(|e| panic!("{s:?} no longer decodes: {e}"));
+        assert!(matches!(val, Kind::DateTime(_)), "{s:?} decoded as {val:?}");
+        assert_eq!(zinc::encode_scalar(&val).unwrap(), s);
     }
+    // `Z`, with or without the tz name, is the same instant in UTC.
+    for s in ["2024-06-01T00:00:00Z", "2024-06-01T00:00:00Z UTC"] {
+        assert_eq!(
+            zinc::decode_scalar(s).unwrap(),
+            zinc::decode_scalar("2024-06-01T00:00:00+00:00 UTC").unwrap(),
+            "{s:?}"
+        );
+    }
+    for (s, h, m, sec, milli) in [
+        ("12:30", 12, 30, 0, 0),
+        ("12:30:45", 12, 30, 45, 0),
+        ("12:30:45.5", 12, 30, 45, 500),
+    ] {
+        let want = NaiveTime::from_hms_milli_opt(h, m, sec, milli).unwrap();
+        assert_eq!(zinc::decode_scalar(s).unwrap(), Kind::Time(want), "{s:?}");
+    }
+    assert_eq!(
+        zinc::decode_scalar("\"\\u00e9\"").unwrap(),
+        Kind::Str("é".to_string())
+    );
+    assert_eq!(
+        zinc::decode_scalar("C(37.5,-77.4)").unwrap(),
+        Kind::Coord(Coord::new(37.5, -77.4))
+    );
 }
 
 // ── Parsers that reach the Zinc scalar parser ──
@@ -300,7 +419,7 @@ const FILTER_SEEDS: &[&str] = &[
 ];
 
 const XETO_SEEDS: &[&str] =
-    &["// doc\nAhu : Equip <abstract> {\n  ahu\n  dis: Str \"é\"\n  area: Number 10ft²\n}\n"];
+    &["// doc\nAhu : Equip <abstract> {\n  ahu\n  dis: Str \"é\"\n  area : Number 10\n}\n"];
 
 #[test]
 fn mutated_inputs_never_panic() {
@@ -345,6 +464,7 @@ fn mutated_inputs_never_panic() {
         }
     }
     for seed in XETO_SEEDS {
+        assert!(parse_xeto(seed).is_ok(), "seed must parse: {seed:?}");
         for input in mutations(seed) {
             let _ = no_panic("parse_xeto", &input, || parse_xeto(&input));
             cases += 1;
