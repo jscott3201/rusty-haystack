@@ -7,7 +7,7 @@ remains a process-memory server and does not enable SQLx.
 
 ## Run the complete disposable recipe
 
-From a checkout on a POSIX host with `ps`, Rust 1.99.0, cargo-nextest 0.9.146,
+From a checkout on a POSIX host with `ps`, Rust 1.99.1, cargo-nextest 0.9.146,
 Python 3, Docker and OpenSSL available:
 
 ```sh
@@ -70,7 +70,7 @@ preserves an unknown effect rather than authorizing replay.
 Build/install from the repository, with an explicit installation directory:
 
 ```sh
-cargo +1.99.0 install --locked --path haystack-cli --features postgres \
+cargo +1.99.1 install --locked --path haystack-cli --features postgres \
   --root "$PWD/standalone-install"
 ./standalone-install/bin/haystack serve --help
 ```

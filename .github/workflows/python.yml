@@ -86,7 +86,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         if: runner.os == 'macOS'
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
           targets: ${{ matrix.target }}
       - name: Bind macOS compiler and builder before construction
         if: runner.os == 'macOS'
@@ -101,7 +101,7 @@ jobs:
       - name: Build one wheel and capture actual Linux builder versions
         uses: PyO3/maturin-action@v1
         with:
-          rust-toolchain: "1.99.0"
+          rust-toolchain: "1.99.1"
           maturin-version: "v1.15.0"
           target: ${{ matrix.target }}
           container: ${{ steps.container.outputs.image }}
@@ -151,7 +151,7 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - run: python -m pip install maturin==1.15.0
       - run: cargo fetch --locked
@@ -193,7 +193,7 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.0"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - run: cargo fetch --locked
       - name: Bind downloads to successful producer artifact IDs

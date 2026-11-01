@@ -58,11 +58,11 @@ features, host, workers and exact commands are retained by the capture script.
 
 ```bash
 # Validate the benchmark data and real HTTP fixture; no performance claim.
-cargo +1.99.0 nextest run --locked -p rusty-haystack-core -p rusty-haystack-server --test benchmark_fixtures --no-tests=fail
+cargo +1.99.1 nextest run --locked -p rusty-haystack-core -p rusty-haystack-server --test benchmark_fixtures --no-tests=fail
 
 # Smoke-test each Criterion target without collecting timings.
-cargo +1.99.0 bench --locked -p rusty-haystack-core --bench baseline -- --test
-cargo +1.99.0 bench --locked -p rusty-haystack-server --bench baseline -- --test
+cargo +1.99.1 bench --locked -p rusty-haystack-core --bench baseline -- --test
+cargo +1.99.1 bench --locked -p rusty-haystack-server --bench baseline -- --test
 
 # Test capture input admission and receipts without builds or measurements.
 python3 -m unittest discover -s scripts/bench -p test_capture.py
@@ -75,7 +75,7 @@ python3 scripts/bench/capture.py /tmp/rusty-haystack-baseline
 The capture script uses the worktree's own `target` cache, `--locked`, Cargo's bench
 profile plus any recorded workspace manifest profile settings, `RUSTFLAGS=-Dwarnings`,
 two build jobs, and no extra package feature flags. It resolves Cargo, rustc and
-rustdoc through `rustup which --toolchain 1.99.0`, invokes those exact paths, and
+rustdoc through `rustup which --toolchain 1.99.1`, invokes those exact paths, and
 records their hashes, Cargo/compiler versions and the compiler host target. No
 `--target` is used.
 

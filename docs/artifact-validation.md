@@ -21,7 +21,7 @@ Release typing evidence covers the complete installed root/submodule `.pyi` set 
 
 ## Selected native wheel qualification
 
-The selected profile pins Rust 1.99.0, Maturin 1.15.0 and the lockfile's PyO3 0.29.3 / pyo3-async-runtimes 0.29.0. Local macOS arm64 qualification selects CPython 3.12.13 and 3.14.4 free-threaded. The hosted Linux x86_64 jobs select 3.12 and 3.14t and record their actual patch versions. Every consumer must match its builder's exact interpreter version. A successful result applies to that wheel digest, source, target, interpreter and default binding feature selection.
+The selected profile pins Rust 1.99.1, Maturin 1.15.0 and the lockfile's PyO3 0.29.3 / pyo3-async-runtimes 0.29.0. Local macOS arm64 qualification selects CPython 3.12.13 and 3.14.4 free-threaded. The hosted Linux x86_64 jobs select 3.12 and 3.14t and record their actual patch versions. Every consumer must match its builder's exact interpreter version. A successful result applies to that wheel digest, source, target, interpreter and default binding feature selection.
 
 Each runtime consumer observes its own interpreter before package import, after each public/native submodule and selected standard-library dependency import, and after the consumer finishes. Free-threaded evidence requires `Py_GIL_DISABLED`, the `cpython-314t` extension ABI, and `sys._is_gil_enabled() == False` at every point. A missing introspection result, enabled GIL, `PYTHON_GIL` environment override or `-X gil` override fails qualification. Ordinary 3.12 records its lack of the newer runtime introspection API. An import-only probe does not substitute for these same-process capability observations.
 
@@ -52,7 +52,7 @@ Uploads fail if no files exist. Their names include the producing run attempt to
 
 Qualification writes one evidence record per file, bound to both the file digest and its build-receipt digest. `stage` requires the complete evidence set and the checks required by the selected runtime profile. It creates a fresh directory containing package files only, copies each file and checks its digest again. `check-staged` validates the complete final inventory, source, version and hashes after the next download. Existing directories are not overwritten; an interrupted attempt remains available for diagnosis.
 
-Build helpers resolve Rust/Cargo 1.99.0 in the repository build context, record the selected executable hashes and explicitly use those executables for compilation. They reject hidden compiler, wrapper, Rust flag and Cargo profile selectors. Linker-only Cargo configuration and supported native inputs are recorded; unknown Cargo configuration is rejected without echoing values. Relative target directories are anchored to the build repository, so an unrelated caller-side cache cannot supply the packaged executable. Python workflow builders select and record their compiler before Maturin runs. Cross uses the pinned selected host toolchain mounted by the cross builder, with its image digest and cross version recorded. Extracted-source metadata and PEP 517 installation receive their own selected compiler context. These are bounded input-admission records, not a claim of a hermetic build.
+Build helpers resolve Rust/Cargo 1.99.1 in the repository build context, record the selected executable hashes and explicitly use those executables for compilation. They reject hidden compiler, wrapper, Rust flag and Cargo profile selectors. Linker-only Cargo configuration and supported native inputs are recorded; unknown Cargo configuration is rejected without echoing values. Relative target directories are anchored to the build repository, so an unrelated caller-side cache cannot supply the packaged executable. Python workflow builders select and record their compiler before Maturin runs. Cross uses the pinned selected host toolchain mounted by the cross builder, with its image digest and cross version recorded. Extracted-source metadata and PEP 517 installation receive their own selected compiler context. These are bounded input-admission records, not a claim of a hermetic build.
 
 ## Source archive lock repair
 
@@ -66,7 +66,7 @@ Downloaded qualification extracts that sealed archive into another fresh directo
 
 ## Local rehearsal
 
-Use a clean committed checkout, Rust 1.99.0 and a trusted CPython 3.12 interpreter with Maturin 1.15.0 installed. Keep outputs outside the checkout and use a fresh directory for each attempt. A retained Cargo target/cache directory may be reused; these checks do not claim a cold build.
+Use a clean committed checkout, Rust 1.99.1 and a trusted CPython 3.12 interpreter with Maturin 1.15.0 installed. Keep outputs outside the checkout and use a fresh directory for each attempt. A retained Cargo target/cache directory may be reused; these checks do not claim a cold build.
 
 ```bash
 REPO="$PWD"

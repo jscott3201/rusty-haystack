@@ -22,7 +22,7 @@ outside this qualification.
 ## Configuration and launch
 
 ```sh
-cargo +1.99.0 install --locked --path haystack-cli --features mcp-http
+cargo +1.99.1 install --locked --path haystack-cli --features mcp-http
 haystack mcp http --config /absolute/path/mcp-http.toml
 ```
 
@@ -199,10 +199,10 @@ bytes.
 ## Qualification
 
 ```sh
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features http
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features stdio,http
-cargo +1.99.0 nextest run --locked -p rusty-haystack-cli --features mcp-http
-cargo +1.99.0 nextest run --locked -p rusty-haystack-cli --features mcp,mcp-http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features stdio,http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-cli --features mcp-http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-cli --features mcp,mcp-http
 uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py
 uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py --features mcp,mcp-http
 ```

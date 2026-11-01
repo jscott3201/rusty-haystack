@@ -2,9 +2,9 @@
 
 ## Prerequisites
 
-- **Rust 1.99.0.** The repository pins normal local commands to this exact toolchain in
+- **Rust 1.99.1.** The repository pins normal local commands to this exact toolchain in
   `rust-toolchain.toml`. It is also the CI MSRV lane for the workspace's declared
-  `rust-version = "1.99"`. A separate Ubuntu lane pins current stable Rust 1.99.0; both
+  `rust-version = "1.99"`. A separate Ubuntu lane pins current stable Rust 1.99.1; both
   pins currently coincide and move only through reviewed changes.
 - **[uv](https://docs.astral.sh/uv/)** and **Python 3.12**, for the Python bindings and the full schema/client validation stage. CI pins the interpreter version deliberately — `pyo3` is configured without
   `abi3`, so every build is interpreter-specific.
@@ -39,7 +39,7 @@ the workspace floor; some dependencies do not declare an MSRV. License policy is
 unchanged: the newly resolved optional zlib-rs package uses the already allowed Zlib
 license, and two existing dependencies only normalize their MIT/Apache SPDX spelling.
 Python's declared support range and the release interpreter matrix are unchanged;
-the existing build lanes now pin Rust 1.99.0 and Maturin 1.15.0.
+the existing build lanes now pin Rust 1.99.1 and Maturin 1.15.0.
 
 ## Build and test
 
@@ -88,7 +88,7 @@ crate is excluded from which command:
 
 It runs the CI policy tests, isolated core minimal/default checks, and CI's Rust
 commands, including the `chrono-tz` feature surface in both the MSRV and current-stable
-lanes (currently Rust 1.99.0). It rebuilds the Python extension before testing it and
+lanes (currently Rust 1.99.1). It rebuilds the Python extension before testing it and
 lints the PyO3 crate. Builds, lints and tests use `--locked` to validate the checked-in
 graph. The policy tests require `python3` and only use its standard library.
 
@@ -123,13 +123,13 @@ See the [support matrix](docs/support-matrix.md) for those evidence boundaries.
 | Job | Command |
 |---|---|
 | CI policy | `python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v`, then the validated dev/main matrix plan |
-| Rustfmt (Rust 1.99.0) | `cargo +1.99.0 fmt --all --check` |
-| Clippy (MSRV, Rust 1.99.0) | `cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
-| Test (MSRV, Rust 1.99.0) | `cargo +1.99.0 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz` |
-| Core minimal and default features (Ubuntu, Rust 1.99.0) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features` |
-| Current stable (Ubuntu, Rust 1.99.0) | The same two Clippy and two test commands above, using `cargo +1.99.0` |
-| Python Bindings (Rust 1.99.0) | clippy on the excluded crate, then `maturin develop` and `pytest` |
-| Cargo Deny (Rust 1.99.0) | `cargo +1.99.0 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
+| Rustfmt (Rust 1.99.1) | `cargo +1.99.1 fmt --all --check` |
+| Clippy (MSRV, Rust 1.99.1) | `cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
+| Test (MSRV, Rust 1.99.1) | `cargo +1.99.1 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz` |
+| Core minimal and default features (Ubuntu, Rust 1.99.1) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features` |
+| Current stable (Ubuntu, Rust 1.99.1) | The same two Clippy and two test commands above, using `cargo +1.99.1` |
+| Python Bindings (Rust 1.99.1) | clippy on the excluded crate, then `maturin develop` and `pytest` |
+| Cargo Deny (Rust 1.99.1) | `cargo +1.99.1 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
 | CodeQL | Rust, Python, and Actions analyses through the reusable CodeQL workflow and existing query configuration |
 | CI OK | Always evaluates the independent required-job inventory; every required job must succeed |
 

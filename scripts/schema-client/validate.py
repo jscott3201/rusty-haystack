@@ -285,7 +285,7 @@ def run_fixture(binary: Path, temporary: Path) -> None:
     assert_stalled_cleanup(binary, client_class, read, body_class, version, accept)
 
 def main() -> None:
-    subprocess.run(["cargo", "+1.99.0", "build", "--locked", "-p", "rusty-haystack-server", "--example", "schema_fixture"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "+1.99.1", "build", "--locked", "-p", "rusty-haystack-server", "--example", "schema_fixture"], cwd=ROOT, check=True)
     target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
     if not target.is_absolute():
         target = ROOT / target

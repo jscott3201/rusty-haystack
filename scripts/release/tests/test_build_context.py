@@ -32,14 +32,14 @@ class BuildContextTests(unittest.TestCase):
             (directory / "Cargo.toml").write_text('[package]\nname="'+crate+'"\nversion.workspace=true\n')
         (self.repo / "rusty-haystack/pyproject.toml").write_text('[project]\nname="rusty-haystack"\ndynamic=["version"]\n')
         self.program("git", "import sys\nprint('"+SOURCE+"' if 'rev-parse' in sys.argv else '')\n")
-        self.program("rustc", "print('rustc 1.99.0\\nhost: "+TARGET+"\\nrelease: 1.99.0')\n")
-        self.program("rustdoc", "print('rustdoc 1.99.0')\n")
+        self.program("rustc", "print('rustc 1.99.1\\nhost: "+TARGET+"\\nrelease: 1.99.1')\n")
+        self.program("rustdoc", "print('rustdoc 1.99.1')\n")
         self.program("other-rustc", "print('rustc 1.98.0\\nhost: "+TARGET+"\\nrelease: 1.98.0')\n")
         self.program("rustup", "from pathlib import Path\nimport sys\nprint(Path(__file__).parent / sys.argv[-1])\n")
         self.program("cargo", '''import os,sys
 from pathlib import Path
 if '--version' in sys.argv:
- print('cargo 1.99.0')
+ print('cargo 1.99.1')
 else:
  path=Path(os.environ.get('CARGO_TARGET_DIR','target')) / 'x86_64-unknown-linux-gnu/release/haystack'
  path.parent.mkdir(parents=True,exist_ok=True)

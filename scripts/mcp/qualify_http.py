@@ -276,7 +276,7 @@ def qualify(binary, directory, issuer):
 
 def install(directory, features):
     installation = directory / "install"
-    subprocess.run(["cargo", "+1.99.0", "install", "--locked", "--path", "haystack-cli", "--features", features, "--debug", "--root", str(installation), "--target-dir", str(ROOT / "target")], cwd=ROOT, check=True, timeout=600)
+    subprocess.run(["cargo", "+1.99.1", "install", "--locked", "--path", "haystack-cli", "--features", features, "--debug", "--root", str(installation), "--target-dir", str(ROOT / "target")], cwd=ROOT, check=True, timeout=600)
     return installation / "bin" / "haystack"
 
 
