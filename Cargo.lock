@@ -2462,6 +2462,7 @@ dependencies = [
  "arrow-schema",
  "bytes",
  "chrono",
+ "libc",
  "parquet",
  "rusty-haystack-client",
  "rusty-haystack-core",

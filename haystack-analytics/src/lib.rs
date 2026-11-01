@@ -69,6 +69,8 @@ type Result<T> = std::result::Result<T, Error>;
 /// `reader::page_guard`), which reject such input before upstream sees it;
 /// this only converts a panic they did not anticipate into `Error::Invalid`.
 /// The process panic hook still runs, so such a panic remains visible.
+/// It does nothing under `panic = "abort"` and cannot catch an allocation
+/// failure, so the guards must bound every count upstream allocates from.
 pub(crate) fn contain<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     #[cfg(test)]
     if tests::BACKSTOP_DISABLED.with(std::cell::Cell::get) {

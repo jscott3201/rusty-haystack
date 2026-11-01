@@ -11,25 +11,28 @@ use parquet::{
     basic::{Compression, Encoding, Type as Physical},
 };
 use std::{
-    fs::{self, File},
+    fs,
     io::Read,
     path::{Path, PathBuf},
 };
 
-/// Compact Thrift preflight: deepest struct/collection nesting.
+/// Compact Thrift preflight: deepest struct/collection nesting. The typed
+/// shapes below are shallower; this is an independent bound.
 const COMPACT_MAX_DEPTH: usize = 12;
-/// Compact Thrift preflight: total fields and collection elements per message.
+/// Compact Thrift preflight: total fields and list elements per message. The
+/// typed shapes' count ranges already bound every admitted message well below
+/// this (a 16-group footer is about 3,000 nodes); this is an independent bound.
 const COMPACT_MAX_NODES: usize = 16_384;
 /// Highest Thrift field id admitted; every Parquet footer/page struct is lower.
 /// Ids are tracked per struct so a duplicate field (which a preflight and the
 /// upstream decoder could resolve differently) is rejected.
 const COMPACT_MAX_FIELD_ID: i16 = 63;
-/// Elements in any list or set other than the two footer lists below.
-const COMPACT_MAX_LIST: u64 = 1024;
-/// Entries in any map.
-const COMPACT_MAX_MAP: u64 = 128;
-/// Footer `schema` list: the root plus nine flat fields.
-const FOOTER_MAX_SCHEMA_ELEMENTS: u64 = 1 + COLUMNS.len() as u64;
+/// Elements of a column's `encodings` and `encoding_stats` lists. Upstream
+/// shifts by each encoding value; this profile writes two (PLAIN, RLE).
+const MAX_ENCODINGS: u64 = 8;
+/// Entries of the footer `key_value_metadata` list (the profile writes one,
+/// the Arrow schema).
+const MAX_KEY_VALUES: u64 = 8;
 /// Bytes of one page header examined by the page preflight.
 const MAX_PAGE_HEADER_BYTES: usize = 4096;
 /// `PAR1` + footer length + `PAR1`: the smallest structurally possible file.
@@ -227,12 +230,17 @@ impl Dataset {
 /// a symlink), and type and length are checked on the opened handle, so the
 /// returned bytes are exactly what was hashed or parsed. A file longer than
 /// `max` is `Error::Limit`, or `Error::Invalid` when `exact` requires `max`.
+///
+/// On Unix the open itself refuses a symlink (`O_NOFOLLOW`) and cannot block
+/// on a FIFO or device swapped in after the `lstat` (`O_NONBLOCK`); the
+/// handle's own `fstat` must then be a regular file. Elsewhere the `lstat`
+/// and the handle check remain, with the swap window between them.
 pub(crate) fn read_regular(path: &Path, max: u64, exact: bool) -> Result<Vec<u8>> {
     let link = fs::symlink_metadata(path)?;
     if !link.file_type().is_file() {
         return Err(Error::Invalid);
     }
-    let file = File::open(path)?;
+    let file = open_regular(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || !same_file(&link, &meta) || (exact && meta.len() != max) {
         return Err(Error::Invalid);
@@ -247,6 +255,27 @@ pub(crate) fn read_regular(path: &Path, max: u64, exact: bool) -> Result<Vec<u8>
         return Err(Error::Invalid);
     }
     Ok(bytes)
+}
+/// Opens `path` for reading without following a final symlink or blocking
+/// on a FIFO (Unix), and requires the opened handle to be a regular file.
+fn open_regular(path: &Path) -> Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(Error::Invalid),
+        Err(error) => return Err(error.into()),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(Error::Invalid);
+    }
+    Ok(file)
 }
 #[cfg(unix)]
 fn same_file(link: &fs::Metadata, handle: &fs::Metadata) -> bool {
@@ -264,15 +293,172 @@ fn load_part(dir: &Path, part: &Part) -> Result<Bytes> {
     }
     Ok(Bytes::from(bytes))
 }
-/// Preflight Compact Thrift before upstream allocation. Containers, nesting,
-/// total fields, field ids and byte lengths are bounded, including unknown
-/// fields. The top-level schema is restricted to the root plus nine flat
-/// fields. This is a framing guard; upstream still performs full validation.
+/// Compact Thrift wire shape of a field or list element, as the upstream
+/// decoder reads it.
+///
+/// Upstream (`parquet` 59.3) picks a decoder by field id alone and ignores
+/// the declared wire type: a field 4 declared `binary` is still read as a
+/// `list<RowGroup>` header, and an `i64`-typed field read as `i32` is
+/// truncated. A generic skip-by-wire-type preflight would therefore bound a
+/// different structure from the one upstream allocates for. The preflight
+/// instead walks the exact typed shapes of this profile, requires every
+/// field's declared wire type to match, range-checks narrow integers, and
+/// rejects any field id outside the shape, so upstream sees only structures
+/// whose every count and length was bounded here.
+#[derive(Clone, Copy)]
+enum Wire {
+    /// Struct field only: the value is the wire type (1 true, 2 false).
+    Bool,
+    Byte,
+    I16,
+    I32,
+    I64,
+    Binary,
+    /// Element shape and inclusive element-count range.
+    List(&'static Wire, u64, u64),
+    Struct(&'static [(i16, Wire)]),
+}
+impl Wire {
+    fn code(self) -> u8 {
+        match self {
+            Wire::Bool => 1,
+            Wire::Byte => 3,
+            Wire::I16 => 4,
+            Wire::I32 => 5,
+            Wire::I64 => 6,
+            Wire::Binary => 8,
+            Wire::List(..) => 9,
+            Wire::Struct(_) => 12,
+        }
+    }
+}
+type Shape = &'static [(i16, Wire)];
+const N_COLUMNS: u64 = COLUMNS.len() as u64;
+const EMPTY: Shape = &[];
+/// `LogicalType` union: STRING (1) or INTEGER (10).
+const LOGICAL_TYPE: Shape = &[
+    (1, Wire::Struct(EMPTY)),
+    (10, Wire::Struct(&[(1, Wire::Byte), (2, Wire::Bool)])),
+];
+/// `SchemaElement`: type, repetition_type, name, num_children,
+/// converted_type, logicalType. `type_length`, `scale`, `precision` and
+/// `field_id` are not part of the profile.
+const SCHEMA_ELEMENT: Shape = &[
+    (1, Wire::I32),
+    (3, Wire::I32),
+    (4, Wire::Binary),
+    (5, Wire::I32),
+    (6, Wire::I32),
+    (10, Wire::Struct(LOGICAL_TYPE)),
+];
+/// `PageEncodingStats`: page_type, encoding, count.
+const PAGE_ENCODING_STATS: Shape = &[(1, Wire::I32), (2, Wire::I32), (3, Wire::I32)];
+/// `ColumnMetaData` as written: type, encodings, path_in_schema, codec,
+/// num_values, total sizes, data_page_offset, encoding_stats. Statistics,
+/// dictionary, index, bloom and size-statistics fields are rejected.
+const COLUMN_META_DATA: Shape = &[
+    (1, Wire::I32),
+    (2, Wire::List(&Wire::I32, 1, MAX_ENCODINGS)),
+    (3, Wire::List(&Wire::Binary, 1, 1)),
+    (4, Wire::I32),
+    (5, Wire::I64),
+    (6, Wire::I64),
+    (7, Wire::I64),
+    (9, Wire::I64),
+    (
+        13,
+        Wire::List(&Wire::Struct(PAGE_ENCODING_STATS), 0, MAX_ENCODINGS),
+    ),
+];
+/// `ColumnChunk`: file_offset and meta_data only (no external file path,
+/// page indexes or encryption).
+const COLUMN_CHUNK: Shape = &[(2, Wire::I64), (3, Wire::Struct(COLUMN_META_DATA))];
+/// `RowGroup`: exactly one chunk per column, sizes, rows, offsets, ordinal.
+const ROW_GROUP: Shape = &[
+    (
+        1,
+        Wire::List(&Wire::Struct(COLUMN_CHUNK), N_COLUMNS, N_COLUMNS),
+    ),
+    (2, Wire::I64),
+    (3, Wire::I64),
+    (5, Wire::I64),
+    (6, Wire::I64),
+    (7, Wire::I16),
+];
+const KEY_VALUE: Shape = &[(1, Wire::Binary), (2, Wire::Binary)];
+/// `ColumnOrder` union: TYPE_ORDER (1).
+const COLUMN_ORDER: Shape = &[(1, Wire::Struct(EMPTY))];
+/// `FileMetaData`: exactly the root plus one element per column, at most
+/// `MAX_GROUPS_PER_PART` row groups, one column order per column.
+const FILE_META_DATA: Shape = &[
+    (1, Wire::I32),
+    (
+        2,
+        Wire::List(&Wire::Struct(SCHEMA_ELEMENT), N_COLUMNS + 1, N_COLUMNS + 1),
+    ),
+    (3, Wire::I64),
+    (
+        4,
+        Wire::List(&Wire::Struct(ROW_GROUP), 1, MAX_GROUPS_PER_PART as u64),
+    ),
+    (5, Wire::List(&Wire::Struct(KEY_VALUE), 0, MAX_KEY_VALUES)),
+    (6, Wire::Binary),
+    (
+        7,
+        Wire::List(&Wire::Struct(COLUMN_ORDER), N_COLUMNS, N_COLUMNS),
+    ),
+];
+/// `DataPageHeader`: num_values and the three encodings (no statistics).
+const DATA_PAGE_HEADER: Shape = &[
+    (1, Wire::I32),
+    (2, Wire::I32),
+    (3, Wire::I32),
+    (4, Wire::I32),
+];
+/// `PageHeader`: type, sizes and a v1 data page header (no CRC, no other
+/// page kinds).
+const PAGE_HEADER: Shape = &[
+    (1, Wire::I32),
+    (2, Wire::I32),
+    (3, Wire::I32),
+    (5, Wire::Struct(DATA_PAGE_HEADER)),
+];
+/// A decoded preflight value: integers are kept for the profile checks,
+/// binaries are only bounded and skipped.
+#[cfg_attr(test, derive(Debug))]
+enum Node {
+    Int(i64),
+    Bytes,
+    List(Vec<Node>),
+    Struct(Vec<(i16, Node)>),
+}
+fn field(fields: &[(i16, Node)], id: i16) -> Option<&Node> {
+    fields.iter().find(|(k, _)| *k == id).map(|(_, v)| v)
+}
+fn int(fields: &[(i16, Node)], id: i16) -> Option<i64> {
+    match field(fields, id)? {
+        Node::Int(v) => Some(*v),
+        _ => None,
+    }
+}
+fn list(fields: &[(i16, Node)], id: i16) -> &[Node] {
+    match field(fields, id) {
+        Some(Node::List(items)) => items,
+        _ => &[],
+    }
+}
+fn structure_of(node: &Node) -> Result<&[(i16, Node)]> {
+    match node {
+        Node::Struct(fields) => Ok(fields),
+        _ => Err(Error::Invalid),
+    }
+}
+/// Typed Compact Thrift preflight, run before upstream decodes (and so before
+/// it allocates for) a footer or page header. See [`Wire`].
 struct Compact<'a> {
     bytes: &'a [u8],
     pos: usize,
     nodes: usize,
-    page: Option<Vec<(i16, i64)>>,
 }
 impl<'a> Compact<'a> {
     fn new(bytes: &'a [u8]) -> Self {
@@ -280,7 +466,6 @@ impl<'a> Compact<'a> {
             bytes,
             pos: 0,
             nodes: 0,
-            page: None,
         }
     }
     fn byte(&mut self) -> Result<u8> {
@@ -302,6 +487,10 @@ impl<'a> Compact<'a> {
         }
         Err(Error::Invalid)
     }
+    fn zigzag(&mut self) -> Result<i64> {
+        let n = self.varint()?;
+        Ok(((n >> 1) as i64) ^ -((n & 1) as i64))
+    }
     fn skip(&mut self, n: usize) -> Result<()> {
         self.pos = self
             .pos
@@ -317,107 +506,155 @@ impl<'a> Compact<'a> {
         }
         Ok(())
     }
-    fn structure(&mut self, depth: usize, footer: bool) -> Result<Vec<(i16, i64)>> {
+    fn structure(&mut self, shape: Shape, depth: usize) -> Result<Vec<(i16, Node)>> {
         if depth > COMPACT_MAX_DEPTH {
             return Err(Error::Limit);
         }
         let mut last = 0i16;
         let mut seen = 0u64;
-        let mut integers = vec![];
+        let mut fields = vec![];
         loop {
-            let field = self.byte()?;
-            if field == 0 {
-                return Ok(integers);
+            let header = self.byte()?;
+            if header == 0 {
+                return Ok(fields);
             }
-            last = if field >> 4 == 0 {
-                let n = self.varint()?;
-                i16::try_from(((n >> 1) as i64) ^ -((n & 1) as i64)).map_err(|_| Error::Invalid)?
+            last = if header >> 4 == 0 {
+                i16::try_from(self.zigzag()?).map_err(|_| Error::Invalid)?
             } else {
-                last.checked_add((field >> 4) as i16)
+                last.checked_add((header >> 4) as i16)
                     .ok_or(Error::Invalid)?
             };
             if !(1..=COMPACT_MAX_FIELD_ID).contains(&last) || seen & (1 << last) != 0 {
                 return Err(Error::Invalid);
             }
             seen |= 1 << last;
-            let ty = field & 15;
             self.node()?;
-            if matches!(ty, 4..=6) {
-                let n = self.varint()?;
-                integers.push((last, ((n >> 1) as i64) ^ -((n & 1) as i64)));
-            } else if ty == 12 && depth == 0 && last == 5 && !footer {
-                self.page = Some(self.structure(depth + 1, false)?);
-            } else if ty == 9 && footer && depth == 0 && last == 2 {
-                self.list(depth, FOOTER_MAX_SCHEMA_ELEMENTS)?;
-            } else if ty == 9 && footer && depth == 0 && last == 4 {
-                self.list(depth, MAX_GROUPS_PER_PART as u64)?;
-            } else {
-                self.value(ty, depth, false)?;
-            }
+            let wire = shape
+                .iter()
+                .find(|(id, _)| *id == last)
+                .map(|(_, wire)| *wire)
+                .ok_or(Error::Invalid)?;
+            let ty = header & 15;
+            let value = match wire {
+                Wire::Bool if matches!(ty, 1 | 2) => Node::Int(i64::from(ty == 1)),
+                Wire::Bool => return Err(Error::Invalid),
+                _ if ty != wire.code() => return Err(Error::Invalid),
+                _ => self.value(wire, depth)?,
+            };
+            fields.push((last, value));
         }
     }
-    fn list(&mut self, depth: usize, max: u64) -> Result<()> {
-        let h = self.byte()?;
-        let count = if h >> 4 == 15 {
-            self.varint()?
-        } else {
-            (h >> 4) as u64
-        };
-        if count > max {
-            return Err(Error::Limit);
-        }
-        for _ in 0..count {
-            self.node()?;
-            self.value(h & 15, depth + 1, true)?;
-        }
-        Ok(())
-    }
-    fn value(&mut self, ty: u8, depth: usize, collection: bool) -> Result<()> {
+    fn value(&mut self, wire: Wire, depth: usize) -> Result<Node> {
         if depth > COMPACT_MAX_DEPTH {
             return Err(Error::Limit);
         }
-        match ty {
-            1 | 2 => {
-                if collection {
-                    self.byte()?;
-                }
-            }
-            3 => self.skip(1)?,
-            4..=6 => {
-                self.varint()?;
-            }
-            7 => self.skip(8)?,
-            8 => {
+        Ok(match wire {
+            // A bool list element has its own byte encoding; the profile has
+            // none, so only struct-field bools (handled by the caller) exist.
+            Wire::Bool => return Err(Error::Invalid),
+            Wire::Byte => Node::Int(i64::from(self.byte()? as i8)),
+            Wire::I16 => Node::Int(
+                i16::try_from(self.zigzag()?)
+                    .map_err(|_| Error::Invalid)?
+                    .into(),
+            ),
+            Wire::I32 => Node::Int(
+                i32::try_from(self.zigzag()?)
+                    .map_err(|_| Error::Invalid)?
+                    .into(),
+            ),
+            Wire::I64 => Node::Int(self.zigzag()?),
+            Wire::Binary => {
                 let n = self.varint()?;
                 if n > self.bytes.len() as u64 {
                     return Err(Error::Limit);
                 }
                 self.skip(n as usize)?;
+                Node::Bytes
             }
-            9 | 10 => self.list(depth, COMPACT_MAX_LIST)?,
-            11 => {
-                let n = self.varint()?;
-                if n > COMPACT_MAX_MAP {
+            Wire::List(element, min, max) => {
+                let h = self.byte()?;
+                // Upstream reads a zero header byte as an empty list of any
+                // element type.
+                let count = match h >> 4 {
+                    _ if h == 0 => 0,
+                    15 => self.varint()?,
+                    n => n as u64,
+                };
+                if count > max {
                     return Err(Error::Limit);
                 }
-                if n != 0 {
-                    let h = self.byte()?;
-                    for _ in 0..n {
-                        self.value(h >> 4, depth + 1, true)?;
-                        self.value(h & 15, depth + 1, true)?;
-                    }
+                if count < min || (h != 0 && h & 15 != element.code()) {
+                    return Err(Error::Invalid);
                 }
+                let mut items = vec![];
+                for _ in 0..count {
+                    self.node()?;
+                    items.push(self.value(*element, depth + 1)?);
+                }
+                Node::List(items)
             }
-            12 => {
-                self.structure(depth + 1, false)?;
-            }
-            _ => return Err(Error::Invalid),
-        }
-        Ok(())
+            Wire::Struct(shape) => Node::Struct(self.structure(shape, depth + 1)?),
+        })
     }
 }
-/// Checks magic, footer length and the footer's Compact framing over the
-/// exact part bytes. Returns the footer's start offset.
+/// Parquet `Type` enum value of a physical type in this profile.
+fn physical_code(physical: Physical) -> i64 {
+    match physical {
+        Physical::BOOLEAN => 0,
+        Physical::INT32 => 1,
+        Physical::INT64 => 2,
+        Physical::DOUBLE => 5,
+        Physical::BYTE_ARRAY => 6,
+        _ => -1,
+    }
+}
+/// Profile checks on the preflighted footer, for the integers upstream turns
+/// into structure: the schema tree's `num_children` (upstream reserves that
+/// many children before reading them), each leaf's physical type and
+/// repetition, and each chunk's encodings (upstream shifts by each value).
+fn footer_profile(footer: &[(i16, Node)]) -> Result<()> {
+    for (i, element) in list(footer, 2).iter().enumerate() {
+        let element = structure_of(element)?;
+        let children = int(element, 5);
+        let ok = if i == 0 {
+            children == Some(N_COLUMNS as i64)
+                && int(element, 1).is_none()
+                && int(element, 3).is_none()
+        } else {
+            let (physical, optional) = COLUMNS[i - 1];
+            matches!(children, None | Some(0))
+                && int(element, 1) == Some(physical_code(physical))
+                && int(element, 3) == Some(i64::from(optional))
+        };
+        if !ok {
+            return Err(Error::Invalid);
+        }
+    }
+    let plain_or_rle = |v: Option<i64>| matches!(v, Some(ENCODING_PLAIN | ENCODING_RLE));
+    for group in list(footer, 4) {
+        for chunk in list(structure_of(group)?, 1) {
+            let Some(meta) = field(structure_of(chunk)?, 3) else {
+                return Err(Error::Invalid);
+            };
+            let meta = structure_of(meta)?;
+            for encoding in list(meta, 2) {
+                if !matches!(encoding, Node::Int(ENCODING_PLAIN | ENCODING_RLE)) {
+                    return Err(Error::Invalid);
+                }
+            }
+            for stats in list(meta, 13) {
+                let stats = structure_of(stats)?;
+                if int(stats, 1) != Some(PAGE_TYPE_DATA_PAGE) || !plain_or_rle(int(stats, 2)) {
+                    return Err(Error::Invalid);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+/// Checks magic, footer length and the footer's typed Compact framing and
+/// profile over the exact part bytes. Returns the footer's start offset.
 pub(crate) fn footer_guard(bytes: &[u8], limits: &Limits) -> Result<u64> {
     let len = bytes.len() as u64;
     if len < PARQUET_MIN_FILE_BYTES || len > limits.part_bytes {
@@ -434,10 +671,11 @@ pub(crate) fn footer_guard(bytes: &[u8], limits: &Limits) -> Result<u64> {
     let start = len - 8 - size;
     let footer = &bytes[start as usize..bytes.len() - 8];
     let mut parser = Compact::new(footer);
-    parser.structure(0, true)?;
+    let fields = parser.structure(FILE_META_DATA, 0)?;
     if parser.pos != footer.len() {
         return Err(Error::Invalid);
     }
+    footer_profile(&fields)?;
     Ok(start)
 }
 /// Footer and layout validation of one part's exact bytes, before any decode.
@@ -542,14 +780,8 @@ fn page_guard(chunk: &[u8], rows: u64, column: (Physical, bool), limits: &Limits
         }
         let rest = &chunk[pos..];
         let mut parser = Compact::new(&rest[..rest.len().min(MAX_PAGE_HEADER_BYTES)]);
-        let fields = parser.structure(0, false)?;
-        let get = |fields: &[(i16, i64)], id| {
-            fields
-                .iter()
-                .find(|(k, _)| *k == id)
-                .map(|(_, v)| *v)
-                .ok_or(Error::Invalid)
-        };
+        let fields = parser.structure(PAGE_HEADER, 0)?;
+        let get = |fields: &[(i16, Node)], id| int(fields, id).ok_or(Error::Invalid);
         let kind = get(&fields, 1)?;
         let raw = get(&fields, 2)?;
         let compressed = get(&fields, 3)?;
@@ -563,7 +795,7 @@ fn page_guard(chunk: &[u8], rows: u64, column: (Physical, bool), limits: &Limits
         if raw > (rest.len() - parser.pos) as u64 {
             return Err(Error::Invalid);
         }
-        let data = parser.page.as_deref().ok_or(Error::Invalid)?;
+        let data = structure_of(field(&fields, 5).ok_or(Error::Invalid)?)?;
         let count = get(data, 1)?;
         if count <= 0
             || count as u64 > rows
@@ -665,8 +897,228 @@ fn definition_levels(levels: &[u8], count: usize) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn compact(bytes: &[u8], footer: bool) -> Result<Vec<(i16, i64)>> {
-        Compact::new(bytes).structure(0, footer)
+    /// Independent Compact Thrift encoder for hand-built inputs: it shares no
+    /// code with the preflight or with the Parquet writer.
+    #[derive(Default)]
+    struct Thrift(Vec<u8>);
+    impl Thrift {
+        fn uvar(&mut self, mut n: u64) -> &mut Self {
+            while n >= 0x80 {
+                self.0.push(n as u8 | 0x80);
+                n >>= 7;
+            }
+            self.0.push(n as u8);
+            self
+        }
+        fn int(&mut self, v: i64) -> &mut Self {
+            self.uvar(((v << 1) ^ (v >> 63)) as u64)
+        }
+        /// Short-form field header: id delta and wire type.
+        fn field(&mut self, delta: u8, ty: u8) -> &mut Self {
+            self.0.push(delta << 4 | ty);
+            self
+        }
+        /// Long-form list header: element type and count.
+        fn list(&mut self, ty: u8, count: u64) -> &mut Self {
+            self.0.push(0xf0 | ty);
+            self.uvar(count)
+        }
+        fn bin(&mut self, bytes: &[u8]) -> &mut Self {
+            self.uvar(bytes.len() as u64);
+            self.0.extend(bytes);
+            self
+        }
+        fn stop(&mut self) -> &mut Self {
+            self.0.push(0);
+            self
+        }
+        fn done(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.0)
+        }
+    }
+    fn footer(bytes: &[u8]) -> Result<()> {
+        let mut parser = Compact::new(bytes);
+        let fields = parser.structure(FILE_META_DATA, 0)?;
+        footer_profile(&fields)
+    }
+    /// Footer whose only field is the schema list: a root with
+    /// `root_children`, then the nine profile leaves, the first of which
+    /// carries `leaf_children`.
+    fn schema_footer(root_children: i64, leaf_children: Option<i64>) -> Vec<u8> {
+        let mut t = Thrift::default();
+        t.field(2, 9).list(12, N_COLUMNS + 1);
+        t.field(4, 8)
+            .bin(b"root")
+            .field(1, 5)
+            .int(root_children)
+            .stop();
+        for (i, (physical, optional)) in COLUMNS.into_iter().enumerate() {
+            t.field(1, 5).int(physical_code(physical));
+            t.field(2, 5).int(i64::from(optional));
+            t.field(1, 8).bin(b"c");
+            match leaf_children {
+                Some(n) if i == 0 => t.field(1, 5).int(n),
+                _ => &mut t,
+            };
+            t.stop();
+        }
+        t.stop();
+        t.0
+    }
+    #[test]
+    fn schema_num_children_is_bounded_before_upstream_reserves_for_it() {
+        // Upstream `parquet_schema_from_array` reserves `num_children`
+        // entries before reading any child; 0x7fffffff requested 16 GiB.
+        footer(&schema_footer(9, None)).unwrap();
+        footer(&schema_footer(9, Some(0))).unwrap();
+        for (root, leaf) in [
+            (0x7fff_ffff, None),
+            (i32::MIN.into(), None),
+            (-1, None),
+            (0, None),
+            (8, None),
+            (10, None),
+            (9, Some(0x7fff_ffff)),
+            (9, Some(1)),
+            (9, Some(-1)),
+        ] {
+            assert_eq!(
+                footer(&schema_footer(root, leaf)).unwrap_err(),
+                Error::Invalid,
+                "root {root} leaf {leaf:?}"
+            );
+        }
+        // Outside i32: upstream would truncate, so the preflight rejects it.
+        assert_eq!(
+            footer(&schema_footer(9 + (1 << 32), None)).unwrap_err(),
+            Error::Invalid
+        );
+    }
+    #[test]
+    fn every_upstream_capacity_count_is_bounded_by_the_typed_preflight() {
+        const HUGE: u64 = 0x7fff_ffff;
+        let limit = |bytes: &[u8], name: &str| {
+            assert_eq!(footer(bytes).unwrap_err(), Error::Limit, "{name}");
+        };
+        let invalid = |bytes: &[u8], name: &str| {
+            assert_eq!(footer(bytes).unwrap_err(), Error::Invalid, "{name}");
+        };
+        // FileMetaData lists: schema (2), row_groups (4), key_value (5),
+        // column_orders (7).
+        limit(
+            &Thrift::default().field(2, 9).list(12, HUGE).done(),
+            "schema",
+        );
+        invalid(
+            &Thrift::default().field(2, 9).list(12, 9).done(),
+            "short schema",
+        );
+        limit(
+            &Thrift::default().field(4, 9).list(12, HUGE).done(),
+            "groups",
+        );
+        limit(
+            &Thrift::default().field(4, 9).list(12, 17).done(),
+            "groups+1",
+        );
+        limit(
+            &Thrift::default().field(5, 9).list(12, HUGE).done(),
+            "key_value",
+        );
+        limit(
+            &Thrift::default().field(7, 9).list(12, HUGE).done(),
+            "orders",
+        );
+        invalid(
+            &Thrift::default().field(7, 9).list(12, 8).done(),
+            "orders-1",
+        );
+        // created_by longer than the footer.
+        limit(
+            &Thrift::default().field(6, 8).uvar(HUGE).done(),
+            "created_by",
+        );
+        // RowGroup.columns, then ColumnMetaData lists inside the first chunk.
+        let group = |t: &mut Thrift| {
+            t.field(4, 9).list(12, 1);
+        };
+        let mut t = Thrift::default();
+        group(&mut t);
+        limit(&t.field(1, 9).list(12, HUGE).done(), "columns");
+        let mut t = Thrift::default();
+        group(&mut t);
+        limit(&t.field(1, 9).list(12, 10).done(), "columns+1");
+        let chunk = |t: &mut Thrift| {
+            group(t);
+            t.field(1, 9).list(12, 9).field(3, 12);
+        };
+        let mut t = Thrift::default();
+        chunk(&mut t);
+        limit(&t.field(2, 9).list(5, HUGE).done(), "encodings");
+        let mut t = Thrift::default();
+        chunk(&mut t);
+        limit(&t.field(3, 9).list(8, HUGE).done(), "path_in_schema");
+        let mut t = Thrift::default();
+        chunk(&mut t);
+        invalid(&t.field(3, 9).list(8, 0).done(), "empty path_in_schema");
+        let mut t = Thrift::default();
+        chunk(&mut t);
+        limit(&t.field(13, 9).list(12, HUGE).done(), "encoding_stats");
+        // Fields upstream decodes by id but the profile never writes:
+        // sorting_columns, statistics, size statistics, file_path, crc.
+        let mut t = Thrift::default();
+        group(&mut t);
+        invalid(&t.field(4, 9).list(12, 0).done(), "sorting_columns");
+        let mut t = Thrift::default();
+        chunk(&mut t);
+        invalid(&t.field(12, 12).stop().done(), "statistics");
+        let mut t = Thrift::default();
+        chunk(&mut t);
+        invalid(&t.field(15, 12).stop().done(), "size_statistics");
+        let mut t = Thrift::default();
+        group(&mut t);
+        invalid(
+            &t.field(1, 9).list(12, 9).field(1, 8).bin(b"x").done(),
+            "file_path",
+        );
+        assert_eq!(
+            Compact::new(&[0x45, 0, 0])
+                .structure(PAGE_HEADER, 0)
+                .unwrap_err(),
+            Error::Invalid,
+            "crc"
+        );
+    }
+    #[test]
+    fn declared_wire_type_must_match_what_upstream_decodes() {
+        // Upstream reads field 4 as list<RowGroup> whatever its declared type.
+        // Declared binary, its bytes are a list header claiming i32::MAX
+        // groups: a skip-by-type preflight would pass it to upstream.
+        let mut inner = Thrift::default();
+        inner.list(12, 0x7fff_ffff);
+        let mut t = Thrift::default();
+        t.field(4, 8).bin(&inner.0).stop();
+        assert_eq!(footer(&t.0).unwrap_err(), Error::Invalid);
+        // A bool-typed field has no payload, so upstream would read the next
+        // bytes as num_children; an i64-typed one is truncated to i32.
+        for ty in [1, 2, 3, 6, 8, 9, 12] {
+            let mut t = Thrift::default();
+            t.field(2, 9).list(12, 1).field(5, ty).int(9).stop().stop();
+            assert_eq!(footer(&t.0).unwrap_err(), Error::Invalid, "type {ty}");
+        }
+        // List element type, set instead of list, and maps.
+        for bytes in [
+            Thrift::default().field(2, 9).list(5, 10).done(),
+            Thrift::default().field(2, 10).list(12, 10).done(),
+            Thrift::default().field(5, 11).uvar(0).done(),
+        ] {
+            assert_eq!(footer(&bytes).unwrap_err(), Error::Invalid);
+        }
+        // Unknown ids are rejected rather than skipped: upstream skips a
+        // list<bool> without consuming its element bytes.
+        let mut t = Thrift::default();
+        t.field(8, 9).list(1, 3).0.extend([1, 1, 1]);
+        assert_eq!(footer(&t.0).unwrap_err(), Error::Invalid);
     }
     #[test]
     fn compact_preflight_rejects_allocation_and_recursion_bombs() {
@@ -674,26 +1126,32 @@ mod tests {
         // field 2 list<struct> claiming u32::MAX schema entries.
         let huge_schema = [0x29, 0xfc, 0xff, 0xff, 0xff, 0xff, 0x0f];
         let huge_groups = [0x49, 0xfc, 0x80, 0x80, 0x80, 0x01];
-        let mut deep = vec![0x1c; 15];
-        deep.extend([0; 16]);
-        let long_binary = [0x18, 0xff, 0xff, 0xff, 0xff, 0x0f];
-        let huge_map = [0x1b, 0x81, 0x01, 0x55];
+        let long_binary = [0x68, 0xff, 0xff, 0xff, 0xff, 0x0f];
         for (name, bytes) in [
             ("schema", &huge_schema[..]),
             ("groups", &huge_groups[..]),
-            ("deep", &deep),
             ("binary", &long_binary[..]),
-            ("map", &huge_map[..]),
         ] {
-            assert_eq!(compact(bytes, true).unwrap_err(), Error::Limit, "{name}");
+            assert_eq!(footer(bytes).unwrap_err(), Error::Limit, "{name}");
         }
         for n in 0..huge_schema.len() {
             assert_eq!(
-                compact(&huge_schema[..n], true).unwrap_err(),
+                footer(&huge_schema[..n]).unwrap_err(),
                 Error::Invalid,
                 "{n}"
             );
         }
+        // The typed shapes are at most seven deep; the depth ceiling is an
+        // independent bound checked on entry.
+        assert_eq!(
+            Compact::new(&[0])
+                .structure(EMPTY, COMPACT_MAX_DEPTH + 1)
+                .unwrap_err(),
+            Error::Limit
+        );
+        Compact::new(&[0])
+            .structure(EMPTY, COMPACT_MAX_DEPTH)
+            .unwrap();
         // A repeated field id, id zero and an id above the ceiling are each
         // framing errors: preflight and upstream could disagree on them.
         for bytes in [
@@ -701,17 +1159,35 @@ mod tests {
             &[0x05, 0x00, 0, 0][..],
             &[0x05, 0x80, 0x01, 0, 0][..],
         ] {
-            assert_eq!(compact(bytes, false).unwrap_err(), Error::Invalid);
+            assert_eq!(
+                Compact::new(bytes).structure(PAGE_HEADER, 0).unwrap_err(),
+                Error::Invalid
+            );
         }
-        // Node ceiling: a flat struct cannot carry more than the node budget.
-        let mut wide = vec![0x19, 0xfc];
-        let mut n = COMPACT_MAX_LIST as usize;
-        while n > 0 {
-            wide.push(0x80 | (n & 0x7f) as u8);
-            n >>= 7;
-        }
-        *wide.last_mut().unwrap() &= 0x7f;
-        assert_eq!(compact(&wide, false).unwrap_err(), Error::Invalid);
+    }
+    #[test]
+    fn node_ceiling_bounds_a_well_formed_message() {
+        // A test-only shape whose list admits any count, so only the node
+        // ceiling can stop it. Every element is present and well formed: the
+        // over-budget message fails on the ceiling, not on end of input.
+        const WIDE: Shape = &[(1, Wire::List(&Wire::I32, 0, u64::MAX))];
+        let message = |elements: usize| {
+            let mut t = Thrift::default();
+            t.field(1, 9).list(5, elements as u64);
+            t.0.extend(std::iter::repeat_n(0, elements));
+            t.stop();
+            t.0
+        };
+        // One node for the field plus one per element.
+        let fits = message(COMPACT_MAX_NODES - 1);
+        let mut parser = Compact::new(&fits);
+        parser.structure(WIDE, 0).unwrap();
+        assert_eq!(parser.pos, fits.len());
+        let over = message(COMPACT_MAX_NODES);
+        assert_eq!(
+            Compact::new(&over).structure(WIDE, 0).unwrap_err(),
+            Error::Limit
+        );
     }
     /// DATA_PAGE header: PLAIN values, RLE/RLE levels, `raw` payload bytes,
     /// `count` values, followed by `body`.
@@ -770,9 +1246,9 @@ mod tests {
         // A page claiming more than the encoded ceiling is a limit, checked
         // before its body is examined.
         let mut huge = vec![
-            0x15, 0, 0x16, 0xfe, 0xff, 0xff, 0x7f, 0x16, 0xfe, 0xff, 0xff, 0x7f,
+            0x15, 0, 0x15, 0xfe, 0xff, 0xff, 0xff, 0x0f, 0x15, 0xfe, 0xff, 0xff, 0xff, 0x0f,
         ];
-        huge.extend([0x1c, 0x15, 2, 0x15, 0, 0x15, 6, 0x15, 6, 0, 0]);
+        huge.extend([0x2c, 0x15, 2, 0x15, 0, 0x15, 6, 0x15, 6, 0, 0]);
         assert_eq!(
             page_guard(&huge, 1, INT32, &limits).unwrap_err(),
             Error::Limit
@@ -842,6 +1318,33 @@ mod tests {
                 page_body(body, count, column).unwrap_err(),
                 Error::Invalid,
                 "{name}"
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_symlinks_and_fifos_swapped_in_after_lstat() {
+        // `open_regular` is the step after the `lstat`; calling it directly
+        // stands in for a path swapped between the two.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let fifo = dir.path().join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        open_regular(&file).unwrap();
+        // A blocking open of a FIFO with no writer would hang here.
+        for path in [&link, &fifo] {
+            assert_eq!(open_regular(path).unwrap_err(), Error::Invalid, "{path:?}");
+            assert_eq!(
+                read_regular(path, 16, false).unwrap_err(),
+                Error::Invalid,
+                "{path:?}"
             );
         }
     }

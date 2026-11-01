@@ -31,6 +31,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macr
 tokio-util.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` / `O_NONBLOCK` for `OpenOptionsExt::custom_flags`; no unsafe.
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "test-util"] }

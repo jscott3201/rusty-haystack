@@ -18,11 +18,50 @@ pub(crate) const MAX_GROUPS_PER_PART: usize = 16;
 /// Smallest `batch_bytes`: one sample's fixed conservative charge in
 /// `HistoryReadValidator::sample_bytes`, so every batch admits one sample.
 pub(crate) const MIN_BATCH_BYTES: usize = 512;
-/// Smallest `manifest_bytes`; an empty manifest with a header fits easily.
-pub(crate) const MIN_MANIFEST_BYTES: usize = 1024;
-/// Smallest `footer_bytes`. Real footers are larger; this only rejects zero.
-pub(crate) const MIN_FOOTER_BYTES: usize = 128;
-/// Smallest `part_bytes` before the writer-reserve check below applies.
+/// Arrow memory of a one-row batch besides its value bytes: nine columns of
+/// 64-byte-aligned buffers. Measured 3,393. The part floor reserves it on top
+/// of `batch_bytes`, which already charges a row's value bytes, so a part can
+/// always hold a one-row batch.
+pub(crate) const ARROW_BATCH_BYTES: usize = 4096;
+/// Smallest `part_bytes` for `batch_bytes` and `footer_bytes`: the writer
+/// reserve of a one-row batch charged up to `batch_bytes`.
+pub(crate) fn min_part_bytes(batch_bytes: usize, footer_bytes: usize) -> u64 {
+    MIN_PART_BYTES.max(writer_reserve(
+        batch_bytes.saturating_add(ARROW_BATCH_BYTES) as u64,
+        footer_bytes,
+    ))
+}
+/// Footer bytes besides the row groups: schema, column orders, `created_by`
+/// and the Arrow schema key-value, whose base64 carries the timezone and
+/// point unit. Measured 1,372 (a 1-group footer of 1,790 less one group) with
+/// timezone `UTC` and no unit; the codec caps the unit at 128 bytes and zone
+/// names are short, so the margin covers both.
+pub(crate) const FOOTER_BASE_BYTES: usize = 2048;
+/// Footer bytes per row group (nine column chunks). Measured 418 for small
+/// parts and 434 at 400 rows; offsets and sizes are varints that widen as a
+/// part grows, and the margin covers every integer at its 8 MiB width.
+pub(crate) const FOOTER_GROUP_BYTES: usize = 768;
+/// Manifest bytes besides the header and part entries: the JSON envelope and
+/// `limits` at full-width values. Measured 374.
+pub(crate) const MANIFEST_BASE_BYTES: usize = 512;
+/// JSON-escaped `source_header` the manifest floor admits. Measured 2,956 for
+/// the reference header (`tests/support`) and 3,332 for the largest one the
+/// bounded-history codec admits (256-byte id, longest unit and zone name);
+/// see `floors_hold_the_largest_header_and_a_full_part`.
+pub(crate) const MANIFEST_HEADER_BYTES: usize = 4096;
+/// Manifest bytes per part entry at full-width values. Measured 149 to 153.
+pub(crate) const MANIFEST_PART_BYTES: usize = 256;
+/// Smallest `footer_bytes` for `groups_per_part`: a full part's footer fits.
+pub(crate) fn min_footer_bytes(groups_per_part: usize) -> usize {
+    FOOTER_BASE_BYTES.saturating_add(FOOTER_GROUP_BYTES.saturating_mul(groups_per_part))
+}
+/// Smallest `manifest_bytes` for `parts`: the manifest of `parts` part
+/// entries and a header within [`MANIFEST_HEADER_BYTES`] fits.
+pub(crate) fn min_manifest_bytes(parts: usize) -> usize {
+    (MANIFEST_BASE_BYTES + MANIFEST_HEADER_BYTES)
+        .saturating_add(MANIFEST_PART_BYTES.saturating_mul(parts))
+}
+/// Absolute `part_bytes` floor; [`min_part_bytes`] exceeds it for any batch.
 pub(crate) const MIN_PART_BYTES: u64 = 1024;
 /// Encoded size of a column chunk, page or batch may reach this multiple of its
 /// conservative source charge (PLAIN length prefixes, levels, alignment).
@@ -85,9 +124,14 @@ impl Default for Limits {
 }
 impl Limits {
     /// Every option within the defaults and above its minimum, and a part
-    /// large enough for the writer reserve of one full `batch_bytes` batch.
-    /// The reserve check is necessary, not sufficient: Arrow memory is only
+    /// large enough for the writer reserve of a `batch_bytes` batch plus the
+    /// fixed Arrow overhead of [`ARROW_BATCH_BYTES`]. The reserve check is
+    /// necessary, not sufficient for multi-row batches: Arrow memory is only
     /// known per batch, and `Writer::write` still enforces it then.
+    ///
+    /// The footer and manifest floors are derived from `groups_per_part` and
+    /// `parts`, so any validating `Limits` can publish at least an empty and a
+    /// one-row capture whose header is within [`MANIFEST_HEADER_BYTES`].
     pub(crate) fn validate(&self) -> Result<()> {
         let max = Self::default();
         if self.batch_rows == 0
@@ -98,16 +142,15 @@ impl Limits {
             || self.field_bytes > max.field_bytes
             || self.groups_per_part == 0
             || self.groups_per_part > max.groups_per_part
-            || self.part_bytes < MIN_PART_BYTES
             || self.part_bytes > max.part_bytes
-            || self.part_bytes < writer_reserve(self.batch_bytes as u64, self.footer_bytes)
+            || self.part_bytes < min_part_bytes(self.batch_bytes, self.footer_bytes)
             || self.total_bytes < self.part_bytes
             || self.total_bytes > max.total_bytes
             || self.parts == 0
             || self.parts > max.parts
-            || self.manifest_bytes < MIN_MANIFEST_BYTES
+            || self.manifest_bytes < min_manifest_bytes(self.parts)
             || self.manifest_bytes > max.manifest_bytes
-            || self.footer_bytes < MIN_FOOTER_BYTES
+            || self.footer_bytes < min_footer_bytes(self.groups_per_part)
             || self.footer_bytes > max.footer_bytes
         {
             return Err(Error::Options);
@@ -165,6 +208,12 @@ pub(crate) fn decode_header(text: &str) -> Result<HistoryReadHeader> {
         })
         .map_err(|_| Error::Invalid)?;
     if header.terminal != HistoryTerminal::Complete {
+        return Err(Error::Invalid);
+    }
+    // Canonical form: the recorded text must be exactly what the writer
+    // encodes for this header, so spellings the decoder normalizes (another
+    // `ver`, duplicate tags, extra control-JSON keys, spacing) are rejected.
+    if encode_header(&header)? != text {
         return Err(Error::Invalid);
     }
     Ok(header)

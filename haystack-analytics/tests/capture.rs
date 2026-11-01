@@ -366,17 +366,17 @@ async fn try_capture(
         )
         .await
         .unwrap();
-    let outcome = Export::start(
+    let outcome = match Export::start(
         session,
         dir,
         ExportOptions {
             limits,
             ..Default::default()
         },
-    )
-    .unwrap()
-    .wait()
-    .await;
+    ) {
+        Ok(mut export) => export.wait().await,
+        Err(error) => Err(error),
+    };
     server.finish().await;
     outcome
 }
@@ -440,6 +440,14 @@ async fn write_side_limits_fail_closed_without_publishing() {
                 ..base.clone()
             },
         ),
+    ];
+    // `Limits::validate` derives the manifest and footer floors from `parts`
+    // and `groups_per_part`, and the bounded-history codec caps every header
+    // field that grows them, so no validating `Limits` can overrun either
+    // after pulling the source. The values that used to overrun here are
+    // refused up front instead; the writer-side backstops are unit-tested
+    // with unvalidated limits in `src/tests.rs`.
+    for (name, limits) in [
         (
             "manifest_bytes",
             Limits {
@@ -454,7 +462,16 @@ async fn write_side_limits_fail_closed_without_publishing() {
                 ..Default::default()
             },
         ),
-    ];
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture");
+        assert_eq!(
+            try_capture(&value, &path, limits).await.unwrap_err(),
+            haystack_analytics::Error::Options,
+            "{name}"
+        );
+        assert!(!path.exists(), "{name}");
+    }
     for (name, limits) in cases {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("capture");

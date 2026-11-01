@@ -159,8 +159,8 @@ are deliberately not restated here.
 
 | Bound | Where |
 |---|---|
-| Per-export `Limits` (rows and conservative bytes per Arrow batch, decoded field bytes, row groups per part, bytes per part and in total, part count, manifest and footer bytes) | `Limits::default()` and `MAX_GROUPS_PER_PART` in `haystack-analytics/src/format.rs`; `Limits::validate` rejects any option above those defaults or below `MIN_BATCH_BYTES`, `MIN_PART_BYTES`, `MIN_MANIFEST_BYTES`, `MIN_FOOTER_BYTES` |
-| A part must fit the writer reserve of one full `batch_bytes` batch (checked by `validate` before any network read; necessary, not sufficient) | `writer_reserve` in `format.rs` |
+| Per-export `Limits` (rows and conservative bytes per Arrow batch, decoded field bytes, row groups per part, bytes per part and in total, part count, manifest and footer bytes) | `Limits::default()` and `MAX_GROUPS_PER_PART` in `haystack-analytics/src/format.rs`; `Limits::validate` rejects any option above those defaults or below `MIN_BATCH_BYTES`, `min_part_bytes`, `min_manifest_bytes(parts)` and `min_footer_bytes(groups_per_part)` |
+| Derived floors, so any validating `Limits` publishes at least an empty and a one-row capture: a part holds the writer reserve of a `batch_bytes` batch plus fixed Arrow overhead, a footer holds a full part's row groups, a manifest holds `parts` entries and the largest header the bounded-history codec admits (checked by `validate` before any network read; for multi-row batches necessary, not sufficient) | `ARROW_BATCH_BYTES`, `FOOTER_BASE_BYTES`, `FOOTER_GROUP_BYTES`, `MANIFEST_BASE_BYTES`, `MANIFEST_HEADER_BYTES`, `MANIFEST_PART_BYTES` and `writer_reserve` in `format.rs` |
 | Concurrent exports per process, with no wait queue | `MAX_CONCURRENT_EXPORTS` in `haystack-analytics/src/export.rs` |
 | Default absolute export timeout | `DEFAULT_EXPORT_TIMEOUT` in `export.rs` |
 | Largest admitted source batch (an overlap check on top of the client's own limits) | the shared `bounded-history-v1` ceilings `MAX_GRID_BYTES` and `MAX_ROWS` in `haystack-core/src/codecs/history.rs`, applied in `run` in `export.rs` |
@@ -170,7 +170,7 @@ are deliberately not restated here.
 | Manifest read size | `Limits::default().manifest_bytes`, read by `Dataset::open` in `haystack-analytics/src/reader.rs` |
 | Total rows on reopen | `MAX_ROWS` in `haystack-core/src/codecs/history.rs` |
 | Recorded header size and shape | `MAX_HEADER_BYTES`, `HEADER_LINES` and `header_preflight` in `format.rs` |
-| Footer and page-header Compact Thrift preflight (depth, node count, field ids, list/map sizes, schema width, row groups) | `COMPACT_MAX_DEPTH`, `COMPACT_MAX_NODES`, `COMPACT_MAX_FIELD_ID`, `COMPACT_MAX_LIST`, `COMPACT_MAX_MAP`, `FOOTER_MAX_SCHEMA_ELEMENTS`, `MAX_PAGE_HEADER_BYTES` in `reader.rs` |
+| Footer and page-header typed Compact Thrift preflight (exact field ids and wire types per struct, every list count, binary lengths, depth, node count, schema `num_children`, encodings) | the `Wire` shapes (`FILE_META_DATA`, `PAGE_HEADER`, …), `footer_profile`, `COMPACT_MAX_DEPTH`, `COMPACT_MAX_NODES`, `COMPACT_MAX_FIELD_ID`, `MAX_ENCODINGS`, `MAX_KEY_VALUES`, `MAX_PAGE_HEADER_BYTES` in `reader.rs` |
 | Column-chunk and page sizes, pages per chunk, level and payload framing | `checked_metadata`, `page_guard`, `definition_levels` in `reader.rs` |
 
 `ExportOptions::limits` can only tighten the defaults. Source batches are split
@@ -232,16 +232,28 @@ manifest pins every part hash. `open` verifies before returning:
   `Complete`, and its returned count equals the manifest's row total;
 - each part's ordinal and exact generated name (no path from the manifest is
   trusted), regular-file length, SHA-256, row and group counts;
-- each footer through a bounded Compact Thrift preflight before the upstream
-  parser allocates (a repeated or out-of-range field id is rejected, since a
-  preflight and the upstream decoder could resolve it differently), then the
-  physical schema, row-group count and row counts;
+- each footer through a typed Compact Thrift preflight before the upstream
+  parser sees it. Upstream picks a decoder by field id and ignores the declared
+  wire type, so the preflight walks this profile's exact struct shapes: every
+  field id must belong to its struct (unknown ids are rejected, not skipped),
+  every declared wire type must match what upstream will decode, narrow
+  integers must fit their width, and every list count and binary length is
+  bounded. The integers upstream turns into allocations or structure are
+  pinned: the schema is exactly the root plus nine leaves, the root's
+  `num_children` equals the column count and no leaf has children (upstream
+  reserves `num_children` entries before reading them), each row group has
+  exactly nine chunks, and each chunk's encodings are PLAIN or RLE. A repeated
+  or out-of-range field id is rejected, since a preflight and the upstream
+  decoder could resolve it differently. Then the physical schema, row-group
+  count and row counts;
 - every column chunk is contiguous, inside the file, ends exactly at the
   footer, uncompressed, PLAIN/RLE only, of the expected physical type and
   level structure, without dictionary, statistics, bloom filter, page index or
   external file path. Offsets and sizes are checked as signed values first, so
   upstream helpers that assert on them never see a negative one;
-- every page header is bounded and accounts for exactly the group's rows, and
+- every page header passes the same typed preflight (a v1 data page header
+  only, no CRC or statistics), is bounded and accounts for exactly the group's
+  rows, and
   every page body is framed before decode: an optional column's 4-byte level
   length must stay inside the page and its bit-width-one RLE/bit-packed runs
   must parse, consume exactly that length and cover exactly the page's value
@@ -250,13 +262,25 @@ manifest pins every part hash. `open` verifies before returning:
 
 The recorded header passes a lexical preflight before the general Zinc
 parser: outside its quoted string only printable ASCII and the line separator,
-no containers; inside it, no raw control characters.
+no containers; inside it, no raw control characters. After decoding it must be
+canonical: re-encoding the decoded header must reproduce the recorded text
+byte for byte, so spellings the decoder normalizes (another `ver`, duplicate
+tags, extra control-JSON keys, different spacing) are rejected.
+
+Manifest and part files are opened once. On Unix the open uses `O_NOFOLLOW`
+and `O_NONBLOCK`, so a symlink or FIFO swapped in after the `lstat` is refused
+without blocking, and the opened handle must be a regular file (the same
+file the `lstat` saw). Elsewhere the `lstat` and handle checks remain, with a
+swap window between them.
 
 These guards are the contract. As a backstop, upstream decoder calls also run
 inside `catch_unwind`, so a panic the guards did not anticipate becomes
 `Error::Invalid` (and poisons the reader) rather than unwinding into the
 caller. The process panic hook still runs. The backstop is not relied on: the
-mutation test below disables it.
+mutation test below disables it. It is also ineffective in a binary built with
+`panic = "abort"`, where any such panic ends the process; and no build can
+catch an allocation failure, which aborts. Bounding every count before
+upstream allocates from it is therefore the only defence against those.
 
 Opening verifies integrity and layout, not semantics. `next_batch` decodes one
 row group at a time and checks every row: point id, non-null required columns,
@@ -311,8 +335,12 @@ deadline expiry during a held write, fresh-destination and no-clobber
 publication, admission without queueing, drop while a write is held, manifest
 and part corruption, hash-valid semantic corruption, Compact Thrift allocation
 and recursion bombs, page level and PLAIN payload framing, byte-driven batch
-and part splitting that round-trips, `total_bytes`/`parts`/`manifest_bytes`/
-`footer_bytes` overruns that publish nothing, oversize manifests and row
+and part splitting that round-trips, `total_bytes`/`parts` overruns that
+publish nothing, `manifest_bytes`/`footer_bytes` below their derived floors
+refused before any read (with the writer's publish-time backstops
+unit-tested under unvalidated limits), minimum-valid limits that publish
+empty and one-row captures, the largest admitted header within the floors,
+non-canonical headers, symlink and FIFO opens, oversize manifests and row
 totals, a part swapped for a hash-different, same-length, structurally valid
 one after `open` (rejected at read), owner-only modes on Unix, and — on Unix
 only — a child process killed with SIGKILL just before and just after the
@@ -321,11 +349,30 @@ commit link (before: no dataset; after: reopens with every sample).
 `hostile_byte_mutations_are_rejected_by_guards_without_panicking` disables
 the `catch_unwind` backstop on its thread and asserts that no panic escapes:
 every byte of a mixed-level part set to `0xff` plus one seeded classic
-mutation per byte (hash recomputed, read through `Dataset`), every header
-character replaced by non-ASCII and control characters, a seeded sample of
-grammar substitutions, and the original non-ASCII header repro through
-`Dataset::open`. With any one of the negative-offset, level or header guards
-reverted, it fails.
+mutation per byte; every footer and page-header integer replaced by 0, ±1,
+the i32/u32/i64 extremes and its own value ±1, every binary length and list
+count by 0, 1, its value ±1 and the i32/u32/u64 extremes, and every field's
+wire type by each other type (each mutant is run through the reader's guards
+with its hash recomputed, and consumed through `Dataset` when they admit it);
+every header character replaced by non-ASCII and control characters, a
+seeded sample of grammar substitutions, and the original non-ASCII header
+repro through `Dataset::open`. It detects panics only. Reverting the
+negative-offset check, the level-prefix bound or the header preflight (each a
+reviewer repro) makes it fail; other checks, such as the run sub-checks in
+`definition_levels` and the PLAIN fixed-width size check, are defence in depth
+that upstream also enforces, and the test does not isolate them.
+
+Allocation size is checked separately, because a granted reservation neither
+panics nor touches memory (macOS grants a 16 GiB `Vec::with_capacity`
+lazily), and the workspace forbids the `unsafe` a counting allocator needs.
+On Linux, `hostile_thrift_sites_never_reserve_large_allocations` reruns the
+Thrift-site sweep alone in a child process and requires the child's `VmPeak`
+(the address-space high-water mark, which records even a reservation freed at
+once) to grow by at most 64 MiB; an allocation the system refuses aborts the
+child and fails the test. It does not run on other platforms. The typed
+preflight's own unit tests feed independently built bytes with
+`num_children = 0x7fffffff`, `i32::MAX` list counts and wire-type confusions
+and assert rejection before upstream parsing.
 
 Retained memory was observed once on a local macOS release build, with the
 export held just before publication and process RSS sampled from a separate
