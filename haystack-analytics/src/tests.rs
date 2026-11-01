@@ -183,15 +183,6 @@ fn forged_dataset(
     writer.prepare().unwrap();
     writer.publish(|| Ok(())).unwrap();
 }
-fn header(
-    value: &haystack_core::codecs::history::HistoryReadResult,
-) -> haystack_core::codecs::history::HistoryReadHeader {
-    haystack_core::codecs::history::HistoryReadHeader {
-        metadata: value.metadata.clone(),
-        terminal: value.terminal,
-        returned_count: value.samples.len() as u64,
-    }
-}
 #[test]
 fn hash_valid_semantic_corruption_is_rejected_and_never_complete() {
     use arrow_array::{
@@ -1155,7 +1146,11 @@ fn allocation_child() {
     let path = dir.path().join("capture");
     written_dataset(&path, &mixed_numbers(10), 4);
     let part = std::fs::read(path.join("part-0000.parquet")).unwrap();
+    // The corpus (10,215 mutants of this part) is allocated before the
+    // baseline below, so its own memory never counts as growth; the floor
+    // keeps a shrinking generator from passing vacuously.
     let mutants = thrift_site_mutants(&part);
+    assert!(mutants.len() > 5000, "{}", mutants.len());
     // Warm up allocator arenas and lazily initialized state first.
     drain(&path).unwrap();
     sweep_parts(&path, mutants[..32].to_vec());
@@ -1426,19 +1421,38 @@ fn minimum_limits_are_exactly_the_validation_floor() {
 }
 #[tokio::test]
 async fn minimum_valid_limits_publish_empty_and_one_row_captures() {
-    use haystack_core::{codecs::history::HistoryKind, kinds::Kind};
+    use haystack_core::{
+        codecs::history::HistoryKind,
+        kinds::{Kind, Number},
+    };
     let _permit = TEST_ADMISSION.acquire().await.unwrap();
     let mut one = result(1, 0);
     one.metadata.schema.kind = HistoryKind::Bool;
     one.samples[0].val = Kind::Bool(true);
-    for value in [result(0, 0), one] {
+    // Every worst-case header too, empty and with one sample charged exactly
+    // `MIN_BATCH_BYTES` (a unitless number).
+    let worst = worst_case_results(0)
+        .into_iter()
+        .chain(worst_case_results(1).into_iter().map(|mut value| {
+            value.samples[0].val = Kind::Number(Number::unitless(1.0));
+            value
+        }));
+    for value in [result(0, 0), one].into_iter().chain(worst) {
         let rows = value.samples.len();
         let server = Server::bytes(encoded(&value), vec![4096], "").await;
-        let source = client(&server.url)
+        let range = &value.metadata.requested_range;
+        let Ok(source) = client(&server.url)
             .await
-            .his_read_stream(&request(), Default::default())
+            .his_read_stream(&request_for(&value), Default::default())
             .await
-            .unwrap();
+        else {
+            // The client refuses non-ASCII and raw CR/LF ranges before dispatch.
+            assert!(
+                !range.is_ascii() || range.contains(['\r', '\n']),
+                "{range:?}"
+            );
+            continue;
+        };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("capture");
         let options = ExportOptions {
@@ -1484,54 +1498,8 @@ fn write_rows(
 }
 #[test]
 fn floors_hold_the_largest_header_and_a_full_part() {
-    use crate::format::MAX_GROUPS_PER_PART;
-    use haystack_core::{
-        codecs::history::HistoryKind,
-        kinds::{HDateTime, Kind, Number},
-    };
-    // The bounded-history codec caps the id at 256 and the unit at 128
-    // bytes; the timezone is the longest known name. Every timestamp in the
-    // header carries the timezone name.
-    let unit = haystack_core::kinds::units_by_name()
-        .keys()
-        .filter(|u| u.len() <= 128)
-        .max_by_key(|u| u.len())
-        .unwrap()
-        .clone();
-    let mut value = result(MAX_GROUPS_PER_PART, 0);
-    // Longest zone name at UTC+0 on the sample dates, so offsets stay valid.
-    let zone = haystack_core::kinds::tz_map()
-        .keys()
-        .filter(|z| {
-            haystack_core::kinds::offset_at(z, value.metadata.start.dt)
-                .is_some_and(|o| o.local_minus_utc() == 0)
-        })
-        .max_by_key(|z| z.len())
-        .unwrap()
-        .clone();
-    let m = &mut value.metadata;
-    m.id = "p".repeat(256);
-    m.schema.kind = HistoryKind::Number;
-    m.schema.unit = Some(unit.clone());
-    m.schema.timezone = zone.clone();
-    let rename = |t: &mut HDateTime| *t = HDateTime::new(t.dt, &zone);
-    for t in [&mut m.evaluated_at, &mut m.start, &mut m.end] {
-        rename(t);
-    }
-    for t in [
-        &mut m.coverage.retained_start,
-        &mut m.coverage.retained_end,
-        &mut m.coverage.evicted_through,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        rename(t);
-    }
-    for sample in &mut value.samples {
-        rename(&mut sample.ts);
-        sample.val = Kind::Number(Number::new(f64::MAX, Some(unit.clone())));
-    }
+    use crate::format::{MANIFEST_HEADER_BYTES, MAX_GROUPS_PER_PART, recordable_header};
+    use haystack_core::codecs::history::{HistoryReadHeader, MAX_ROWS};
     let limits = Limits {
         groups_per_part: MAX_GROUPS_PER_PART,
         parts: 1,
@@ -1540,13 +1508,38 @@ fn floors_hold_the_largest_header_and_a_full_part() {
         ..Limits::default()
     };
     limits.validate().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("capture");
-    let writer = write_rows(&path, &value, limits).unwrap();
-    assert_eq!(writer.manifest.parts.len(), 1);
-    assert_eq!(writer.manifest.parts[0].groups, MAX_GROUPS_PER_PART);
-    let header_json = serde_json::to_vec(&writer.manifest.source_header).unwrap();
-    assert!(header_json.len() <= crate::format::MANIFEST_HEADER_BYTES);
+    let cases = worst_case_results(MAX_GROUPS_PER_PART);
+    assert_eq!(cases.len(), trim_whitespace().len());
+    let (mut largest, mut refused) = (0, vec![]);
+    for value in cases {
+        let pad = value.metadata.requested_range.chars().next().unwrap();
+        let bytes = header_json_bytes(&header(&value));
+        // The same header at the widest `returnedCount` the codec admits.
+        let widest = header_json_bytes(&HistoryReadHeader {
+            returned_count: MAX_ROWS as u64,
+            ..header(&value)
+        });
+        largest = largest.max(widest);
+        assert!(widest <= MANIFEST_HEADER_BYTES, "{pad:?}: {widest}");
+        if recordable_header(&header(&value)).is_err() {
+            refused.push(pad);
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture");
+        let writer = write_rows(&path, &value, limits.clone()).unwrap();
+        assert_eq!(writer.manifest.parts.len(), 1, "{pad:?}");
+        assert_eq!(writer.manifest.parts[0].groups, MAX_GROUPS_PER_PART);
+        let recorded = serde_json::to_vec(&writer.manifest.source_header).unwrap();
+        assert_eq!(recorded.len(), bytes, "{pad:?}");
+        assert_same_samples(&drain(&path).unwrap(), &value.samples);
+    }
+    // Only NEL, a C1 control the Zinc encoder writes raw and the preflight
+    // refuses, cannot be recorded. The client never sends it (it refuses
+    // non-ASCII ranges), and `recordable_header` would refuse it before export.
+    assert_eq!(refused, ['\u{85}']);
+    // The VT-padded header: the measurement `MANIFEST_HEADER_BYTES` documents.
+    assert_eq!(largest, 12_626);
 }
 #[test]
 fn writer_backstops_refuse_manifest_and_footer_overruns() {

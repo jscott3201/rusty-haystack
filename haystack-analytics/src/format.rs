@@ -45,10 +45,19 @@ pub(crate) const FOOTER_GROUP_BYTES: usize = 768;
 /// `limits` at full-width values. Measured 374.
 pub(crate) const MANIFEST_BASE_BYTES: usize = 512;
 /// JSON-escaped `source_header` the manifest floor admits. Measured 2,956 for
-/// the reference header (`tests/support`) and 3,332 for the largest one the
-/// bounded-history codec admits (256-byte id, longest unit and zone name);
-/// see `floors_hold_the_largest_header_and_a_full_part`.
-pub(crate) const MANIFEST_HEADER_BYTES: usize = 4096;
+/// the reference header (`tests/support`) and 12,626 for the largest one the
+/// bounded-history codec admits, built by construction in
+/// `tests/support::worst_case_results`: the 1,024-byte range padded with VT
+/// (which `validate_range` trims and which escapes to eight bytes through the
+/// control JSON, the Zinc string and the manifest JSON), the 256-byte id, the
+/// longest-recording unit and zone, `u64::MAX` counters, every bound and
+/// `returnedCount` at its cap, and year-9999 timestamps with full
+/// nanoseconds. The margin over that (3,758 bytes) covers spellings the
+/// construction does not pick, such as leap-second nanoseconds.
+/// `floors_hold_the_largest_header_and_a_full_part` checks the header for
+/// every padding character `str::trim` accepts against this value and pins
+/// the measurement.
+pub(crate) const MANIFEST_HEADER_BYTES: usize = 16 * 1024;
 /// Manifest bytes per part entry at full-width values. Measured 149 to 153.
 pub(crate) const MANIFEST_PART_BYTES: usize = 256;
 /// Smallest `footer_bytes` for `groups_per_part`: a full part's footer fits.
@@ -131,7 +140,9 @@ impl Limits {
     ///
     /// The footer and manifest floors are derived from `groups_per_part` and
     /// `parts`, so any validating `Limits` can publish at least an empty and a
-    /// one-row capture whose header is within [`MANIFEST_HEADER_BYTES`].
+    /// one-row capture of any header the bounded-history codec admits and
+    /// [`recordable_header`] accepts: [`MANIFEST_HEADER_BYTES`] is above the
+    /// largest such header, measured by construction.
     pub(crate) fn validate(&self) -> Result<()> {
         let max = Self::default();
         if self.batch_rows == 0
@@ -187,6 +198,28 @@ pub(crate) fn encode_header(header: &HistoryReadHeader) -> Result<String> {
     ZincCodec
         .encode_grid(&result_header_grid(header).map_err(|_| Error::Invalid)?)
         .map_err(|_| Error::Invalid)
+}
+/// The `source_header` an export records for `header`, refused with
+/// `Error::Invalid` unless the reader would reopen it as exactly this header
+/// (struct equality and, inside [`decode_header`], canonical text equality).
+/// The client admits headers the recorded profile does not, such as a
+/// non-ASCII point id: [`header_preflight`] allows only ASCII outside quoted
+/// strings, and Haystack Ref ids are ASCII by specification. (A range padded
+/// with a C1 control such as NEL is another, which the Zinc encoder writes
+/// raw; the client already refuses non-ASCII ranges.) Checking up front fails
+/// such an export before any directory is created or any row is pulled,
+/// instead of publishing a dataset `Dataset::open` refuses. The check assumes
+/// the remote read will end `Complete`, the only outcome that publishes.
+pub(crate) fn recordable_header(header: &HistoryReadHeader) -> Result<String> {
+    let complete = HistoryReadHeader {
+        terminal: HistoryTerminal::Complete,
+        ..header.clone()
+    };
+    let text = encode_header(&complete)?;
+    if decode_header(&text)? != complete {
+        return Err(Error::Invalid);
+    }
+    encode_header(header)
 }
 pub(crate) fn decode_header(text: &str) -> Result<HistoryReadHeader> {
     if text.len() > MAX_HEADER_BYTES || text.lines().count() != HEADER_LINES {
