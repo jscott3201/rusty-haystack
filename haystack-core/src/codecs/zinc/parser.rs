@@ -49,10 +49,7 @@ impl<'a> ZincParser<'a> {
         let val = self.read_val()?;
         self.skip_spaces();
         if !self.at_end() {
-            return Err(self.err(format!(
-                "unexpected trailing input: {:?}",
-                &self.src[self.pos..]
-            )));
+            return Err(self.err(format!("unexpected trailing input: {:?}", self.remaining())));
         }
         Ok(val)
     }
@@ -63,12 +60,43 @@ impl<'a> ZincParser<'a> {
         self.pos >= self.src.len()
     }
 
+    // `pos` is a byte offset and every advance must leave it on a char
+    // boundary. Slicing `src[pos..]` directly panicked whenever a fixed-width
+    // advance (`pos += 5` for `HH:MM`, and the like) stepped into the middle of
+    // a multi-byte char, and the server decodes untrusted request bodies with
+    // this parser. The fixed-width sites now check their ASCII bytes before
+    // advancing; these accessors are the backstop. A misaligned position reads
+    // as "no char here" — never as end of input — so every caller fails closed
+    // with a parse error rather than panicking or accepting a truncated value.
     fn peek(&self) -> Option<char> {
-        self.src[self.pos..].chars().next()
+        self.remaining().chars().next()
     }
 
     fn peek_ahead(&self, n: usize) -> Option<char> {
-        self.src[self.pos..].chars().nth(n)
+        self.remaining().chars().nth(n)
+    }
+
+    /// The byte `offset` bytes past the current position, if any.
+    fn byte_at(&self, offset: usize) -> Option<u8> {
+        self.src
+            .as_bytes()
+            .get(self.pos.checked_add(offset)?)
+            .copied()
+    }
+
+    /// Do the bytes at the current position match `pattern`, where `d` stands
+    /// for an ASCII digit and any other byte must match exactly? Checking bytes
+    /// first is what makes the fixed-width advance that follows a success land
+    /// on a char boundary: every byte matched is ASCII.
+    fn at_ascii_pattern(&self, pattern: &[u8]) -> bool {
+        pattern
+            .iter()
+            .enumerate()
+            .all(|(i, &want)| match self.byte_at(i) {
+                Some(b) if want == b'd' => b.is_ascii_digit(),
+                Some(b) => b == want,
+                None => false,
+            })
     }
 
     fn consume(&mut self) -> Option<char> {
@@ -96,8 +124,10 @@ impl<'a> ZincParser<'a> {
         }
     }
 
+    /// The unread input; empty at the end and, defensively, if `pos` were ever
+    /// left off a char boundary (see `peek`).
     fn remaining(&self) -> &str {
-        &self.src[self.pos..]
+        self.src.get(self.pos..).unwrap_or("")
     }
 
     fn err(&self, msg: impl Into<String>) -> CodecError {
@@ -115,7 +145,9 @@ impl<'a> ZincParser<'a> {
             return Ok(Kind::Null);
         }
 
-        let ch = self.peek().unwrap();
+        let Some(ch) = self.peek() else {
+            return Err(self.err("expected a value"));
+        };
 
         // N → Null or NA
         if ch == 'N' {
@@ -216,10 +248,7 @@ impl<'a> ZincParser<'a> {
     }
 
     fn is_alpha_at(&self, offset: usize) -> bool {
-        self.src[self.pos..]
-            .chars()
-            .nth(offset)
-            .is_some_and(|c| c.is_alphanumeric())
+        self.peek_ahead(offset).is_some_and(|c| c.is_alphanumeric())
     }
 
     // ── Number / Date / Time / DateTime ──
@@ -357,7 +386,11 @@ impl<'a> ZincParser<'a> {
 
     fn read_date_or_datetime(&mut self) -> Result<Kind, CodecError> {
         // Read YYYY-MM-DD
-        let date_str = &self.src[self.pos..self.pos + 10];
+        // `looks_like_date` matched ten ASCII bytes, so this cannot miss.
+        let date_str = self
+            .src
+            .get(self.pos..self.pos + 10)
+            .ok_or_else(|| self.err("expected date YYYY-MM-DD"))?;
         let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
             .map_err(|e| self.err(format!("invalid date: {e}")))?;
         self.pos += 10;
@@ -409,14 +442,16 @@ impl<'a> ZincParser<'a> {
 
     fn read_time_str(&mut self) -> Result<String, CodecError> {
         let start = self.pos;
-        // HH:MM
-        if self.remaining().len() < 5 {
+        // HH:MM — checked byte by byte before the fixed-width advance; chrono
+        // would reject anything else anyway, but only after the advance had
+        // already sliced into whatever followed.
+        if !self.at_ascii_pattern(b"dd:dd") {
             return Err(self.err("expected time HH:MM"));
         }
         self.pos += 5;
         // Optional :SS
         if self.peek() == Some(':') {
-            if self.remaining().len() < 3 {
+            if !self.at_ascii_pattern(b":dd") {
                 return Err(self.err("incomplete seconds in time"));
             }
             self.pos += 3; // :SS
@@ -445,13 +480,15 @@ impl<'a> ZincParser<'a> {
         }
         if self.peek() == Some('+') || self.peek() == Some('-') {
             let start = self.pos;
-            if self.remaining().len() < 3 {
+            // The sign was matched by `peek`; HH and :MM are checked as ASCII
+            // digits before each fixed-width advance.
+            if !self.at_ascii_pattern(b"+dd") && !self.at_ascii_pattern(b"-dd") {
                 return Err(self.err("incomplete UTC offset"));
             }
             self.pos += 1; // sign
             self.pos += 2; // HH
             if self.peek() == Some(':') {
-                if self.remaining().len() < 3 {
+                if !self.at_ascii_pattern(b":dd") {
                     return Err(self.err("incomplete UTC offset minutes"));
                 }
                 self.pos += 3; // :MM
@@ -493,8 +530,7 @@ impl<'a> ZincParser<'a> {
     fn read_str(&mut self) -> Result<String, CodecError> {
         self.pos += 1; // skip opening "
         let mut result = String::new();
-        while !self.at_end() {
-            let ch = self.peek().unwrap();
+        while let Some(ch) = self.peek() {
             if ch == '"' {
                 self.pos += 1;
                 return Ok(result);
@@ -531,7 +567,12 @@ impl<'a> ZincParser<'a> {
                 if self.remaining().len() < 4 {
                     return Err(self.err("incomplete unicode escape"));
                 }
-                let hex = &self.src[self.pos..self.pos + 4];
+                // Four bytes, not four chars: `get` refuses a range that ends
+                // inside a multi-byte char instead of panicking on it.
+                let hex = self
+                    .src
+                    .get(self.pos..self.pos + 4)
+                    .ok_or_else(|| self.err("invalid unicode escape"))?;
                 self.pos += 4;
                 let code = u32::from_str_radix(hex, 16)
                     .map_err(|_| self.err(format!("invalid unicode escape: {hex}")))?;
@@ -572,8 +613,7 @@ impl<'a> ZincParser<'a> {
     fn read_uri(&mut self) -> Result<Kind, CodecError> {
         self.pos += 1; // skip `
         let mut result = String::new();
-        while !self.at_end() {
-            let ch = self.peek().unwrap();
+        while let Some(ch) = self.peek() {
             if ch == '`' {
                 self.pos += 1;
                 return Ok(Kind::Uri(Uri::new(result)));
@@ -614,10 +654,12 @@ impl<'a> ZincParser<'a> {
     fn read_coord(&mut self) -> Result<Kind, CodecError> {
         self.pos += 2; // skip C(
         let start = self.pos;
-        while self.peek() != Some(',') && !self.at_end() {
-            self.pos += 1;
+        // Advance a char at a time: a byte-at-a-time scan stepped into the
+        // middle of any non-ASCII char between the parentheses.
+        while let Some(ch) = self.peek().filter(|&c| c != ',') {
+            self.pos += ch.len_utf8();
         }
-        if self.at_end() {
+        if self.peek() != Some(',') {
             return Err(self.err("unterminated coord literal, expected ','"));
         }
         let lat: f64 = self.src[start..self.pos]
@@ -629,10 +671,10 @@ impl<'a> ZincParser<'a> {
         }
         self.pos += 1; // skip comma
         let start = self.pos;
-        while self.peek() != Some(')') && !self.at_end() {
-            self.pos += 1;
+        while let Some(ch) = self.peek().filter(|&c| c != ')') {
+            self.pos += ch.len_utf8();
         }
-        if self.at_end() {
+        if self.peek() != Some(')') {
             return Err(self.err("unterminated coord literal, expected ')'"));
         }
         let lng: f64 = self.src[start..self.pos]
@@ -774,6 +816,12 @@ impl<'a> ZincParser<'a> {
         if self.peek() == Some('(') {
             self.pos += 1; // skip (
             self.skip_spaces();
+            // `read_str` skips its opening quote unchecked; without this check
+            // it skipped whatever byte was here instead — half of a multi-byte
+            // char, or an ASCII byte, so `Foo(x")` decoded as `Foo("")`.
+            if self.peek() != Some('"') {
+                return Err(self.err("expected string literal in XStr"));
+            }
             let val = self.read_str()?;
             self.skip_spaces();
             if self.peek() != Some(')') {

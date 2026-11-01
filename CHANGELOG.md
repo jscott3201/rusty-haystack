@@ -20,6 +20,19 @@
   `hard-coded-cryptographic-value` alert on the salt in `hash_password`, which was a false
   positive — the buffer was overwritten on the next line. (#55)
 
+### Fixed
+
+- The Zinc parser panicked on input with a non-ASCII char where it expected a fixed-width
+  ASCII field — `2024-06-01T00:00:00+0é:00`, for example — because it advanced its byte
+  offset by a fixed count and then sliced the string inside a multi-byte char. The server
+  decodes untrusted request bodies with this parser and has no catch-panic layer, so the
+  panic was reachable from a single request; Trio values, filter literals and the client's
+  history decoder reach the same parser. The UTC offset, the time after `T`, time seconds,
+  `\uXXXX` escapes and `C(lat,lng)` now check their bytes before advancing, and the parser's
+  position accessors fail closed on a misaligned offset, so such input is a parse error.
+  An XStr whose `(` is not followed by a quote — `Foo(x")` — is now an error too; it used
+  to skip that byte unchecked and decode as `Foo("")`.
+
 ## 0.9.0
 
 Spec-match filters (`ph::Ahu`) did not work. `DefNamespace::fits` returned `true` for any
