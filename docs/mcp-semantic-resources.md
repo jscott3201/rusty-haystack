@@ -161,10 +161,10 @@ variants retain the same worker through trusted adapter serialization.
 ## Qualification
 
 ```sh
-cargo +1.99.0 nextest run --locked -p rusty-haystack-app --test semantic_resources
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features stdio
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features http
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features stdio,http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-app --test semantic_resources
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features stdio
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features stdio,http
 uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify.py
 uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py
 ```

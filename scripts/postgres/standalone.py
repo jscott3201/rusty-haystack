@@ -297,7 +297,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--docker", action="store_true", required=True,
                         help="create and remove a uniquely owned PostgreSQL 18.6 TLS fixture")
-    parser.add_argument("--toolchain", default="1.99.0")
+    parser.add_argument("--toolchain", default="1.99.1")
     args = parser.parse_args()
     fixtures = Fixtures()
     result = 1

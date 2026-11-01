@@ -39,7 +39,7 @@ def receipt(path, kind, details):
             "source": {"revision": SOURCE, "dirty": False, "lock_sha256": sha(LOCK)},
             "package": {"name": "rusty-haystack-cli" if kind == "cli" else "rusty-haystack", "version": VERSION},
             "artifact": {"filename": path.name, "size": path.stat().st_size, "sha256": sha(path.read_bytes())},
-            "build": {"target": "source" if kind == "sdist" else TARGET, "profile": "sdist" if kind == "sdist" else "release", "features": [] if kind == "cli" else ["pyo3/extension-module"], "tools": {"rustc": "rustc 1.99.0\nrelease: 1.99.0\nhost: " + TARGET, "cargo": "cargo 1.99.0", "target": "source" if kind == "sdist" else TARGET, "context": {"controlled_environment": {"CARGO_BUILD_JOBS": "2", "CARGO_INCREMENTAL": "0", "RUSTUP_TOOLCHAIN": "1.99.0"}}, "executables": {name: {"path": "/builder/"+name, "sha256": "e"*64} for name in ("cargo", "rustc", "rustdoc")}, "maturin": "maturin 1.15.0", "python": {"implementation": "CPython", "cache_tag": "cpython-312", "version": "3.12.13", "platform": "linux-x86_64"}}},
+            "build": {"target": "source" if kind == "sdist" else TARGET, "profile": "sdist" if kind == "sdist" else "release", "features": [] if kind == "cli" else ["pyo3/extension-module"], "tools": {"rustc": "rustc 1.99.1\nrelease: 1.99.1\nhost: " + TARGET, "cargo": "cargo 1.99.1", "target": "source" if kind == "sdist" else TARGET, "context": {"controlled_environment": {"CARGO_BUILD_JOBS": "2", "CARGO_INCREMENTAL": "0", "RUSTUP_TOOLCHAIN": "1.99.1"}}, "executables": {name: {"path": "/builder/"+name, "sha256": "e"*64} for name in ("cargo", "rustc", "rustdoc")}, "maturin": "maturin 1.16.0", "python": {"implementation": "CPython", "cache_tag": "cpython-312", "version": "3.12.13", "platform": "linux-x86_64"}}},
             "details": details, **({"removed_lock_packages": []} if kind == "sdist" else {})}
 
 
@@ -62,7 +62,7 @@ class ArtifactCLI(unittest.TestCase):
                 path = files / f"rusty_haystack-{VERSION}-cp312-cp312-manylinux_2_17_x86_64.whl"
                 with zipfile.ZipFile(path, "w") as archive:
                     archive.writestr(f"rusty_haystack-{VERSION}.dist-info/METADATA", f"Name: rusty-haystack\nVersion: {VERSION}\nRequires-Python: >=3.11\n")
-                    archive.writestr(f"rusty_haystack-{VERSION}.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: maturin (1.15.0)\nRoot-Is-Purelib: false\nTag: cp312-cp312-manylinux_2_17_x86_64\n")
+                    archive.writestr(f"rusty_haystack-{VERSION}.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: maturin (1.16.0)\nRoot-Is-Purelib: false\nTag: cp312-cp312-manylinux_2_17_x86_64\n")
                     archive.writestr("rusty_haystack/rusty_haystack.cpython-312-x86_64-linux-gnu.so", elf)
                     archive.writestr("rusty_haystack/__init__.py", "from .rusty_haystack import *\n")
                     for name, data in TYPING.items():

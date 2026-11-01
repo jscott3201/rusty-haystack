@@ -1,7 +1,7 @@
 # Read-only MCP over local Streamable HTTP
 
 The optional `http` feature of `rusty-haystack-mcp` serves the existing
-`haystack_query` and `haystack_read` tools through official `rmcp = 3.5.1` and MCP
+`haystack_query` and `haystack_read` tools through official `rmcp = 3.8.0` and MCP
 `2026-07-28`. The CLI selects it with `mcp-http`. HTTP-only builds do not enable
 stdio, PostgreSQL, Python bindings, tasks, or new read/write capabilities. Select
 `mcp,mcp-http` to install both independent CLI commands.
@@ -22,7 +22,7 @@ outside this qualification.
 ## Configuration and launch
 
 ```sh
-cargo +1.99.0 install --locked --path haystack-cli --features mcp-http
+cargo +1.99.1 install --locked --path haystack-cli --features mcp-http
 haystack mcp http --config /absolute/path/mcp-http.toml
 ```
 
@@ -146,7 +146,10 @@ Each request has matching `MCP-Protocol-Version`/`Mcp-Method` headers and
 `resources/read` requests require that header to equal `params.uri`. Duplicate
 singleton headers, missing or mismatched metadata, invalid JSON-RPC IDs, batches,
 client result/error envelopes, unavailable methods and malformed selected
-requests are rejected before application-work admission. Unsupported methods use
+requests are rejected before application-work admission. A request ID written
+in integral float form (`"id":1.0`) is valid and answered as the integer `1`, as
+rmcp has read it since 3.6.0; non-integral (`1.5`) and out-of-range numeric IDs
+remain invalid. Unsupported methods use
 404/-32601; unsupported versions use 400/-32022; header mismatch uses
 400/-32020; missing/malformed body metadata uses 400/-32602. An unidentified error
 omits its ID. Unknown tools are rejected before the SDK's schema cache lookup.
@@ -199,10 +202,10 @@ bytes.
 ## Qualification
 
 ```sh
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features http
-cargo +1.99.0 nextest run --locked -p rusty-haystack-mcp --features stdio,http
-cargo +1.99.0 nextest run --locked -p rusty-haystack-cli --features mcp-http
-cargo +1.99.0 nextest run --locked -p rusty-haystack-cli --features mcp,mcp-http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-mcp --features stdio,http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-cli --features mcp-http
+cargo +1.99.1 nextest run --locked -p rusty-haystack-cli --features mcp,mcp-http
 uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py
 uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py --features mcp,mcp-http
 ```

@@ -19,13 +19,13 @@ This README describes the **0.9.0 source on `dev`**. Build this checkout to use 
 
 ## Start from source
 
-Use the repository-pinned Rust **1.99.0** toolchain:
+Use the repository-pinned Rust **1.99.1** toolchain:
 
 ```sh
 git clone --branch dev https://github.com/jscott3201/rusty-haystack.git
 cd rusty-haystack
-cargo +1.99.0 build --locked --workspace --exclude rusty-haystack
-cargo +1.99.0 run --locked -p rusty-haystack-cli -- serve --demo --port 8080
+cargo +1.99.1 build --locked --workspace --exclude rusty-haystack
+cargo +1.99.1 run --locked -p rusty-haystack-cli -- serve --demo --port 8080
 ```
 
 The excluded `rusty-haystack` package is the PyO3 extension; build it through Maturin with a Python interpreter as shown below. The demo uses process memory and the legacy HTTP profile, listening on `127.0.0.1:8080`. In another terminal:
@@ -42,7 +42,7 @@ filter
 To install a standalone CLI from the checkout:
 
 ```sh
-cargo +1.99.0 install --locked --path haystack-cli --root "$PWD/haystack-install"
+cargo +1.99.1 install --locked --path haystack-cli --root "$PWD/haystack-install"
 ./haystack-install/bin/haystack --help
 ```
 
@@ -83,11 +83,11 @@ Supply that server's authentication header when enabled. Its caller-filtered exp
 
 ## Python from this checkout
 
-The package requires Python **3.11 or newer**. The source-build and test recipe uses CPython **3.12** and pinned Maturin **1.15.0**:
+The package requires Python **3.11 or newer**. The source-build and test recipe uses CPython **3.12** and pinned Maturin **1.16.0**:
 
 ```sh
 uv venv --python 3.12
-uv pip install maturin==1.15.0 pytest
+uv pip install maturin==1.16.0 pytest
 source .venv/bin/activate
 maturin develop --locked --release -m rusty-haystack/Cargo.toml
 pytest rusty-haystack/tests -q

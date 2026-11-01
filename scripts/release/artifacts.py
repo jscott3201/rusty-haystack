@@ -18,8 +18,8 @@ import tarfile
 import tomllib
 import zipfile
 
-RUST = "1.99.0"
-MATURIN = "1.15.0"
+RUST = "1.99.1"
+MATURIN = "1.16.0"
 BINARY_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc")
 WHEEL_TARGETS = BINARY_TARGETS[:4]
 PYTHONS = ("cp311", "cp312", "cp313")

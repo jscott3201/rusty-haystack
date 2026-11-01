@@ -2,9 +2,9 @@
 
 ## Prerequisites
 
-- **Rust 1.99.0.** The repository pins normal local commands to this exact toolchain in
+- **Rust 1.99.1.** The repository pins normal local commands to this exact toolchain in
   `rust-toolchain.toml`. It is also the CI MSRV lane for the workspace's declared
-  `rust-version = "1.99"`. A separate Ubuntu lane pins current stable Rust 1.99.0; both
+  `rust-version = "1.99"`. A separate Ubuntu lane pins current stable Rust 1.99.1; both
   pins currently coincide and move only through reviewed changes.
 - **[uv](https://docs.astral.sh/uv/)** and **Python 3.12**, for the Python bindings and the full schema/client validation stage. CI pins the interpreter version deliberately — `pyo3` is configured without
   `abi3`, so every build is interpreter-specific.
@@ -18,8 +18,9 @@ Workspace dependency versions live in the root manifest; members declare their o
 additional features. `Cargo.lock` records the tested resolution. Change that file
 intentionally with `cargo update`, then run the locked gate below.
 
-The refresh keeps the existing dependency families, including PyO3 0.29.3, reqwest
-0.13.5 and Tokio 1.53.2. The direct rustls requirement is at least 0.23.45 to address
+The refresh keeps the existing dependency families, including reqwest 0.13.5 and
+Tokio 1.54.1; PyO3 later moved to 0.30.1 (with pyo3-async-runtimes 0.30.0) and roaring
+to 0.12.0. The direct rustls requirement is at least 0.23.45 to address
 [GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc);
 its existing `ring`, `std` and `tls12` features are preserved. Older compatible
 transitive families, including base64 0.22 and tungstenite 0.29, remain where their
@@ -34,12 +35,13 @@ policy is unchanged and does not apply to dependency internals. flate2 1.1.10 ad
 default runtime detection while retaining the miniz_oxide Rust backend. Its optional
 zlib-rs dependency appears in the lockfile but is not enabled in the workspace build.
 
-The refreshed dependency graph's highest declared Rust requirement is 1.90, below
-the workspace floor; some dependencies do not declare an MSRV. License policy is
-unchanged: the newly resolved optional zlib-rs package uses the already allowed Zlib
-license, and two existing dependencies only normalize their MIT/Apache SPDX spelling.
-Python's declared support range and the release interpreter matrix are unchanged;
-the existing build lanes now pin Rust 1.99.0 and Maturin 1.15.0.
+The refreshed dependency graph's highest declared Rust requirement is 1.90 (roaring
+0.12.0), below the workspace floor; some dependencies do not declare an MSRV. License
+policy is unchanged: the newly resolved optional zlib-rs package uses the already
+allowed Zlib license, two existing dependencies only normalize their MIT/Apache SPDX
+spelling, and roaring 0.12's new fearless_simd and libm dependencies are MIT/Apache-2.0
+and MIT. Python's declared support range and the release interpreter matrix are
+unchanged; the existing build lanes now pin Rust 1.99.1 and Maturin 1.16.0.
 
 ## Build and test
 
@@ -88,7 +90,7 @@ crate is excluded from which command:
 
 It runs the CI policy tests, isolated core minimal/default checks, and CI's Rust
 commands, including the `chrono-tz` feature surface in both the MSRV and current-stable
-lanes (currently Rust 1.99.0). It rebuilds the Python extension before testing it and
+lanes (currently Rust 1.99.1). It rebuilds the Python extension before testing it and
 lints the PyO3 crate. Builds, lints and tests use `--locked` to validate the checked-in
 graph. The policy tests require `python3` and only use its standard library.
 
@@ -123,13 +125,13 @@ See the [support matrix](docs/support-matrix.md) for those evidence boundaries.
 | Job | Command |
 |---|---|
 | CI policy | `python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v`, then the validated dev/main matrix plan |
-| Rustfmt (Rust 1.99.0) | `cargo +1.99.0 fmt --all --check` |
-| Clippy (MSRV, Rust 1.99.0) | `cargo +1.99.0 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.0 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
-| Test (MSRV, Rust 1.99.0) | `cargo +1.99.0 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.0 test --locked -p rusty-haystack-core --features chrono-tz` |
-| Core minimal and default features (Ubuntu, Rust 1.99.0) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features` |
-| Current stable (Ubuntu, Rust 1.99.0) | The same two Clippy and two test commands above, using `cargo +1.99.0` |
-| Python Bindings (Rust 1.99.0) | clippy on the excluded crate, then `maturin develop` and `pytest` |
-| Cargo Deny (Rust 1.99.0) | `cargo +1.99.0 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
+| Rustfmt (Rust 1.99.1) | `cargo +1.99.1 fmt --all --check` |
+| Clippy (MSRV, Rust 1.99.1) | `cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
+| Test (MSRV, Rust 1.99.1) | `cargo +1.99.1 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz` |
+| Core minimal and default features (Ubuntu, Rust 1.99.1) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features` |
+| Current stable (Ubuntu, Rust 1.99.1) | The same two Clippy and two test commands above, using `cargo +1.99.1` |
+| Python Bindings (Rust 1.99.1) | clippy on the excluded crate, then `maturin develop` and `pytest` |
+| Cargo Deny (Rust 1.99.1) | `cargo +1.99.1 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
 | CodeQL | Rust, Python, and Actions analyses through the reusable CodeQL workflow and existing query configuration |
 | CI OK | Always evaluates the independent required-job inventory; every required job must succeed |
 
@@ -159,7 +161,7 @@ locally, drop the exclusion and use it.
 
 ```bash
 uv venv --python 3.12
-uv pip install maturin==1.15.0 pytest
+uv pip install maturin==1.16.0 pytest
 source .venv/bin/activate
 maturin develop --locked --release -m rusty-haystack/Cargo.toml
 pytest rusty-haystack/tests -q

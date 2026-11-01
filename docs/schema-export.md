@@ -93,7 +93,7 @@ zero-count repetitions retain their empty-string matches.
 
 ## Reproduce the external proof
 
-From the repository root, with Rust 1.99.0, uv and Python 3.12:
+From the repository root, with Rust 1.99.1, uv and Python 3.12:
 
 ```sh
 uv run --locked --project scripts/schema-client --python 3.12 \

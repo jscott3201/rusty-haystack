@@ -118,12 +118,12 @@ class CaptureInputTests(unittest.TestCase):
             paths[name] = str(path)
 
         def command_output(*command):
-            if command[:4] == ("rustup", "which", "--toolchain", "1.99.0"):
+            if command[:4] == ("rustup", "which", "--toolchain", "1.99.1"):
                 return paths[command[4]]
             if command == (paths["rustc"], "-Vv"):
-                return "rustc 1.99.0\nhost: aarch64-apple-darwin"
+                return "rustc 1.99.1\nhost: aarch64-apple-darwin"
             if command == (paths["cargo"], "--version"):
-                return "cargo 1.99.0"
+                return "cargo 1.99.1"
             self.fail(f"unexpected executable query: {command}")
 
         with patch.object(capture, "output", side_effect=command_output):

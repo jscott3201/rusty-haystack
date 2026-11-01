@@ -23,7 +23,7 @@ class SelectedWheelTests(unittest.TestCase):
         elf = bytearray(64); elf[:4] = b"\x7fELF"; elf[4:6] = b"\x02\x01"; elf[18:20] = (62).to_bytes(2, "little")
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("rusty_haystack-0.9.0.dist-info/METADATA", "Name: rusty-haystack\nVersion: 0.9.0\nRequires-Python: >=3.11\n")
-            archive.writestr("rusty_haystack-0.9.0.dist-info/WHEEL", f"Generator: maturin (1.15.0)\nRoot-Is-Purelib: false\nTag: {interpreter}-{abi}-manylinux_2_17_x86_64\n")
+            archive.writestr("rusty_haystack-0.9.0.dist-info/WHEEL", f"Generator: maturin (1.16.0)\nRoot-Is-Purelib: false\nTag: {interpreter}-{abi}-manylinux_2_17_x86_64\n")
             archive.writestr("rusty_haystack/rusty_haystack.cpython-314t-x86_64-linux-gnu.so", elf)
             archive.writestr("rusty_haystack/__init__.py", "from .rusty_haystack import *\n")
             for name in a.TYPING_FILES:
