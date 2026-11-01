@@ -82,11 +82,11 @@ Supply that server's authentication header when enabled. Its caller-filtered exp
 
 ## Python from this checkout
 
-The package requires Python **3.11 or newer**. The source-build and test recipe uses CPython **3.12** and pinned Maturin **1.15.0**:
+The package requires Python **3.11 or newer**. The source-build and test recipe uses CPython **3.12** and pinned Maturin **1.16.0**:
 
 ```sh
 uv venv --python 3.12
-uv pip install maturin==1.15.0 pytest
+uv pip install maturin==1.16.0 pytest
 source .venv/bin/activate
 maturin develop --locked --release -m rusty-haystack/Cargo.toml
 pytest rusty-haystack/tests -q

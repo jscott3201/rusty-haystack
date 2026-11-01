@@ -51,15 +51,15 @@ libc = "0.2"
 log = "0.4"
 parking_lot = "0.12"
 pbkdf2 = "0.13"
-pyo3 = "0.29"
-pyo3-async-runtimes = "=0.29.0"
+pyo3 = "0.30"
+pyo3-async-runtimes = "=0.30.0"
 rand = "0.10"
 regex = "1"
 regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "unicode", "dfa-build", "dfa-search"] }
 rmcp = { version = "=3.8.0", default-features = false }
 reqwest = { version = "0.13", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
-roaring = "0.11"
+roaring = "0.12"
 rusqlite = { version = "=0.40.2", default-features = false }
 rustc-hash = "2"
 # Security floor: RUSTSEC-2026-0346/0347/0348/0349 are fixed in 0.23.46.
