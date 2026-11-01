@@ -23,8 +23,8 @@ jobs:
       matrix:
         kind: [cli, wheel, sdist]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
@@ -41,7 +41,7 @@ jobs:
           target="$TARGET"
           if [ "$KIND" = "sdist" ]; then target=source; fi
           python scripts/release/build.py "$KIND" --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$target" --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: candidate
         with:
           name: native-candidate-${{ matrix.kind }}-${{ github.run_attempt }}
@@ -58,7 +58,7 @@ jobs:
           test -n "$ARTIFACT_ID"
           echo "$OUTPUT_KEY=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
           printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: native-build-logs-${{ matrix.kind }}-${{ github.run_attempt }}
@@ -71,8 +71,8 @@ jobs:
     outputs:
       wheel_ft: ${{ steps.identity.outputs.wheel_ft }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
       - uses: dtolnay/rust-toolchain@master
@@ -85,7 +85,7 @@ jobs:
         env:
           SOURCE: ${{ github.sha }}
         run: python scripts/release/build.py wheel --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --python "$(command -v python)" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         id: candidate
         with:
           name: selected-candidate-cp314t-${{ github.run_attempt }}
@@ -100,7 +100,7 @@ jobs:
           test -n "$ARTIFACT_ID"
           echo "wheel_ft=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
           printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: selected-build-logs-cp314t-${{ github.run_attempt }}
@@ -122,11 +122,11 @@ jobs:
             abi: cp314t
             artifact: wheel_ft
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - uses: dtolnay/rust-toolchain@master
@@ -152,7 +152,7 @@ jobs:
           python scripts/release/selected_wheel.py fixture --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --work "$RUNNER_TEMP/fixture-work" --output "$RUNNER_TEMP/fixture.json"
           python scripts/release/selected_wheel.py qualify --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --abi "$ABI" --python "$(command -v python)" --pyright "$(command -v pyright)" --input "$RUNNER_TEMP/download" --fixture-receipt "$RUNNER_TEMP/fixture.json" --work "$RUNNER_TEMP/selected-work" --evidence "$RUNNER_TEMP/selected-evidence.json"
           python scripts/release/selected_wheel.py check --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --abi "$ABI" --input "$RUNNER_TEMP/download" --fixture-receipt "$RUNNER_TEMP/fixture.json" --evidence "$RUNNER_TEMP/selected-evidence.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: selected-proof-${{ matrix.abi }}-${{ github.run_attempt }}
@@ -173,8 +173,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
@@ -198,12 +198,12 @@ jobs:
           python scripts/release/qualify.py --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile native --target x86_64-unknown-linux-gnu --python "$(command -v python)" --work "$RUNNER_TEMP/consumer-work" --evidence "$RUNNER_TEMP/evidence"
           python scripts/release/artifacts.py stage --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile native --target x86_64-unknown-linux-gnu --evidence "$RUNNER_TEMP/evidence" --output "$RUNNER_TEMP/publication" > "$RUNNER_TEMP/stage.json"
           python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile native --target x86_64-unknown-linux-gnu --receipt "$RUNNER_TEMP/stage.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-staged-${{ github.run_attempt }}
           path: ${{ runner.temp }}/publication
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: native-proof-${{ github.run_attempt }}

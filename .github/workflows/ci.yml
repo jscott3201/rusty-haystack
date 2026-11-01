@@ -25,7 +25,7 @@ jobs:
       profile: ${{ steps.plan.outputs.profile }}
       test-os: ${{ steps.plan.outputs.test-os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Test policy and workflow wiring
         run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - name: Test benchmark capture controls
@@ -42,7 +42,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -53,7 +53,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -75,7 +75,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.ci-policy.outputs.test-os) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -106,7 +106,7 @@ jobs:
     name: Core minimal and default features
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -125,7 +125,7 @@ jobs:
     name: Current stable (Rust 1.99.0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -143,7 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -168,7 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -196,7 +196,7 @@ jobs:
     name: Python Bindings
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
@@ -205,8 +205,8 @@ jobs:
         with:
           key: pyo3
       # Exact version: setup-uv stopped publishing floating major tags after v7,
-      # so `@v9` does not resolve.
-      - uses: astral-sh/setup-uv@v9.0.0
+      # so `@v10` does not resolve.
+      - uses: astral-sh/setup-uv@v10.3.3
       # Pinned rather than inherited from the runner image, so the interpreter
       # the extension is built against does not drift. pyo3 is configured
       # without abi3, making every build interpreter-specific.
@@ -244,7 +244,7 @@ jobs:
     name: Cargo Deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: "1.99.0"
@@ -266,7 +266,7 @@ jobs:
     needs: [ci-policy, fmt, clippy, test, current-stable, python, deny, postgres, sqlite, core-features, codeql]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Require every check to succeed
         env:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
