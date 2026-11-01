@@ -29,9 +29,12 @@ haystack-client = { package = "rusty-haystack-client", version = "0.9.0", path =
 haystack-app = { package = "rusty-haystack-app", version = "0.9.0", path = "haystack-app" }
 haystack-mcp = { package = "rusty-haystack-mcp", version = "0.9.0", path = "haystack-mcp" }
 haystack-server = { package = "rusty-haystack-server", version = "0.9.0", path = "haystack-server" }
-arrow-array = "=59.3.0"
-arrow-schema = "=59.3.0"
-parquet = { version = "=59.3.0", default-features = false, features = ["arrow"] }
+# One Arrow/Parquet family. DataFusion 55.2 requires Arrow ^59.2; move together.
+arrow = { version = "=59.3.2", default-features = false }
+arrow-array = "=59.3.2"
+arrow-schema = "=59.3.2"
+parquet = { version = "=59.3.2", default-features = false, features = ["arrow"] }
+async-trait = "0.1"
 axum = "0.8"
 # Direct consumers request only std; transitive consumers may enable SIMD.
 bytes = "1"
@@ -40,6 +43,8 @@ chrono = "0.4"
 chrono-tz = "0.10.4"
 clap = "4"
 criterion = "0.8"
+# Optional snapshot SQL only; not DataFusion's `parquet` feature.
+datafusion = { version = "=55.2.0", default-features = false, features = ["sql", "recursive_protection"] }
 dashmap = "6"
 env_logger = "0.11"
 flate2 = "1"

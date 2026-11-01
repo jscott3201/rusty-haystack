@@ -5,7 +5,16 @@ no-default-features = false
 exclude = ["rusty-haystack"]
 
 [advisories]
-ignore = []
+# zstd 0.13 reaches the graph only through arrow-ipc under the optional
+# analytics `sql` feature (DataFusion 55 requires Arrow 59; the fixes need
+# zstd >= 0.14.3, i.e. Arrow 60). The SQL path never reads or writes Arrow
+# IPC: spill is disabled and file-backed tables are refused. Remove all three
+# together with the DataFusion/Arrow 60 move.
+ignore = [
+    { id = "RUSTSEC-2026-0391", reason = "zstd via arrow-ipc only; no IPC (de)compression is reachable (spill disabled, no file tables). Tracked: https://github.com/jscott3201/rusty-haystack/issues/131" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd Seekable is never used; zstd via arrow-ipc only, unreachable (spill disabled, no file tables). Tracked: https://github.com/jscott3201/rusty-haystack/issues/131" },
+    { id = "RUSTSEC-2026-0403", reason = "no streaming zstd decompression is reachable: no IPC reads, spill disabled. Tracked: https://github.com/jscott3201/rusty-haystack/issues/131" },
+]
 unmaintained = "workspace"
 
 [licenses]
