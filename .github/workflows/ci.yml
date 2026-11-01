@@ -139,7 +139,7 @@ jobs:
       - run: cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz
 
   sqlite:
-    name: SQLite 3.53.2 entity/history durability
+    name: SQLite 3.54.1 entity/history durability
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -150,7 +150,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: sqlite-3.53.2
+          key: sqlite-3.54.1
       - name: Install pinned qualification test runner
         run: cargo +1.99.1 install --locked cargo-nextest --version 0.9.146
       - run: cargo +1.99.1 clippy --locked -p rusty-haystack-app --no-default-features --features sqlite --all-targets -- -D warnings
