@@ -1,8 +1,11 @@
 mod support;
+#[path = "support/worst_case.rs"]
+mod worst_case;
 use haystack_analytics::{Dataset, Export, ExportOptions, Limits, MANIFEST_NAME};
 use haystack_client::history::{HistoryStreamLimits, HistoryStreamOptions};
 use haystack_core::codecs::history::*;
 use support::*;
+use worst_case::*;
 // Cargo test runs these in one process; share the API admission capacity.
 static TEST_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 

@@ -1,5 +1,7 @@
 #[path = "../tests/support/mod.rs"]
 pub(crate) mod support;
+#[path = "../tests/support/worst_case.rs"]
+mod worst_case;
 use crate::{
     checkpoint::{Action, Checkpoints, Hook, Phase},
     *,
@@ -7,6 +9,7 @@ use crate::{
 use haystack_client::history::{HistoryStreamLimits, HistoryStreamOptions};
 use std::time::Duration;
 use support::*;
+use worst_case::*;
 async fn pending(future: impl std::future::Future) -> bool {
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx).is_pending())).await

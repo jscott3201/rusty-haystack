@@ -47,7 +47,7 @@ pub(crate) const MANIFEST_BASE_BYTES: usize = 512;
 /// JSON-escaped `source_header` the manifest floor admits. Measured 2,956 for
 /// the reference header (`tests/support`) and 12,626 for the largest one the
 /// bounded-history codec admits, built by construction in
-/// `tests/support::worst_case_results`: the 1,024-byte range padded with VT
+/// `tests/support/worst_case.rs::worst_case_results`: the 1,024-byte range padded with VT
 /// (which `validate_range` trims and which escapes to eight bytes through the
 /// control JSON, the Zinc string and the manifest JSON), the 256-byte id, the
 /// longest-recording unit and zone, `u64::MAX` counters, every bound and
