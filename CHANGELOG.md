@@ -48,12 +48,30 @@
   store, CLI, Python, MCP or DataFusion surface, and Windows durability is not qualified.
   `arrow-array`, `arrow-schema` and `parquet` are new dependencies, pinned exactly. See
   `docs/parquet-history.md`.
+- Snapshot SQL: the optional `sql` feature of `rusty-haystack-analytics` adds
+  `haystack_analytics::sql`, bounded read-only DataFusion SQL over Parquet history
+  captures. `SqlEngine::builder().register(name, dir)` drains and validates a capture to
+  semantic completion, then seals it in memory; queries never touch the filesystem and
+  `QueryOutput.sources` reports each scanned snapshot's export id and manifest SHA-256.
+  A fixed schema maps NA to NULL with `present = false`, keeps NaN/±Infinity bits, and
+  carries `ts` (UTC), `ts_local` (stored offset applied) and the exact timestamp
+  components; a `snapshots` table carries provenance. Queries run on an engine-owned
+  runtime with process-wide admission, a per-query memory pool with spill disabled, a
+  timeout, output caps, an SQL length and parser-recursion bound; DDL, DML, statements,
+  table functions, URL tables, cross and non-equi joins and recursive queries are refused.
+  `Error` gains `Sql` and `Query`. The timeout is best-effort for operators that do not
+  yield, and expression-evaluation memory is not fully pool-bounded. See
+  `docs/sql-snapshots.md`.
 - `haystack_core::codecs::history::result_header_grid` encodes a validated
   `HistoryReadHeader` as the result envelope without collecting its sample rows;
   `result_grid` now builds on it.
 
 ### Changed
 
+- The Arrow/Parquet pins move from 59.3.0 to 59.3.2 to share one family with DataFusion
+  55.2.0, and `deny.toml` ignores three `zstd` advisories (RUSTSEC-2026-0391, -0398,
+  -0403) that arrive only through `arrow-ipc` under the `sql` feature and are unreachable
+  from it; tracked in #131 for removal with Arrow 60.
 - Salts, nonces and the server secret are generated directly instead of by overwriting a
   zeroed buffer. Behaviour is identical; the old shape tripped a CodeQL
   `hard-coded-cryptographic-value` alert on the salt in `hash_password`, which was a false

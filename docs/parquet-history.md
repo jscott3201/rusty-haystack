@@ -10,12 +10,13 @@ One export covers one point and one requested range.
 
 The crate is a separate workspace member. Core, client, server and application
 default features are unchanged, and nothing else in the workspace depends on it.
-It is a library profile only: there is no CLI command, Python binding, MCP tool,
-server route or DataFusion integration. `arrow-array`, `arrow-schema` and
-`parquet` are pinned exactly in the root `Cargo.toml`; `parquet` is built with
-only its `arrow` feature, so no compression codec is compiled in. The pin
-follows the Arrow family of the DataFusion release planned for a later slice;
-this slice does not depend on DataFusion.
+It is a library profile only: there is no CLI command, Python binding, MCP tool
+or server route. `arrow-array`, `arrow-schema` and `parquet` are pinned exactly
+in the root `Cargo.toml`; `parquet` is built with only its `arrow` feature, so
+no Parquet compression codec is compiled in. The pin follows the Arrow family
+of the pinned DataFusion release. The capture format does not depend on
+DataFusion; the optional `sql` feature adds bounded read-only SQL over sealed,
+fully validated captures (see [SQL over committed snapshots](sql-snapshots.md)).
 
 A dataset is published only when the remote read ends `Remote(Complete)` and
 every sample has passed the same cumulative validator the client uses. A
@@ -419,8 +420,9 @@ not part of hosted CI.
   no-replace publish still holds there: `CreateHardLinkW` refuses an existing
   name. Windows CI runs the ordinary tests; the process-kill and permission
   tests are Unix-only.
-- **No query engine or other front ends.** No DataFusion, Python, CLI, MCP or
-  server exposure.
+- **No other front ends.** No Python, CLI, MCP or server exposure. The only
+  query engine is the optional, in-process
+  [snapshot SQL](sql-snapshots.md) feature.
 - **No overwrite, append, merge, compaction or resume.** Each export writes a
   new directory once. A failed export is not resumed or cleaned up.
 - **No object stores or remote destinations.** Local paths only.

@@ -226,6 +226,26 @@ local macOS release build; it is not a supported bound or a hosted-CI gate.
 Process-kill evidence does not qualify power loss, network filesystems or
 filesystems lacking hard links or directory `fsync`. Where the `main` profile
 runs workspace tests on Windows, directory sync is skipped and Windows
-durability is not qualified. No DataFusion, Python, CLI,
-MCP, object-store, append or resume surface is selected. See
-[Parquet history captures](parquet-history.md).
+durability is not qualified. No Python, CLI, MCP, object-store, append or
+resume surface is selected. See [Parquet history captures](parquet-history.md).
+
+## Snapshot SQL
+
+The optional `sql` feature of `rusty-haystack-analytics` runs bounded,
+read-only DataFusion SQL over captures that were fully drained, validated and
+sealed in memory at registration. The workspace selections above never enable
+it, so the `core-features` job runs Clippy `-D warnings` and the tests for the
+package with `--features sql`, and `./.agents/gate.sh` mirrors both. That job
+runs on Ubuntu only; macOS and Windows are not qualified for the feature.
+
+The tests compare filter, aggregate, join, NA/NaN, DST and leap-second results
+against an independent fold over the served source samples, reject every
+incomplete or corrupt capture kind, and cover cancellation, deadlines,
+admission, memory and output caps, side-effect and runaway-join rejection,
+runtime shutdown and identity after the capture directory is deleted.
+Expression-evaluation memory is not fully bounded, and the deadline is
+best-effort for operators that do not yield. `deny.toml` ignores three `zstd`
+advisories reachable only through Arrow IPC, which this feature never uses
+([#131](https://github.com/jscott3201/rusty-haystack/issues/131)). No live
+pushdown, SQL server, spill, Python, CLI or MCP surface is selected. See
+[SQL over committed snapshots](sql-snapshots.md).
