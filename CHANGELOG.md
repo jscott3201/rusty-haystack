@@ -39,6 +39,17 @@
   zeroed buffer. Behaviour is identical; the old shape tripped a CodeQL
   `hard-coded-cryptographic-value` alert on the salt in `hash_password`, which was a false
   positive — the buffer was overwritten on the next line. (#55)
+- Python bindings build on PyO3 0.30.1 and pyo3-async-runtimes 0.30.0 (from 0.29.3 and
+  0.29.0), and with Maturin 1.16.0 (from 1.15.0), which `pyproject.toml` now requires as
+  the build backend. No binding source changed and the Python API is the same: every
+  `#[pyclass]` that Python values are extracted into already opted in with
+  `from_py_object`, so PyO3 0.30 no longer deriving `FromPyObject` by default removes
+  nothing. The module still declares itself free-threading compatible, the default
+  since PyO3 0.28. The supported Python range (3.11+) is unchanged; PyO3 0.30 drops only
+  3.8. (#124)
+- `roaring` 0.11.5 → 0.12.0 for the tag bitmap index. Behaviour is unchanged; 0.12 adds
+  stable-Rust SIMD kernels through two new dependencies, `fearless_simd` (MIT/Apache-2.0)
+  and `libm` (MIT). (#124)
 
 ### Fixed
 

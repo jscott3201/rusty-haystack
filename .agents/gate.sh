@@ -119,7 +119,7 @@ if [[ -e .venv || -L .venv ]]; then
   for tool in python maturin pytest; do
     tool_path="$venv_dir/bin/$tool"
     if [[ ! -x "$tool_path" ]]; then
-      python_env_fail "$tool_path is missing or not executable; recreate it with 'uv venv --python 3.12' and 'uv pip install maturin==1.15.0 pytest'"
+      python_env_fail "$tool_path is missing or not executable; recreate it with 'uv venv --python 3.12' and 'uv pip install maturin==1.16.0 pytest'"
     fi
   done
 
@@ -134,8 +134,8 @@ if [[ -e .venv || -L .venv ]]; then
   if (( python_env_valid )); then
     if ! maturin_version="$("$venv_maturin" --version 2>/dev/null)"; then
       python_env_fail "$venv_maturin could not report its version"
-    elif [[ "$maturin_version" != "maturin 1.15.0" ]]; then
-      python_env_fail "expected maturin 1.15.0, found '$maturin_version'; run 'uv pip install --python .venv/bin/python maturin==1.15.0'"
+    elif [[ "$maturin_version" != "maturin 1.16.0" ]]; then
+      python_env_fail "expected maturin 1.16.0, found '$maturin_version'; run 'uv pip install --python .venv/bin/python maturin==1.16.0'"
     fi
   fi
 
