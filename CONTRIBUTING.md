@@ -19,7 +19,7 @@ additional features. `Cargo.lock` records the tested resolution. Change that fil
 intentionally with `cargo update`, then run the locked gate below.
 
 The refresh keeps the existing dependency families, including PyO3 0.29.3, reqwest
-0.13.5 and Tokio 1.53.2. The direct rustls requirement is at least 0.23.45 to address
+0.13.5 and Tokio 1.54.1. The direct rustls requirement is at least 0.23.45 to address
 [GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc);
 its existing `ring`, `std` and `tls12` features are preserved. Older compatible
 transitive families, including base64 0.22 and tungstenite 0.29, remain where their
