@@ -54,6 +54,7 @@ Select optional CLI features in that install command according to the profile yo
 | Managed Rust application | `rusty-haystack-app` and chosen adapters/services | One application owner, borrowed handles and Tokio runtime. [Shared reads](docs/shared-reads.md), [lifecycle](docs/application-lifecycle.md) |
 | Ordinary CLI/HTTP demo | No optional feature required | `haystack serve --demo`, data tools and HTTP client commands. [CLI](docs/cli.md) |
 | SQLite Rust application | `rusty-haystack-app` with `features = ["sqlite"]` | One local-file owner, durable entity mutations/feed and bounded history upserts/receipts; no CLI selector. [SQLite contract](docs/sqlite-durability.md) |
+| Parquet history capture (preview) | `rusty-haystack-analytics` library | One completed remote history read exported to an immutable local Parquet dataset and reopened with bounded validation; Rust only, no CLI/Python. [Parquet contract](docs/parquet-history.md) |
 | PostgreSQL CLI | `--features postgres` | `haystack serve --postgres-config FILE --users FILE`; explicit database and SCRAM configuration. [Standalone workflow](docs/standalone-postgres.md) |
 | MCP stdio CLI | `--features mcp` | `haystack mcp stdio --config FILE`; trusted launch scope and Unix pipes. [Stdio configuration](docs/mcp-stdio.md) |
 | MCP HTTP CLI | `--features mcp-http` | `haystack mcp http --config FILE`; numeric loopback, issuer/public keys and per-subject scope. [HTTP configuration](docs/mcp-http.md) |
@@ -159,18 +160,19 @@ The adapters bound input, response size, concurrent work and complete request de
 | [haystack-app](haystack-app/) | Scoped reads, selected mutations/history/subscriptions/commands, catalog activation, optional PostgreSQL/SQLite and lifecycle ownership |
 | [haystack-server](haystack-server/) | Axum HTTP adapters, SCRAM authentication and WebSocket transport |
 | [haystack-client](haystack-client/) | Async Rust HTTP/WebSocket client, SCRAM and TLS configuration |
+| [haystack-analytics](haystack-analytics/) | Bounded immutable Parquet captures of one remote history read |
 | [haystack-cli](haystack-cli/) | `haystack` data/validation tools, server/client commands, user management, storage administration and selected MCP launchers |
 | [haystack-mcp](haystack-mcp/) | Optional bounded read-only stdio and authenticated local HTTP adapters |
 | [rusty-haystack](rusty-haystack/) | Python values, graph/codec APIs, async client and controlled embedded application |
 
 - Architecture and setup: [Architecture](docs/architecture.md), [Getting started](docs/getting-started.md), [CLI](docs/cli.md), [Configuration](docs/configuration.md), [Client](docs/client.md), [Server API](docs/server-api.md).
-- Application services: [Shared reads](docs/shared-reads.md), [Lifecycle](docs/application-lifecycle.md), [Entity mutations](docs/entity-mutations.md), [History reads](docs/history-reads.md), [History writes](docs/history-mutations.md), [State subscriptions](docs/state-subscriptions.md), [Point-write simulation](docs/typed-http-read.md#local-point-command-simulation-m2-pr12).
+- Application services: [Shared reads](docs/shared-reads.md), [Lifecycle](docs/application-lifecycle.md), [Entity mutations](docs/entity-mutations.md), [History reads](docs/history-reads.md), [History writes](docs/history-mutations.md), [Parquet history captures](docs/parquet-history.md), [State subscriptions](docs/state-subscriptions.md), [Point-write simulation](docs/typed-http-read.md#local-point-command-simulation-m2-pr12).
 - Types and contracts: [Typed values](docs/typed-values.md), [Jeto](docs/jeto.md), [Typed HTTP](docs/typed-http-read.md), [Schema export](docs/schema-export.md), [Xeto repository downloads](docs/repository-client.md).
 - Development and evidence: [Contributing](CONTRIBUTING.md), [Support and validation matrix](docs/support-matrix.md), [Artifact validation](docs/artifact-validation.md), [Roadmap](https://github.com/users/jscott3201/projects/3), [Issues](https://github.com/jscott3201/rusty-haystack/issues).
 
 The local full gate builds and tests Rust/Python surfaces and runs the independent schema/client proof. Optional profiles, hosted jobs and release artifacts have separately recorded coverage; one local pass does not qualify another platform or a published binary. First-party Rust forbids unsafe code; dependency internals have their own policies. Authentication, authorization and resource limits remain explicit application/deployment choices.
 
-[Benchmarks.md](Benchmarks.md) records correctness-checked graph/history workloads, commands and measurement provenance. Historical March 2026 results describe v0.8.0 on Rust 1.93.1 and do not establish current latency, capacity or a speedup. Planned additional storage engines, Arrow/Parquet/DataFusion integrations, broader MCP capabilities and wider Python/free-threaded qualification remain roadmap work.
+[Benchmarks.md](Benchmarks.md) records correctness-checked graph/history workloads, commands and measurement provenance. Historical March 2026 results describe v0.8.0 on Rust 1.93.1 and do not establish current latency, capacity or a speedup. Planned additional storage engines, DataFusion and wider Arrow/Parquet integrations, broader MCP capabilities and wider Python/free-threaded qualification remain roadmap work.
 
 ## License
 

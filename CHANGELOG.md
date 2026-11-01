@@ -12,6 +12,25 @@
   auth is header-based and it sets no cookies. There is no wildcard: `*` is refused with
   a warning rather than forwarded, since `tower-http` panics if one reaches
   `AllowOrigin::list` and an explicit list is the point of the policy.
+- `rusty-haystack-analytics`, a new library crate that exports one completed remote
+  `bounded-history-v1` read (`HaystackClient::his_read_stream`) into bounded Arrow batches
+  and an immutable local Parquet dataset, and reopens it with validated bounded readback.
+  Values keep their exact kind, binary64 bits, unit spelling, NA and timestamp offset; the
+  remote header and its observations are retained in a versioned manifest. Nothing is
+  published unless the source ends `Complete`. Publication is a no-replace hard link of a
+  synced manifest; a failure after that link is `PublishedUncertain`, distinct from a
+  precommit failure, because the dataset is already committed. `Dataset::open` verifies
+  hashes and physical layout, including page level and payload framing, before upstream
+  decodes anything; reading re-hashes each part's in-memory bytes before decoding them,
+  and `Dataset::manifest_sha256` identifies the dataset. Only a fully consumed reader
+  reports semantic completeness. Captures are owner-only (`0o700`/`0o600`) on Unix. There
+  is no atomic source snapshot, power-loss qualification, overwrite/append/resume, object
+  store, CLI, Python, MCP or DataFusion surface, and Windows durability is not qualified.
+  `arrow-array`, `arrow-schema` and `parquet` are new dependencies, pinned exactly. See
+  `docs/parquet-history.md`.
+- `haystack_core::codecs::history::result_header_grid` encodes a validated
+  `HistoryReadHeader` as the result envelope without collecting its sample rows;
+  `result_grid` now builds on it.
 
 ### Changed
 

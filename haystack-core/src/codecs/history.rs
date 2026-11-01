@@ -538,7 +538,38 @@ pub fn result_grid(result: &HistoryReadResult) -> Result<HGrid, TypedPayloadErro
         return Err(invalid());
     }
     validate_result(result)?;
-    let (terminal, reason) = terminal_parts(result.terminal);
+    let mut grid = result_header_grid(&HistoryReadHeader {
+        metadata: result.metadata.clone(),
+        terminal: result.terminal,
+        returned_count: result.samples.len() as u64,
+    })?;
+    grid.rows = result
+        .samples
+        .iter()
+        .map(|sample| {
+            dict([
+                ("ts", Kind::DateTime(sample.ts.clone())),
+                ("val", sample.val.clone()),
+            ])
+        })
+        .collect();
+    Ok(grid)
+}
+/// Encode a validated provisional header without collecting its sample rows.
+/// The declared terminal/count still require EOF validation before publication.
+pub fn result_header_grid(header: &HistoryReadHeader) -> Result<HGrid, TypedPayloadError> {
+    HistoryReadValidator::new(header.clone())?;
+    let metadata = &header.metadata;
+    if [&metadata.start, &metadata.end, &metadata.evaluated_at]
+        .into_iter()
+        .chain(metadata.coverage.retained_start.iter())
+        .chain(metadata.coverage.retained_end.iter())
+        .chain(metadata.coverage.evicted_through.iter())
+        .any(|time| !super::shared::h4_datetime_representable(&time.dt))
+    {
+        return Err(invalid());
+    }
+    let (terminal, reason) = terminal_parts(header.terminal);
     let control = control(dict([
         ("profile", text(PROFILE)),
         ("type", text("result")),
@@ -578,19 +609,9 @@ pub fn result_grid(result: &HistoryReadResult) -> Result<HGrid, TypedPayloadErro
         ("nativeValues", Kind::Bool(false)),
         ("terminal", text(terminal)),
         ("reason", text(reason)),
-        ("returnedCount", uint(result.samples.len() as u64)),
+        ("returnedCount", uint(header.returned_count)),
         ("completeBasis", text("retainedRecords")),
     ]))?;
-    let rows = result
-        .samples
-        .iter()
-        .map(|sample| {
-            dict([
-                ("ts", Kind::DateTime(sample.ts.clone())),
-                ("val", sample.val.clone()),
-            ])
-        })
-        .collect();
     Ok(HGrid::from_parts(
         dict([
             (CONTROL, control),
@@ -599,7 +620,7 @@ pub fn result_grid(result: &HistoryReadResult) -> Result<HGrid, TypedPayloadErro
             ("hisEnd", Kind::DateTime(metadata.end.clone())),
         ]),
         vec![HCol::new("ts"), HCol::new("val")],
-        rows,
+        vec![],
     ))
 }
 /// Decode the two-line grid envelope independently of sample collection.

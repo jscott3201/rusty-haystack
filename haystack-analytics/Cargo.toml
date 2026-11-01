@@ -1,0 +1,36 @@
+[package]
+name = "rusty-haystack-analytics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Bounded immutable Parquet captures of remote Haystack history"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "haystack_analytics"
+
+[dependencies]
+haystack-core = { workspace = true, features = ["chrono-tz"] }
+haystack-client.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+parquet.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-util.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "test-util"] }

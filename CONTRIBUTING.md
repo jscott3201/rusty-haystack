@@ -179,6 +179,7 @@ Two traps, both of which CI works around explicitly:
 haystack-core          types, codecs, graph, filter, ontology, xeto, auth
 haystack-app           authorized bounded reads         (depends on core)
 haystack-client        async HTTP/WebSocket client      (depends on core)
+haystack-analytics     Parquet history captures         (depends on core/client)
 haystack-server        Axum HTTP API, WebSocket watches (depends on core/app/client)
 haystack-cli           the `haystack` binary            (depends on core/client/server)
 rusty-haystack         PyO3 bindings, cdylib            (depends on core/client/server)
@@ -225,6 +226,7 @@ limit at all. Find them at their definitions:
 | Scoped read admission, traversal, output and cursor limits | `haystack-app/src/types.rs`, `service.rs`, `budget.rs`; HTTP collection in `haystack-server/src/ops/shared_read.rs` |
 | Graph changelog capacity | `haystack-core/src/graph/changelog.rs` |
 | Client in-flight requests, decompressed payload size | `haystack-client/src/transport/ws.rs` |
+| Parquet history export and readback | `haystack-analytics/src/format.rs` (`Limits::default`, `MIN_*`, `MAX_GROUPS_PER_PART`, `writer_reserve`/`encoded_ceiling`, `MAX_HEADER_BYTES`), `export.rs` (`MAX_CONCURRENT_EXPORTS`, `DEFAULT_EXPORT_TIMEOUT`), `writer.rs` (`DATA_PAGE_BYTES`), `reader.rs` (`COMPACT_*`, `FOOTER_MAX_SCHEMA_ELEMENTS`); source and row ceilings reuse `MAX_GRID_BYTES`/`MAX_ROWS` from `haystack-core/src/codecs/history.rs` |
 
 If you change one, change it at the definition and let the test suite tell you who cared.
 
