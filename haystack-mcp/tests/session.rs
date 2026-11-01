@@ -1490,7 +1490,9 @@ async fn invalid_present_ids_are_rejected_before_notification_fallback() {
         json!([]),
         Value::Null,
         json!(1.5),
-        json!(1.0),
+        // `1.0` is deliberately absent: since rmcp 3.6.0 (#1346) an integral
+        // float ID is read as that integer and answered. See
+        // `integral_float_id_is_answered_as_that_integer`.
         json!(u64::MAX),
         json!(-9223372036854775809.0),
     ]
@@ -1516,6 +1518,7 @@ async fn invalid_present_ids_are_rejected_before_notification_fallback() {
             assert_eq!(wire.receive().await["id"], probe);
         }
     }
+    assert_eq!(rejected, 7, "every invalid present ID must be rejected");
     // Truly absent IDs remain notifications: initialized, unselected, and
     // cancellation of an unknown request are consumed without a response.
     for notification in [
@@ -1529,13 +1532,14 @@ async fn invalid_present_ids_are_rejected_before_notification_fallback() {
     assert_eq!(response["id"], 99);
     assert_eq!(envelope(&response)["row_count"], 1);
     let report = finished(wire, task).await;
+    // initialize, seven probes, and the final call.
     assert_eq!(
-        report.admitted, 10,
+        report.admitted, 9,
         "invalid IDs and notifications must not be admitted"
     );
     assert_eq!(
         report.delivered,
-        10 + rejected,
+        9 + rejected,
         "genuine notifications must not produce responses"
     );
     close(owner).await;
@@ -1543,6 +1547,29 @@ async fn invalid_present_ids_are_rejected_before_notification_fallback() {
         silently_ignored.is_empty(),
         "invalid present IDs were consumed as notifications: {silently_ignored:?}"
     );
+}
+
+#[tokio::test]
+async fn integral_float_id_is_answered_as_that_integer() {
+    // rmcp 3.6.0 (#1346) reads a request ID written in float form as that
+    // integer. We accept the SDK behaviour: `"id":1.0` is admitted, served, and
+    // answered with the integer ID `1`, not rejected as an invalid ID.
+    let (owner, _) = app(graph(), ReadLimits::default()).await;
+    let (mut wire, task) = wire(&owner, Limits::default(), 64 * 1024);
+    initialize(&mut wire).await;
+    // Written raw so the float form reaches the wire exactly as `1.0`.
+    wire.output
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1.0,\"method\":\"tools/call\",\"params\":{\"name\":\"haystack_read\",\"arguments\":{\"ids\":[\"a\"]}}}\n")
+        .await
+        .unwrap();
+    let response = wire.receive().await;
+    assert!(response["id"].is_i64(), "{response}");
+    assert_eq!(response["id"], json!(1), "{response}");
+    assert_eq!(envelope(&response)["row_count"], 1);
+    let report = finished(wire, task).await;
+    assert_eq!(report.admitted, 2, "initialize and the float-form request");
+    assert_eq!(report.delivered, 2);
+    close(owner).await;
 }
 
 #[tokio::test]

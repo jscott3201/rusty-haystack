@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Security
+
+- Bump `rmcp` from 3.5.1 to 3.8.0 for
+  [GHSA-4432-vg92-fqh6](https://github.com/advisories/GHSA-4432-vg92-fqh6) (high): the
+  SDK's `StreamableHttpService` cached tool schemas without bound, so a remote client
+  could exhaust memory. `haystack-mcp`'s HTTP transport uses that service on MCP
+  `2026-07-28`, the affected configuration; exposure was already limited by the
+  loopback-only listener and bearer auth ahead of the SDK. Fixed upstream in 3.6.0
+  (rust-sdk#1349). The `rmcp` `auth` feature stays disabled, so the OAuth-client
+  advisory GHSA-5p52 does not apply. Behaviour changes that come with the bump:
+  - A JSON-RPC request ID written in integral float form (`"id":1.0`) is now accepted
+    and answered as the integer `1` on both stdio and HTTP, instead of being rejected
+    as an invalid ID (rust-sdk#1346). Non-integral (`1.5`) and out-of-range numeric IDs
+    are still rejected.
+  - On `2026-07-28` the SDK refuses to send server-to-client requests (rust-sdk#1326),
+    and its stateless HTTP path answers client Response/Error POSTs with 400. Neither
+    changes what `haystack-mcp` does: it never issues server-to-client requests, and
+    its HTTP wrapper already rejects client result/error envelopes with
+    400/`-32600` before the SDK sees them.
+
 ### Added
 
 - `haystack serve --cors-origin <ORIGIN>` (repeatable) and `HaystackServer::with_cors`,

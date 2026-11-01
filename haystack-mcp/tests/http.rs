@@ -806,12 +806,44 @@ async fn authentication_metadata_and_http_boundary_matrix() {
     fixture.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn integral_float_id_is_answered_and_other_numeric_ids_are_rejected() {
+    // rmcp 3.6.0 (#1346): an integral float ID is read as that integer. We
+    // accept the SDK behaviour, so `"id":1.0` is served and answered as `1`.
+    let fixture = Fixture::start(|_| {}).await;
+    let good = fixture.token();
+    let body = request("tools/list", json!({}))
+        .to_string()
+        .replacen("\"id\":1,", "\"id\":1.0,", 1);
+    assert!(body.contains("\"id\":1.0,"), "{body}");
+    let reply = fixture.raw("POST", "/mcp", &good, &body, &[], &[]).await;
+    assert_eq!(reply.status, 200);
+    let value = reply.json();
+    assert!(value["id"].is_i64(), "{value}");
+    assert_eq!(value["id"], json!(1), "{value}");
+    assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 2);
+    for id in [json!(1.5), json!(u64::MAX)] {
+        let mut value = request("tools/list", json!({}));
+        value["id"] = id.clone();
+        let reply = fixture
+            .raw("POST", "/mcp", &good, &value.to_string(), &[], &[])
+            .await;
+        assert_eq!(reply.status, 400, "{id}");
+        assert_eq!(reply.json()["error"]["code"], -32600, "{id}");
+        assert!(reply.json().get("id").is_none(), "{id}");
+    }
+    fixture.close().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn strict_envelopes_metadata_names_and_input_bounds() {
     let fixture = Fixture::start(|config| config.limits.max_frame_bytes = 1024).await;
     let good = fixture.token();
     for value in [
         json!([]),
+        // Client-sent Response and Error messages are refused by the wrapper
+        // before the SDK (whose own 3.6.0+ stateless answer is also 400), so
+        // no server-to-client request correlation is ever reachable.
         json!({"jsonrpc":"2.0","id":1,"result":{}}),
+        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"x"}}),
         json!({"jsonrpc":"2.0","id":{},"method":"ping"}),
         json!({"jsonrpc":"2.0","id":null,"method":"ping"}),
         json!({"jsonrpc":"2.0","method":"notifications/cancelled"}),
