@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Security
+
+- Bump `rmcp` from 3.5.1 to 3.8.0 for
+  [GHSA-4432-vg92-fqh6](https://github.com/advisories/GHSA-4432-vg92-fqh6) (high): the
+  SDK's `StreamableHttpService` cached tool schemas without bound, so a remote client
+  could exhaust memory. `haystack-mcp`'s HTTP transport uses that service on MCP
+  `2026-07-28`, the affected configuration; exposure was already limited by the
+  loopback-only listener and bearer auth ahead of the SDK. Fixed upstream in 3.6.0
+  (rust-sdk#1349). The `rmcp` `auth` feature stays disabled, so the OAuth-client
+  advisory GHSA-5p52 does not apply. Behaviour changes that come with the bump:
+  - A JSON-RPC request ID written in integral float form (`"id":1.0`) is now accepted
+    and answered as the integer `1` on both stdio and HTTP, instead of being rejected
+    as an invalid ID (rust-sdk#1346). Non-integral (`1.5`) and out-of-range numeric IDs
+    are still rejected.
+  - On `2026-07-28` the SDK refuses to send server-to-client requests (rust-sdk#1326),
+    and its stateless HTTP path answers client Response/Error POSTs with 400. Neither
+    changes what `haystack-mcp` does: it never issues server-to-client requests, and
+    its HTTP wrapper already rejects client result/error envelopes with
+    400/`-32600` before the SDK sees them.
+
 ### Added
 
 - `haystack serve --cors-origin <ORIGIN>` (repeatable) and `HaystackServer::with_cors`,
@@ -19,6 +39,31 @@
   zeroed buffer. Behaviour is identical; the old shape tripped a CodeQL
   `hard-coded-cryptographic-value` alert on the salt in `hash_password`, which was a false
   positive — the buffer was overwritten on the next line. (#55)
+
+### Fixed
+
+- The Zinc parser panicked on input with a non-ASCII char where it expected a fixed-width
+  ASCII field — `2024-06-01T00:00:00+0é:00`, for example — because it advanced its byte
+  offset by a fixed count and then sliced the string inside a multi-byte char. The server
+  decodes untrusted request bodies with this parser and has no catch-panic layer, so the
+  panic was reachable from a single request; Trio values, filter literals and the client's
+  history decoder reach the same parser. The UTC offset, the time after `T` and time
+  seconds now check their bytes are ASCII digits before advancing; `\uXXXX` escapes and the
+  date slice with `str::get`, which refuses a range that ends inside a char; `C(lat,lng)`
+  scans by char rather than by byte; `ZincParser::new_at` clamps its starting position to
+  the input and moves it back to a char boundary; and the parser's position accessors fail
+  closed on a misaligned offset. Such input is now a parse error.
+- Some malformed Zinc that used to decode is now an error. Time fields were taken as
+  fixed-width slices without digit checks, and chrono tolerates leading whitespace, so
+  `12:30: 5`, `2024-06-01T 0:00:00Z` and `2024-06-01T00:00:0 Z` — with a space, tab, `\n` or
+  `\r` at any time or UTC-offset digit — parsed; reading one value from `12:30:\t2024-06-01`
+  decoded `Time(12:30:02)` and left the rest unread. An XStr whose `(` is not followed by a
+  quote swallowed one arbitrary character: `Bin( text/plain")` decoded as
+  `Bin("ext/plain")` and `Bin(:text/plain")` as `Bin("text/plain")`. In Trio such a value
+  now falls back to a plain string, `Str("Bin( text/plain\")")`, as other unparseable Trio
+  values do. `"\u+041"` decoded as `"A"` because the hex parse accepted a leading `+`; a
+  `\u` escape now requires four hex digits. `C(lat,lng)` trimmed any Unicode whitespace
+  around its numbers, such as U+00A0; it now trims ASCII whitespace only.
 
 ## 0.9.0
 

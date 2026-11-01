@@ -7,7 +7,7 @@ core, application and CLI builds do not activate MCP. PostgreSQL, Python binding
 and an HTTP listener are unnecessary for this profile. The independent
 [authenticated HTTP profile](mcp-http.md) uses the `http`/CLI `mcp-http` feature.
 
-The adapter uses official `rmcp = 3.5.1`, with default features disabled and only
+The adapter uses official `rmcp = 3.8.0`, with default features disabled and only
 its server support selected in production. It supports exactly MCP `2026-07-28`
 discovery and `2025-11-25` initialization. Client metadata negotiates protocol
 behavior; it cannot select a principal, scope, dataset, path, URL or command.
@@ -112,7 +112,10 @@ set `isError: true` and return the same profile with `ok: false` and
 JSON-RPC errors: malformed JSON uses `-32700`, invalid request envelopes use
 `-32600`, invalid selected-method parameters use `-32602`, and unavailable
 methods use `-32601`. Valid request IDs are echoed; an unidentified error omits
-the ID, as required by both selected MCP schemas. No error includes raw query, entity, file or principal contents.
+the ID, as required by both selected MCP schemas. An integral float-form ID
+(`"id":1.0`) is valid and answered as the integer `1`, as rmcp has read it since
+3.6.0; non-integral (`1.5`), out-of-range, boolean, null, object and array IDs
+remain invalid. No error includes raw query, entity, file or principal contents.
 
 Continue with the same tool, query/IDs, projection and page size plus the returned
 cursor. Every page captures current policy and runs shared cursor validation.
