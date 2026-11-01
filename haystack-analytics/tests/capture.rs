@@ -442,10 +442,12 @@ async fn write_side_limits_fail_closed_without_publishing() {
         ),
     ];
     // `Limits::validate` derives the manifest and footer floors from `parts`
-    // and `groups_per_part`, and the bounded-history codec caps every header
-    // field that grows them, so no validating `Limits` can overrun either
-    // after pulling the source. The values that used to overrun here are
-    // refused up front instead; the writer-side backstops are unit-tested
+    // and `groups_per_part`, and the manifest floor reserves more than the
+    // largest header the bounded-history codec admits (measured by
+    // construction with `worst_case_results`, whose headers publish at the
+    // minimum limits in `src/tests.rs`), so no validating `Limits` can overrun
+    // either after pulling the source. The values that used to overrun here
+    // are refused up front instead; the writer-side backstops are unit-tested
     // with unvalidated limits in `src/tests.rs`.
     for (name, limits) in [
         (
@@ -483,4 +485,73 @@ async fn write_side_limits_fail_closed_without_publishing() {
         assert!(!path.join(MANIFEST_NAME).exists(), "{name}");
         assert!(Dataset::open(&path).is_err(), "{name}");
     }
+}
+/// Extreme but admitted headers export and reopen to exactly the served
+/// header: every worst-case header a real session can carry (the client
+/// refuses non-ASCII and CR/LF ranges), and zeroed graph and history state.
+#[tokio::test]
+async fn extreme_admitted_headers_round_trip() {
+    use haystack_core::codecs::{Codec, zinc::ZincCodec};
+    let _permit = TEST_ADMISSION.acquire().await.unwrap();
+    let mut cases: Vec<_> = worst_case_results(4)
+        .into_iter()
+        .filter(|value| {
+            let range = &value.metadata.requested_range;
+            range.is_ascii() && !range.contains(['\r', '\n'])
+        })
+        .collect();
+    // Tab, VT, FF and space.
+    assert_eq!(cases.len(), 4);
+    let mut zero = result(4, 0);
+    zero.metadata.graph.incarnation = [0; 16];
+    zero.metadata.graph.revision = 0;
+    zero.metadata.graph.catalog_generation = 0;
+    zero.metadata.history.generation = 0;
+    zero.metadata.policy_observation = [0xff; 16];
+    cases.push(zero);
+    let text = |header: &HistoryReadHeader| {
+        ZincCodec
+            .encode_grid(&result_header_grid(header).unwrap())
+            .unwrap()
+    };
+    for value in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture");
+        let receipt = capture(&value, &path).await;
+        let served = header(&value);
+        assert_eq!(receipt.manifest.source_header, text(&served));
+        let mut reader = Dataset::open(&path).unwrap();
+        // `HDateTime ==` compares instants only; the text pins zones and offsets.
+        assert_eq!(reader.header(), &served);
+        assert_eq!(text(reader.header()), text(&served));
+        let mut rows = vec![];
+        while let Some(batch) = reader.next_batch().unwrap() {
+            rows.extend(batch);
+        }
+        assert!(reader.semantically_complete());
+        assert_same_samples(&rows, &value.samples);
+    }
+}
+/// The client admits a non-ASCII point id, but the recorded header profile is
+/// ASCII outside quoted strings (Haystack Ref ids are ASCII), so the reader
+/// would refuse the dataset. The export fails before creating the directory.
+#[tokio::test]
+async fn header_the_reader_would_refuse_fails_before_publishing() {
+    let _permit = TEST_ADMISSION.acquire().await.unwrap();
+    let mut value = result(2, 0);
+    value.metadata.id = "\u{e9}".into();
+    let server = Server::bytes(encoded(&value), vec![8192], "").await;
+    let session = client(&server.url)
+        .await
+        .his_read_stream(&request_for(&value), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(session.header(), &header(&value));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capture");
+    assert_eq!(
+        Export::start(session, &path, ExportOptions::default()).err(),
+        Some(haystack_analytics::Error::Invalid)
+    );
+    assert!(!path.exists());
 }

@@ -17,6 +17,9 @@ no Parquet compression codec is compiled in. The pin follows the Arrow family
 of the pinned DataFusion release. The capture format does not depend on
 DataFusion; the optional `sql` feature adds bounded read-only SQL over sealed,
 fully validated captures (see [SQL over committed snapshots](sql-snapshots.md)).
+The reader's typed Compact Thrift preflight (the `Wire` shapes in `reader.rs`)
+mirrors parquet 59.3.2's decode-by-field-id behaviour, so any arrow/parquet
+bump must re-audit those shapes against the new decoder.
 
 A dataset is published only when the remote read ends `Remote(Complete)` and
 every sample has passed the same cumulative validator the client uses. A
@@ -149,7 +152,13 @@ rows. It retains every remote metadata field the client validated: point id,
 schema kind/unit/timezone, requested and evaluated range, graph, catalog and
 policy observations, history authority/incarnation/generation, capabilities,
 retained coverage, returned count and the `Complete` terminal. Counters larger
-than 2^53 are carried as decimal strings and survive reopen exactly. No URL,
+than 2^53 are carried as decimal strings and survive reopen exactly. An export
+records only a header the reader reopens exactly: `Export::start` re-decodes
+the encoded header and refuses any other with `Error::Invalid`, before the
+directory is created or any row is pulled. In practice that refuses a
+non-ASCII point id, which the client admits but the recorded profile does not
+(it is ASCII outside quoted strings; Haystack Ref ids are ASCII by
+specification). No URL,
 credential or remote error text is stored, and `Error` diagnostics never include
 them.
 
@@ -161,7 +170,7 @@ are deliberately not restated here.
 | Bound | Where |
 |---|---|
 | Per-export `Limits` (rows and conservative bytes per Arrow batch, decoded field bytes, row groups per part, bytes per part and in total, part count, manifest and footer bytes) | `Limits::default()` and `MAX_GROUPS_PER_PART` in `haystack-analytics/src/format.rs`; `Limits::validate` rejects any option above those defaults or below `MIN_BATCH_BYTES`, `min_part_bytes`, `min_manifest_bytes(parts)` and `min_footer_bytes(groups_per_part)` |
-| Derived floors, so any validating `Limits` publishes at least an empty and a one-row capture: a part holds the writer reserve of a `batch_bytes` batch plus fixed Arrow overhead, a footer holds a full part's row groups, a manifest holds `parts` entries and the largest header the bounded-history codec admits (checked by `validate` before any network read; for multi-row batches necessary, not sufficient) | `ARROW_BATCH_BYTES`, `FOOTER_BASE_BYTES`, `FOOTER_GROUP_BYTES`, `MANIFEST_BASE_BYTES`, `MANIFEST_HEADER_BYTES`, `MANIFEST_PART_BYTES` and `writer_reserve` in `format.rs` |
+| Derived floors, so any validating `Limits` publishes at least an empty and a one-row capture: a part holds the writer reserve of a `batch_bytes` batch plus fixed Arrow overhead, a footer holds a full part's row groups, a manifest holds `parts` entries and more than the largest header the bounded-history codec admits, measured by construction (a 1,024-byte range padded with the trimmed whitespace that escapes widest, the 256-byte id, the longest unit and zone, counters and bounds at their caps) and checked by `validate` before any network read; for multi-row batches necessary, not sufficient | `ARROW_BATCH_BYTES`, `FOOTER_BASE_BYTES`, `FOOTER_GROUP_BYTES`, `MANIFEST_BASE_BYTES`, `MANIFEST_HEADER_BYTES`, `MANIFEST_PART_BYTES` and `writer_reserve` in `format.rs` |
 | Concurrent exports per process, with no wait queue | `MAX_CONCURRENT_EXPORTS` in `haystack-analytics/src/export.rs` |
 | Default absolute export timeout | `DEFAULT_EXPORT_TIMEOUT` in `export.rs` |
 | Largest admitted source batch (an overlap check on top of the client's own limits) | the shared `bounded-history-v1` ceilings `MAX_GRID_BYTES` and `MAX_ROWS` in `haystack-core/src/codecs/history.rs`, applied in `run` in `export.rs` |
@@ -340,8 +349,11 @@ and part splitting that round-trips, `total_bytes`/`parts` overruns that
 publish nothing, `manifest_bytes`/`footer_bytes` below their derived floors
 refused before any read (with the writer's publish-time backstops
 unit-tested under unvalidated limits), minimum-valid limits that publish
-empty and one-row captures, the largest admitted header within the floors,
-non-canonical headers, symlink and FIFO opens, oversize manifests and row
+empty and one-row captures (including the worst-case headers below), the
+largest admitted header built by construction for every padding character
+`str::trim` accepts and published within the floors, extreme admitted headers
+that export and reopen exactly, a non-ASCII point id refused before the
+directory is created, non-canonical headers, symlink and FIFO opens, oversize manifests and row
 totals, a part swapped for a hash-different, same-length, structurally valid
 one after `open` (rejected at read), owner-only modes on Unix, and — on Unix
 only — a child process killed with SIGKILL just before and just after the

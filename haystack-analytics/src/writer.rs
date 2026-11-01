@@ -104,6 +104,7 @@ impl Writer {
         id: String,
         checkpoints: Checkpoints,
     ) -> Result<Self> {
+        let source_header = recordable_header(header)?;
         create_private_dir(&dir)?;
         sync_directory(
             dir.parent()
@@ -118,7 +119,7 @@ impl Writer {
                 schema_version: 1,
                 export_id: id,
                 consistency: "completedGenerationCheckedLiveCapture".into(),
-                source_header: encode_header(header)?,
+                source_header,
                 limits,
                 rows: 0,
                 parts: vec![],

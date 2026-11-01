@@ -66,7 +66,10 @@ pub struct Export {
 impl Export {
     /// Immediate bounded admission ([`MAX_CONCURRENT_EXPORTS`], no waiting
     /// queue). The destination must not exist. Called outside a Tokio
-    /// runtime it returns `Error::Runtime` (and drops `source`).
+    /// runtime it returns `Error::Runtime` (and drops `source`). A source
+    /// header the dataset could not reopen exactly (a non-ASCII point id)
+    /// returns `Error::Invalid` before the directory is created or any row is
+    /// pulled.
     pub fn start(
         source: HttpHistorySession,
         directory: impl Into<PathBuf>,
@@ -74,6 +77,9 @@ impl Export {
     ) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| Error::Runtime)?;
         options.limits.validate()?;
+        // Before admission, any pull or the directory: a header the reader
+        // would refuse must not publish.
+        format::recordable_header(source.header())?;
         let deadline = Instant::now()
             .checked_add(options.timeout)
             .ok_or(Error::Options)?;

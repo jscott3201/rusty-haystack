@@ -209,15 +209,15 @@ impl Backend {
         stop: &Stop,
         operation: impl FnOnce(&Connection) -> Result<T, SqliteError>,
     ) -> Result<T, SqliteError> {
-        let database = loop {
+        let mut database = loop {
             stop.check()?;
             self.check()?;
             if let Some(database) = self.database.try_lock_for(QUANTUM) {
                 break database;
             }
         };
-        let connection = &database
-            .as_ref()
+        let connection = &mut database
+            .as_mut()
             .ok_or(SqliteError::Unavailable)?
             .connection;
         let progress = stop.clone();
@@ -225,7 +225,7 @@ impl Backend {
             .progress_handler(1000, Some(move || progress.check().is_err()))
             .map_err(sql_error)?;
         let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(connection)));
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&*connection)));
         // No detached interrupt can reach a later command. The callback belongs
         // to this exclusive connection scope and is removed before it is released.
         if connection
@@ -328,7 +328,10 @@ impl Backend {
         let Some(database) = selected.take() else {
             return Ok(());
         };
-        let Database { connection, owner } = database;
+        let Database {
+            mut connection,
+            owner,
+        } = database;
         let _ = connection.progress_handler(0, None::<fn() -> bool>);
         if !connection.is_autocommit() && connection.execute_batch("ROLLBACK").is_err() {
             *selected = Some(Database { connection, owner });
@@ -415,7 +418,7 @@ pub(crate) fn verify_durability(connection: &Connection) -> Result<(), SqliteErr
     let mode: String = connection
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .map_err(|_| SqliteError::Durability)?;
-    if rusqlite::version_number() < 3_053_002
+    if rusqlite::version_number() < 3_054_001
         || mode != "wal"
         || integer("synchronous")? != 2
         || integer("foreign_keys")? != 1
