@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.1
+
+0.10.1 is the first release of this line on crates.io and GitHub. The `v0.10.0` tag
+published the Python package to PyPI, but the crates and the CLI archives were not
+released: the aarch64 Linux archive build failed, so that run stopped before publishing.
+The library, CLI and Python sources are the same as 0.10.0; see the 0.10.0 notes below
+for what the release contains.
+
+### Fixed
+
+- The release workflow passed its cross-build matrix flag as `CROSS_BUILD`, which the
+  archive builder rejects as an unrecorded `CROSS_*` build override, so the aarch64 Linux
+  CLI archive could not be built. The flag is renamed.
+
+### Changed
+
+- `release.yml` builds and qualifies the CLI archives on pull requests that touch the
+  workflow or the release helpers, and on manual dispatch. Publication stays tag-only.
+
 ## 0.10.0
 
 0.10.0 adds an application layer, `rusty-haystack-app`, that owns authorization, resource

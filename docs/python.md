@@ -681,5 +681,5 @@ Note: Python `datetime.datetime` is not supported directly. Use `HDateTime` inst
 ## Version
 
 ```python
-rh.__version__  # -> "0.10.0"
+rh.__version__  # -> "0.10.1"
 ```
