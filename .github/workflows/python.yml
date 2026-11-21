@@ -161,6 +161,8 @@ jobs:
           # before pytest: macOS retains actual tool binaries in PATH, whereas
           # the fixture's default cargo +toolchain command needs rustup proxies.
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          export RUSTC="$(rustup which --toolchain 1.99.1 rustc)"
+          export RUSTDOC="$(rustup which --toolchain 1.99.1 rustdoc)"
           "$(rustup which --toolchain 1.99.1 cargo)" build --locked -p rusty-haystack-server --example python_watch_fixture
           export HAYSTACK_WATCH_FIXTURE="$CARGO_TARGET_DIR/debug/examples/python_watch_fixture"
           uv venv --python "$(command -v python)" "$RUNNER_TEMP/cp314-wheel-test"

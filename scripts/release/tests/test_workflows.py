@@ -114,6 +114,8 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn("matrix.python.tag == 'cp314'", smoke)
         self.assertIn('runner.arch', smoke)
         self.assertIn('rustup which --toolchain 1.99.1 cargo', smoke)
+        self.assertIn('export RUSTC="$(rustup which --toolchain 1.99.1 rustc)"', smoke)
+        self.assertIn('export RUSTDOC="$(rustup which --toolchain 1.99.1 rustdoc)"', smoke)
         self.assertIn('build --locked -p rusty-haystack-server --example python_watch_fixture', smoke)
         self.assertIn('export HAYSTACK_WATCH_FIXTURE=', smoke)
         self.assertIn('target/release-candidate/files/*.whl pytest', smoke)
