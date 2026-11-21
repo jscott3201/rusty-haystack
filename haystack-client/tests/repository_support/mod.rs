@@ -150,12 +150,17 @@ impl Server {
     }
     pub fn tls(replies: Vec<Reply>) -> (Self, Vec<u8>) {
         use rcgen::{
-            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-            KeyUsagePurpose,
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+            KeyPair, KeyUsagePurpose,
         };
         haystack_client::ensure_crypto_provider();
         let now = time::OffsetDateTime::now_utc();
         let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+        // rcgen gives every certificate the same default subject. With the leaf's
+        // subject equal to its issuer, Windows chain building treats the leaf as
+        // self-signed and rejects it, so name the two certificates apart.
+        ca.distinguished_name
+            .push(DnType::CommonName, "repository fixture CA");
         ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         ca.not_before = now - time::Duration::days(1);
@@ -164,6 +169,9 @@ impl Server {
         let ca_pem = ca.self_signed(&ca_key).unwrap().pem().into_bytes();
         let issuer = Issuer::new(ca, ca_key);
         let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "repository fixture server");
         params.not_before = now - time::Duration::days(1);
         params.not_after = now + time::Duration::days(7);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];

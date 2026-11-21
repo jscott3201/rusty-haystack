@@ -82,7 +82,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
-      - run: cargo +1.99.1 test --locked --workspace --exclude rusty-haystack
+      # macOS and Windows run only for main, so report every failing test binary
+      # in one run instead of stopping at the first.
+      - run: cargo +1.99.1 test --locked --workspace --exclude rusty-haystack --no-fail-fast
       - run: cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz
       - name: Test the selected MCP pipe adapter
         if: runner.os != 'Windows'
