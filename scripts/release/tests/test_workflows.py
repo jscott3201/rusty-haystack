@@ -169,6 +169,30 @@ class WorkflowContracts(unittest.TestCase):
             self.assertLessEqual(internal,set(published[:index]),crate)
         self.assertEqual(set(published),{name for name,text in manifests.items() if name!='rusty-haystack' and 'publish = false' not in text})
 
+    def test_build_jobs_set_no_environment_the_builder_rejects(self):
+        # artifacts.build_inputs refuses any non-empty variable with these prefixes.
+        # release.yml once named a matrix flag CROSS_BUILD, which failed the
+        # aarch64 Linux archive on the first tag that reached it.
+        for file,job_name in (('release.yml','build-binaries'),('python.yml','build-wheels'),('python.yml','build-sdist')):
+            job=jobs(self.workflows[file])[job_name]
+            names=re.findall(r'(?m)^ {10}([A-Z][A-Z0-9_]*): ',job)
+            self.assertTrue(names,(file,job_name))
+            for name in names:
+                self.assertFalse(name.startswith(('RUSTC','RUSTDOC','MATURIN_','CROSS_')) or name in {'RUSTFLAGS','RUST_TARGET_PATH'},(file,job_name,name))
+
+    def test_release_rehearsal_triggers_cannot_publish(self):
+        workflow=self.workflows['release.yml']
+        self.assertIn('  pull_request:',workflow)
+        self.assertIn('  workflow_dispatch:',workflow)
+        release=jobs(workflow)
+        guard="if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+        for name,job in release.items():
+            touches_publication=any(marker in job for marker in ('secrets.','environment:','contents: write','cargo publish','action-gh-release'))
+            self.assertEqual(touches_publication,name in ('publish-crates','github-release'),name)
+            if touches_publication:
+                self.assertIn(guard,job)
+        self.assertIn("if: startsWith(github.ref, 'refs/tags/v')\n        run: python scripts/release/artifacts.py version --repo \"$GITHUB_WORKSPACE\" --tag \"$GITHUB_REF_NAME\"",release['validate'])
+
     def test_github_release_waits_for_crates_publication(self):
         release=jobs(self.workflows['release.yml'])
         self.assertEqual(self.needs(release['github-release']),{'validate','qualify-binaries','publish-crates'})
