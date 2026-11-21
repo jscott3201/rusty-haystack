@@ -473,6 +473,13 @@ fn mismatched_lifecycle_attachment_is_rejected_in_both_configuration_orders() {
     }
 }
 
+// Winsock accepts one send larger than the send buffer in full when nothing is
+// queued, so a small peer receive window does not stall Hyper's flush there and
+// the blocked-response precondition below cannot be established this way.
+#[cfg_attr(
+    windows,
+    ignore = "a small peer receive window does not stall a single large send on Windows"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_export_peer_does_not_hold_owned_connections_or_provider_open() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
