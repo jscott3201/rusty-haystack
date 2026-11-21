@@ -311,6 +311,9 @@ what each one is and is not qualified for.
   values do. `"\u+041"` decoded as `"A"` because the hex parse accepted a leading `+`; a
   `\u` escape now requires four hex digits. `C(lat,lng)` trimmed any Unicode whitespace
   around its numbers, such as U+00A0; it now trims ASCII whitespace only.
+- The `Dockerfile` copied neither `haystack-mcp/` nor `haystack-analytics/`, so Cargo could
+  not load the workspace and the image did not build. It copies both now; neither is
+  compiled into the image.
 
 ## 0.9.0
 

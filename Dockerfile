@@ -10,6 +10,10 @@ COPY haystack-app/ haystack-app/
 COPY haystack-server/ haystack-server/
 COPY haystack-client/ haystack-client/
 COPY haystack-cli/ haystack-cli/
+# haystack-mcp is an optional CLI dependency and haystack-analytics is a
+# workspace member; neither is compiled here, but Cargo needs both to resolve.
+COPY haystack-mcp/ haystack-mcp/
+COPY haystack-analytics/ haystack-analytics/
 
 # Cargo resolves every workspace member even when building only the CLI. Keep
 # the real manifests and package identities so --locked uses the same graph.

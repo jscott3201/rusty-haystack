@@ -143,7 +143,9 @@ class WorkflowContracts(unittest.TestCase):
         for step in commands:
             self.assertRegex(step,r'run: cargo publish --locked -p [a-z-]+\n')
             self.assertIn('CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}',step)
-        self.assertIn('COPY haystack-app/ haystack-app/',(ROOT/'Dockerfile').read_text())
+        dockerfile=(ROOT/'Dockerfile').read_text()
+        for member in ('haystack-app','haystack-mcp','haystack-analytics'):
+            self.assertIn(f'COPY {member}/ {member}/',dockerfile)
 
     def test_crate_publication_order_is_topological(self):
         # cargo resolves every dependency carrying a version, optional or dev, from
