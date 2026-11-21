@@ -24,9 +24,15 @@
 //! used by multiple codec implementations.
 
 pub mod csv;
+pub mod entity;
+pub mod history;
+pub mod history_mutation;
+pub mod jeto;
 pub mod json;
 pub mod shared;
+pub mod subscription;
 pub mod trio;
+pub mod typed;
 pub mod zinc;
 
 use crate::data::{HCol, HDict, HGrid};
@@ -41,6 +47,8 @@ pub enum CodecError {
     Encode(String),
     #[error("unsupported kind for this codec")]
     UnsupportedKind,
+    #[error("typed value requires explicit H4 projection at {path:?}")]
+    Unprojected { path: crate::kinds::ValuePath },
 }
 
 /// Trait for Haystack wire format codecs.
@@ -70,7 +78,11 @@ pub trait Codec: Send + Sync {
     /// Encode a single grid row given the column definitions.
     ///
     /// Default implementation returns an empty vec (header contained everything).
-    fn encode_grid_row(&self, _cols: &[HCol], _row: &HDict) -> Result<Vec<u8>, CodecError> {
+    fn encode_grid_row(&self, cols: &[HCol], row: &HDict) -> Result<Vec<u8>, CodecError> {
+        crate::kinds::projection::ensure_h4_dict(row)?;
+        for col in cols {
+            crate::kinds::projection::ensure_h4_dict(&col.meta)?;
+        }
         Ok(Vec::new())
     }
 }

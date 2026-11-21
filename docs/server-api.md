@@ -1,5 +1,17 @@
 # Server API Reference
 
+This page describes the legacy compatibility profile. Embedders selecting
+`HaystackServer::with_scoped_reads` use the restricted operation set, policy,
+paging, and budget contracts documented in [shared reads](shared-reads.md).
+Both profiles can attach owned listeners to the [application lifecycle](application-lifecycle.md).
+`HaystackServer::start()` provides a legacy convenience owner; await `ready()`
+for the bound address and `close()`/`terminated()` for shutdown completion.
+Explicit application embeddings select a [shared subscription owner](state-subscriptions.md#application-selection)
+to enable watch and WebSocket operations in either profile.
+`POST /api/close` continues to log out the bearer session and does not stop the
+application. New requests after application sealing return 503 when they reach
+an existing router; the owned listener stops accepting connections.
+
 The Haystack server (built on Axum) exposes all endpoints under `/api`. All POST endpoints accept and return grids in the negotiated wire format.
 
 ## Content Negotiation
@@ -153,7 +165,7 @@ Subscribe to entity changes.
 
 **Response**: grid with current state of watched entities. Grid meta contains `watchId` (Str).
 
-Watches are automatically cleaned up when a WebSocket connection disconnects.
+A legacy WebSocket disconnect removes only watches created by that connection. Watches created through HTTP or another connection retain their own lifetimes.
 
 #### POST `/api/watchPoll`
 
@@ -237,7 +249,9 @@ Validate entities against the ontology.
 
 #### POST `/api/close`
 
-Revokes the current bearer token (logout). Requires read permission.
+Revokes the current bearer token and cancels its shared noncredential session
+(logout). Open scoped subscription sockets observe cancellation directly. Requires
+read permission.
 
 ## WebSocket
 
@@ -245,87 +259,93 @@ Revokes the current bearer token (logout). Requires read permission.
 
 `GET /api/ws` -- upgrades to WebSocket connection. Requires a valid bearer token if auth is enabled.
 
-### Message Format
+### Scoped state subscriptions
 
-Request:
+Applications selecting `StateSubscriptionService` expose a versioned scoped
+HTTP/WebSocket profile with resumable leases, caller-known creation keys and
+explicit acknowledgements. It shares the application owner with native callers;
+see [Shared state subscriptions](state-subscriptions.md) for selection, session
+ownership, limits, recovery, framing and client attachment. Scoped applications
+require the negotiated `haystack.state-subscription.v1` WebSocket protocol.
+
+### Legacy Message Format
+
+The compatibility profile below uses the same application owner with weaker
+automatic acknowledgement and connection-specific cleanup. Application limits
+apply in addition to this frame grammar. Legacy watches expire at the configured
+maximum lease and require a new subscription afterward.
+
+Messages are uncompressed JSON text. Individual frames and complete reassembled
+messages are each capped at 1 MiB. Binary application messages and compression
+are unsupported; malformed envelopes close the connection. A nonempty string
+`reqId` of at most 128 bytes is required on every request and echoed on responses.
+
 ```json
-{
-  "op": "watchSub",
-  "reqId": "1",
-  "watchDis": "My Watch",
-  "ids": ["@site-1", "@equip-1"]
-}
+{"op":"watchSub","reqId":"1","ids":["@site-1","@equip-1"]}
 ```
 
-Response:
 ```json
-{
-  "reqId": "1",
-  "watchId": "abc-123",
-  "rows": [
-    {"id": "r:site-1", "dis": "s:Demo Site", "site": "m:"}
-  ]
-}
+{"reqId":"1","watchId":"abc-123","rows":[{"id":"r:site-1","dis":"s:Demo Site","site":"m:"}]}
 ```
 
-Supported operations: `watchSub`, `watchPoll`, `watchUnsub`.
+Rows contain Haystack JSON v3 typed values. Supported operations and arguments:
 
-Fields:
-- `op` (required): operation name
-- `reqId` (optional): request ID echoed in response
-- `watchDis` (optional): display name for new watch
-- `watchId` (optional): existing watch ID
-- `ids` (optional): array of entity ref strings (`@` prefix stripped automatically)
+| Operation | Arguments | Successful response |
+| --- | --- | --- |
+| `watchSub` | `ids`: 1–1,000 entity refs; no `watchId` | New `watchId` and current rows |
+| `watchPoll` | Nonempty `watchId`; no `ids` | Same `watchId` and changed rows |
+| `watchUnsub` | Nonempty `watchId`; optional `ids` | Empty rows; same `watchId` when removing selected IDs, omitted when removing the entire watch |
 
-Error responses include an `error` field with the message.
+Each entity ref is nonempty after stripping one optional leading `@` and at most
+1,024 bytes. Watch IDs are at most 128 bytes. Empty or absent `ids` for
+`watchUnsub` removes the entire watch. A nonempty list removes only those IDs,
+leaving an empty watch alive when all IDs have been removed. Leases, `watchDis`,
+and adding IDs to an existing watch are outside this WebSocket profile.
 
-Watches associated with a WebSocket connection are automatically cleaned up when the connection disconnects.
+An unsupported operation or invalid operation arguments receive a correlated
+error, for example `{"reqId":"1","error":"unsupported watch arguments"}`.
+Missing/invalid request IDs, unexpected fields, invalid JSON, and incompatible
+message types terminate the connection instead of creating an uncorrelated reply.
+
+Unsolicited notifications are separate from responses:
+
+```json
+{"type":"push","watchId":"abc-123","rows":[{"id":"r:site-1","dis":"s:Updated Site"}]}
+```
+
+The connection queue holds eight commands. Queue overflow, oversized output, and writer
+failure close the connection rather than silently losing a response or push.
+The socket owns its writer task and joins or aborts it on shutdown. The server
+sends a ping every 30 seconds and closes after a separate 10-second pong deadline.
+Clients must re-establish their watches after loss of a connection.
+
+Legacy watch access uses coarse principal ownership. Pushes and disconnect cleanup
+are specific to the connection that created the watch; disconnecting one socket
+preserves other connections' and HTTP-created watches for the same username.
+Scoped subscriptions instead require the exact validated session identity and
+remain attached to the application across transport disconnects.
 
 ## SCRAM Authentication
 
-The server implements SCRAM SHA-256 via the `/api/about` endpoint.
+The server implements the [published Haystack SCRAM SHA-256 exchange](https://project-haystack.org/doc/docHaystack/Auth) through three GETs to `/api/about`. Outer username/data fields use unpadded base64url; inner salt, proof, and verifier use standard padded Base64. Stored password hash encodings remain unchanged.
 
-### Phase 1: HELLO
+1. Send `Authorization: HELLO username=<base64url(username)>`. The 401 response contains `WWW-Authenticate: SCRAM hash=SHA-256, handshakeToken=<first-token>` and no data.
+2. Send `Authorization: SCRAM handshakeToken=<first-token>, data=<client-first>`. The client-first decoded username must match HELLO. The 401 response contains `WWW-Authenticate: SCRAM hash=SHA-256, handshakeToken=<next-token>, data=<server-first>`.
+3. Send `Authorization: SCRAM handshakeToken=<next-token>, data=<client-final>`. Successful proof verification and registered-user admission return 200 with `Authentication-Info: authToken=<bearer>, hash=SHA-256, data=<server-final>`. The client must verify the server signature before using the bearer.
 
-```
-GET /api/about
-Authorization: HELLO username=<base64(username)>
-```
+The server always issues a handshake token, rotates it after client-first, and requires the most recently issued value. Each token is consumed once; concurrent or replayed final proofs cannot issue another bearer. Subsequent requests use `Authorization: BEARER authToken=<bearer>`.
 
-Response: `401 Unauthorized`
-```
-WWW-Authenticate: SCRAM handshakeToken=<token> hash=SHA-256 data=<server_first_b64>
-```
-
-### Phase 2: SCRAM
-
-```
-GET /api/about
-Authorization: SCRAM handshakeToken=<token> data=<client_final_b64>
-```
-
-Response: `200 OK`
-```
-Authentication-Info: authToken=<token> data=<server_final_b64>
-```
-
-The client should verify the server signature from `data` to prevent MITM attacks.
-
-### Phase 3: Subsequent Requests
-
-```
-POST /api/read
-Authorization: BEARER authToken=<token>
-```
+Malformed authentication, wrong-stage messages, expired handshakes, wrong identities and invalid credentials return 403 without echoing submitted fields. Missing authentication prompts with 401. Invalid or expired bearer tokens return 401. Admission capacity exhaustion returns 503.
 
 ### Security Details
 
-- PBKDF2 with 100,000 iterations
-- Constant-time credential comparison (prevents timing attacks)
-- Fake SCRAM challenge for unknown users (prevents username enumeration)
-- Handshake timeout: 60 seconds
-- Token lifetime: 3,600 seconds (configurable)
-- Periodic auth token cleanup
+- New stored credentials use PBKDF2-HMAC-SHA-256 with 100,000 iterations; loaded credentials require valid key lengths, nonempty bounded salt, and 1–1,000,000 iterations.
+- Proofs and server signatures use constant-time equality. Username normalization is not introduced.
+- Unknown usernames receive secret-derived plausible challenges without a password derivation on the request thread. Even a correct decoy proof cannot issue a bearer. This reduces straightforward enumeration; it does not claim complete timing or identity-provider qualification.
+- Default capacity is 1,024 in-flight handshakes and 4,096 active bearer tokens, configurable with `AuthLimits`. Admission, cleanup, and transitions share one lock.
+- The 60-second handshake lifetime starts at HELLO and is preserved through rotation. Bearers expire after 3,600 seconds by default, configurable with `with_token_ttl`.
+- Every auth-state operation sweeps expired entries before admission or lookup, including when abandoned clients never return. State stays bounded even without a background timer. These controls do not replace deployment rate limits.
+- Auth headers are limited to 8 KiB, decoded data to 4 KiB, usernames and combined nonces to 1 KiB. Malformed encodings, duplicate fields, nonce mismatches, and incorrect proof lengths are rejected.
 
 ## Permission Model
 

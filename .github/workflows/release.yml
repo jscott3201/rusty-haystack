@@ -9,113 +9,192 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate:
     name: Validate Release
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Extract version from tag
-        id: version
-        run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
-            exit 1
-          fi
-          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude rusty-haystack
+      - name: Check parsed package version against tag
+        run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE" --tag "$GITHUB_REF_NAME"
+      - run: cargo test --locked --workspace --exclude rusty-haystack
 
   build-binaries:
     name: Build (${{ matrix.target }})
     needs: validate
     runs-on: ${{ matrix.runner }}
+    outputs:
+      cli_linux_x86_64: ${{ steps.identity.outputs.cli_linux_x86_64 }}
+      cli_linux_aarch64: ${{ steps.identity.outputs.cli_linux_aarch64 }}
+      cli_macos_x86_64: ${{ steps.identity.outputs.cli_macos_x86_64 }}
+      cli_macos_aarch64: ${{ steps.identity.outputs.cli_macos_aarch64 }}
+      cli_windows_x86_64: ${{ steps.identity.outputs.cli_windows_x86_64 }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            output: cli_linux_x86_64
             runner: ubuntu-latest
-            archive: tar.gz
           - target: aarch64-unknown-linux-gnu
+            output: cli_linux_aarch64
             runner: ubuntu-latest
-            archive: tar.gz
             cross: true
           - target: x86_64-apple-darwin
+            output: cli_macos_x86_64
             runner: macos-latest
-            archive: tar.gz
           - target: aarch64-apple-darwin
+            output: cli_macos_aarch64
             runner: macos-latest
-            archive: tar.gz
           - target: x86_64-pc-windows-msvc
+            output: cli_windows_x86_64
             runner: windows-latest
-            archive: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-
-      - name: Install cross
+      - name: Install pinned cross builder
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build binary
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p rusty-haystack-cli
-          else
-            cargo build --release --target ${{ matrix.target }} -p rusty-haystack-cli
+          cargo install cross --version 0.2.5 --locked
+          docker pull ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
+      - name: Build and seal one archive
+        shell: bash
+        env:
+          SOURCE: ${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+          CROSS_BUILD: ${{ matrix.cross }}
+        run: |
+          extra=()
+          if [ "$CROSS_BUILD" = "true" ]; then
+            extra=(--cross-image ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5)
           fi
-        shell: bash
-
-      - name: Package (unix)
-        if: matrix.archive == 'tar.gz'
-        run: |
-          ARCHIVE="haystack-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz"
-          tar czf "$ARCHIVE" -C target/${{ matrix.target }}/release haystack -C ${{ github.workspace }} LICENSE
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-
-      - name: Package (windows)
-        if: matrix.archive == 'zip'
-        shell: bash
-        run: |
-          ARCHIVE="haystack-${{ needs.validate.outputs.version }}-${{ matrix.target }}.zip"
-          7z a "$ARCHIVE" ./target/${{ matrix.target }}/release/haystack.exe ./LICENSE
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-
-      - uses: actions/upload-artifact@v4
+          python scripts/release/build.py cli --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work" "${extra[@]}"
+      - uses: actions/upload-artifact@v7
+        id: candidate
         with:
-          name: binary-${{ matrix.target }}
-          path: ${{ env.ARCHIVE }}
+          name: candidate-cli-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+      - name: Retain producer identity and artifact service digest
+        id: identity
+        shell: bash
+        env:
+          OUTPUT_KEY: ${{ matrix.output }}
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
+        run: |
+          test -n "$ARTIFACT_ID"
+          echo "$OUTPUT_KEY=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          printf 'Artifact service ID: %s\nService SHA-256 (distinct from package digest): %s\n' "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: cli-build-logs-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build-work/*.log
+          if-no-files-found: warn
+
+  qualify-binaries:
+    name: Qualify downloaded binaries
+    needs: build-binaries
+    outputs:
+      packages: ${{ steps.qualified.outputs.artifact-id }}
+      proof: ${{ steps.proof.outputs.artifact-id }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@v2
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile binaries --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}
+          path: ${{ runner.temp }}/download
+      - name: Qualify downloaded candidates and stage identical bytes
+        env:
+          SOURCE: ${{ github.sha }}
+        run: |
+          python scripts/release/qualify.py --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile binaries --python "$(command -v python)" --work "$RUNNER_TEMP/consumer-work" --evidence "$RUNNER_TEMP/evidence"
+          python scripts/release/artifacts.py stage --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/download" --source "$SOURCE" --profile binaries --evidence "$RUNNER_TEMP/evidence" --output "$RUNNER_TEMP/publication" > "$RUNNER_TEMP/stage.json"
+          python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile binaries --receipt "$RUNNER_TEMP/stage.json"
+      - uses: actions/upload-artifact@v7
+        id: qualified
+        with:
+          name: qualified-binaries-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        id: proof
+        if: always()
+        with:
+          name: binaries-proof-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/download-ids.json
+            ${{ runner.temp }}/stage.json
+            ${{ runner.temp }}/evidence
+            ${{ runner.temp }}/download/*/receipts
+            ${{ runner.temp }}/consumer-work/**/*.log
+          if-no-files-found: error
 
   publish-crates:
     name: Publish to crates.io
-    needs: validate
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [validate, qualify-binaries]
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
 
+      # A re-run after a partial failure must not stop at the first crate that
+      # already exists. Only a definite 200 skips; any other answer publishes.
+      - name: Find crates already published at this version
+        id: published
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          for crate in core client app mcp analytics server cli; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -A 'release-workflow' "https://crates.io/api/v1/crates/rusty-haystack-$crate/$version" || true)"
+            if [ "$code" = "200" ]; then
+              echo "rusty-haystack-$crate $version is already on crates.io; skipping"
+              echo "$crate=true" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      # Crates are separately packaged from source, not the qualified CLI archive.
       - name: Publish rusty-haystack-core
-        run: cargo publish -p rusty-haystack-core
+        if: steps.published.outputs.core != 'true'
+        run: cargo publish --locked -p rusty-haystack-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -123,7 +202,35 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-client
-        run: cargo publish -p rusty-haystack-client
+        if: steps.published.outputs.client != 'true'
+        run: cargo publish --locked -p rusty-haystack-client
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for index
+        run: sleep 30
+
+      - name: Publish rusty-haystack-app
+        if: steps.published.outputs.app != 'true'
+        run: cargo publish --locked -p rusty-haystack-app
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for index
+        run: sleep 30
+
+      - name: Publish rusty-haystack-mcp
+        if: steps.published.outputs.mcp != 'true'
+        run: cargo publish --locked -p rusty-haystack-mcp
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for index
+        run: sleep 30
+
+      - name: Publish rusty-haystack-analytics
+        if: steps.published.outputs.analytics != 'true'
+        run: cargo publish --locked -p rusty-haystack-analytics
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -131,7 +238,8 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-server
-        run: cargo publish -p rusty-haystack-server
+        if: steps.published.outputs.server != 'true'
+        run: cargo publish --locked -p rusty-haystack-server
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -139,26 +247,47 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-cli
-        run: cargo publish -p rusty-haystack-cli
+        if: steps.published.outputs.cli != 'true'
+        run: cargo publish --locked -p rusty-haystack-cli
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   github-release:
     name: GitHub Release
-    needs: [validate, build-binaries]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [validate, qualify-binaries, publish-crates]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
+      - name: Bind downloads to successful producer artifact IDs
+        id: inventory
+        env:
+          PRODUCERS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/release/artifacts.py download-ids --profile publish-binaries --needs-json "$PRODUCERS_JSON" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/download-ids.json"
       - uses: actions/download-artifact@v4
         with:
-          pattern: binary-*
+          artifact-ids: ${{ steps.inventory.outputs.packages }}
+          path: ${{ runner.temp }}/publication
           merge-multiple: true
-          path: artifacts
-
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.inventory.outputs.proof }}
+          path: ${{ runner.temp }}/proof
+          merge-multiple: true
+      - name: Verify staged files immediately before publication
+        env:
+          SOURCE: ${{ github.sha }}
+        run: python scripts/release/artifacts.py check-staged --repo "$GITHUB_WORKSPACE" --input "$RUNNER_TEMP/publication" --source "$SOURCE" --profile binaries --receipt "$RUNNER_TEMP/proof/stage.json"
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
-          files: artifacts/*
+          fail_on_unmatched_files: true
+          files: ${{ runner.temp }}/publication/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

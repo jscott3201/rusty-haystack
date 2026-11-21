@@ -5,8 +5,9 @@ use std::hash::{Hash, Hasher};
 
 /// Haystack Number — a 64-bit float with optional unit string.
 ///
-/// Equality requires both `val` and `unit` to match.
-/// NaN == NaN (consistent with Hash, which uses `to_bits()`).
+/// Equality and hashing compare all float bits and the exact unit string.
+/// Signed zeros and different NaN payloads are distinct. Identical NaN bits are
+/// equal. This is binary64, not an exact arbitrary integer or decimal type.
 /// Display uses compact format: no trailing zeros, unit appended directly.
 #[derive(Debug, Clone)]
 pub struct Number {

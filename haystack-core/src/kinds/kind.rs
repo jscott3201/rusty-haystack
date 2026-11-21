@@ -2,10 +2,24 @@ use super::*;
 use chrono::{NaiveDate, NaiveTime};
 use std::fmt;
 
-/// The central Haystack value type. Every tag value is a Kind.
-#[derive(Debug, Clone, PartialEq)]
+/// The central semantic value type. Every tag value is a Kind.
+///
+/// Int, Float, None, Buf and Nominal require explicit [`Self::project_h4`]
+/// before an H4 codec can be used. The project-owned [`crate::codecs::typed`]
+/// payload retains those distinctions without catalog fitting.
+///
+/// Equality is representation identity, not numeric query comparison. Number,
+/// Float and Coord retain float bits; Ref keeps its existing identifier-only
+/// equality. Dictionary order is insignificant; sequence order is significant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Kind {
     Null,
+    /// Typed absence, distinct from null and a missing dictionary entry.
+    None,
+    Int(i64),
+    Float(Float),
+    Buf(Vec<u8>),
+    Nominal(NominalScalar),
     Marker,
     NA,
     Remove,
@@ -29,6 +43,11 @@ impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Kind::Null => write!(f, "null"),
+            Kind::None => write!(f, "none"),
+            Kind::Int(v) => write!(f, "{v}"),
+            Kind::Float(v) => write!(f, "{}", v.value()),
+            Kind::Buf(v) => write!(f, "Buf({} bytes)", v.len()),
+            Kind::Nominal(v) => write!(f, "{}({:?})", v.spec(), v.text()),
             Kind::Marker => write!(f, "{}", super::singletons::Marker),
             Kind::NA => write!(f, "{}", super::singletons::NA),
             Kind::Remove => write!(f, "{}", super::singletons::Remove),

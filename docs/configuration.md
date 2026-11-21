@@ -2,20 +2,24 @@
 
 ## Server Configuration
 
-The server is configured entirely via CLI flags when using `haystack serve`:
+The memory server uses CLI flags. The optional PostgreSQL profile also requires
+an explicit configuration file: see [standalone PostgreSQL](standalone-postgres.md).
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--port` | `-p` | TCP port to listen on | `8080` |
 | `--host` | | IP address to bind to | `127.0.0.1` |
 | `--file` | `-f` | Load entities from a Zinc/Trio/JSON file at startup | Empty graph |
-| `--users` | `-u` | TOML file with user credentials for SCRAM auth | Auth disabled |
+| `--users` | `-u` | TOML file with user credentials for SCRAM auth | Auth disabled in memory mode |
+| `--postgres-config` | | PostgreSQL TOML; requires `postgres` feature and nonempty `--users`; conflicts with `--file`/`--demo` | Memory |
 | `--demo` | | Load a built-in demo building automation dataset | |
 | `--cors-origin` | | Allow cross-origin browser requests from this origin (repeatable) | No CORS headers |
 
-When no `--users` file is provided, authentication is disabled and all endpoints are accessible without credentials.
+In memory mode, omitting `--users` disables authentication. PostgreSQL serving
+requires a nonempty user file.
 
-The server password can also be provided via the `HAYSTACK_PASSWORD` environment variable.
+`HAYSTACK_PASSWORD` supplies passwords to the `user` and `client` commands;
+`serve` reads hashed credentials from its users file.
 
 ## Cross-Origin Requests
 
@@ -142,7 +146,7 @@ Public endpoints (no permission needed): `GET /api/about`, `GET /api/ops`, `GET 
 
 The Dockerfile uses a multi-stage build:
 
-1. **Builder stage**: `rust:1.97-alpine` -- compiles the CLI binary with static musl linking
+1. **Builder stage**: `rust:1.99.1-alpine` -- compiles the CLI binary with static musl linking from `Cargo.lock`
 2. **Runtime stage**: `alpine:3.21` -- minimal runtime (~15 MB)
 
 ```sh

@@ -18,98 +18,297 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
+  ci-policy:
+    name: CI policy
+    runs-on: ubuntu-latest
+    outputs:
+      profile: ${{ steps.plan.outputs.profile }}
+      test-os: ${{ steps.plan.outputs.test-os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test policy and workflow wiring
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - name: Test benchmark capture controls
+        run: python3 -m unittest discover -s scripts/bench -p 'test_capture.py' -v
+      - name: Test artifact provenance and staging controls
+        run: python3 -m unittest discover -s scripts/release/tests -v
+      - name: Select branch coverage
+        id: plan
+        env:
+          CI_EVENT_ACTION: ${{ github.event.action }}
+        run: python3 scripts/ci/policy.py plan >> "$GITHUB_OUTPUT"
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.1"
           components: rustfmt
-      - run: cargo fmt --all --check
+      - run: cargo +1.99.1 fmt --all --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.1"
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings
-      - run: cargo clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
+      - run: cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-mcp --features stdio,http --all-targets -- -D warnings
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-cli --features mcp,mcp-http --all-targets -- -D warnings
 
-  # Anything targeting main runs the full three-OS matrix. Everything else
-  # (dev PRs, dev pushes) tests on ubuntu alone. Jobs run in parallel, so the
-  # slowest one paces the workflow, and windows takes about twice what the
-  # others do — 3m00s against ubuntu's 1m30s on the 2026-07-25 baseline run.
-  # Dropping it takes the slowest test job to 42s.
+  # The tested policy expands main to all three OSes and dev to Ubuntu.
+  # A retargeted PR uses its current base branch, including on `edited`.
   test:
     name: Test (${{ matrix.os }})
+    needs: ci-policy
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.base_ref == 'main' || github.ref == 'refs/heads/main') && '["ubuntu-latest", "macos-latest", "windows-latest"]' || '["ubuntu-latest"]') }}
+        os: ${{ fromJSON(needs.ci-policy.outputs.test-os) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
-      - run: cargo test --workspace --exclude rusty-haystack
-      - run: cargo test -p rusty-haystack-core --features chrono-tz
+      # macOS and Windows run only for main, so report every failing test binary
+      # in one run instead of stopping at the first.
+      - run: cargo +1.99.1 test --locked --workspace --exclude rusty-haystack --no-fail-fast
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz
+      - name: Test the selected MCP pipe adapter
+        if: runner.os != 'Windows'
+        run: |
+          cargo +1.99.1 test --locked -p rusty-haystack-mcp --features stdio
+          cargo +1.99.1 test --locked -p rusty-haystack-cli --features mcp
+      - name: Test the selected MCP HTTP profile
+        if: runner.os != 'Windows'
+        run: |
+          cargo +1.99.1 test --locked -p rusty-haystack-mcp --features http
+          cargo +1.99.1 test --locked -p rusty-haystack-cli --features mcp-http
+      - name: Test combined MCP profiles
+        if: runner.os != 'Windows'
+        run: |
+          cargo +1.99.1 test --locked -p rusty-haystack-mcp --features stdio,http
+          cargo +1.99.1 test --locked -p rusty-haystack-cli --features mcp,mcp-http
+      # Compile-only on macOS and Windows: the optional analytics SQL feature
+      # is linted and tested on Ubuntu by core-features.
+      - name: Check the analytics SQL feature compiles
+        if: runner.os != 'Linux'
+        run: cargo +1.99.1 check --locked -p rusty-haystack-analytics --features sql
 
-  # The PyO3 crate is excluded from `cargo test --workspace`, so nothing above
-  # covers it. Without this job the Python suite rots unnoticed — 11 of its tests
-  # spent four months failing against APIs removed in v0.8.0.
-  python:
-    name: Python Bindings
+  # Separate package invocations prevent workspace members from unifying extra
+  # dependency features into core's supported minimal/default builds, and
+  # qualify the optional analytics SQL feature on its own.
+  core-features:
+    name: Core minimal and default features
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.99.1"
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: pyo3
+          key: core-features
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-core --no-default-features --all-targets -- -D warnings
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-core --no-default-features
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-core --all-targets -- -D warnings
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-core
+      # The analytics `sql` feature (DataFusion) is optional; the workspace
+      # commands never enable it, so it is qualified here by package.
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-analytics --features sql --all-targets -- -D warnings
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-analytics --features sql
+
+  # Keep one exact current-stable lane separate from the conditional OS matrix:
+  # compatibility coverage should not multiply platform jobs.
+  current-stable:
+    name: Current stable (Rust 1.99.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: current-stable-1.99.1
+      - run: cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings
+      - run: cargo +1.99.1 test --locked --workspace --exclude rusty-haystack
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz
+
+  sqlite:
+    name: SQLite 3.54.1 entity/history durability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-3.54.1
+      - name: Install pinned qualification test runner
+        run: cargo +1.99.1 install --locked cargo-nextest --version 0.9.146
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-app --no-default-features --features sqlite --all-targets -- -D warnings
+      - run: cargo +1.99.1 nextest run --locked -p rusty-haystack-app --no-default-features --features sqlite
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-app --no-default-features --features sqlite --doc
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-app --no-default-features --features postgres,sqlite --all-targets -- -D warnings
+      - run: cargo +1.99.1 nextest run --locked -p rusty-haystack-app --no-default-features --features postgres,sqlite
+      - name: Verify optional dependency isolation
+        run: python3 -m unittest discover -s scripts/sqlite -p 'test_*.py' -v
+      - name: Qualify native identity, interruption, recovery and physical ownership
+        run: cargo +1.99.1 nextest run --locked -p rusty-haystack-app --features sqlite -E 'test(sqlite::qualification) & not test(process_crash_worker)' --success-output immediate
+
+  postgres:
+    name: PostgreSQL 18.6 durability
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: postgres-18.6
+      - name: Install pinned qualification test runner
+        run: cargo +1.99.1 install --locked cargo-nextest --version 0.9.146
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-app --features postgres --all-targets -- -D warnings
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-app --features postgres
+      - run: cargo +1.99.1 clippy --locked -p rusty-haystack-cli --features postgres --all-targets -- -D warnings
+      - run: cargo +1.99.1 test --locked -p rusty-haystack-cli --features postgres
+      - name: Check fixture startup phase and readiness deadline
+        run: python3 -m unittest discover -s scripts/postgres -p 'test_*.py' -v
+      - name: Qualify verified TLS, ownership, commits, restart and snapshot cleanup
+        run: python3 scripts/postgres/qualify.py --docker
+      - name: Qualify installed standalone authorization, archived restore, selector and signal cleanup
+        run: python3 scripts/postgres/standalone.py --docker
+
+  # The PyO3 crate is excluded from `cargo test --locked --workspace`, so nothing above
+  # covers it. Without this job the Python suite rots unnoticed — 11 of its tests
+  # spent four months failing against APIs removed in v0.8.0.
+  python:
+    name: Python Bindings (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pyo3-${{ matrix.python }}
       # Exact version: setup-uv stopped publishing floating major tags after v7,
-      # so `@v9` does not resolve.
-      - uses: astral-sh/setup-uv@v9.0.0
+      # so `@v10` does not resolve.
+      - uses: astral-sh/setup-uv@v10.3.3
       # Pinned rather than inherited from the runner image, so the interpreter
       # the extension is built against does not drift. pyo3 is configured
       # without abi3, making every build interpreter-specific.
-      - run: uv venv --python 3.12
-      - run: uv pip install maturin pytest
-      # The Clippy job above excludes this crate because `cargo clippy --workspace`
+      - run: uv python install ${{ matrix.python }}
+      - run: uv venv --python ${{ matrix.python }}
+      - run: uv pip install maturin==1.16.0 pytest
+      # The Clippy job above excludes this crate because `cargo clippy --locked --workspace`
       # needs an interpreter to resolve the pyo3 build script. This job has one, so
       # the exclusion is about where the lint runs, not whether it runs.
       - name: Clippy
         run: |
           source .venv/bin/activate
-          cargo clippy -p rusty-haystack --all-targets -- -D warnings
+          cargo +1.99.1 clippy --locked -p rusty-haystack --all-targets -- -D warnings
       # Activate rather than `uv run`, and reach the crate with -m. `uv run`
       # inside rusty-haystack/ sees its pyproject.toml, builds a second .venv
       # for that project, and then cannot find the maturin installed here.
       - name: Build and install the extension
         run: |
           source .venv/bin/activate
-          maturin develop --release -m rusty-haystack/Cargo.toml
+          maturin develop --locked --release -m rusty-haystack/Cargo.toml
       - name: Run Python tests
         run: |
           source .venv/bin/activate
+          python -c "import rusty_haystack; print(rusty_haystack.__file__)"
           pytest rusty-haystack/tests -q
+      - name: Build and validate wheel metadata
+        run: |
+          source .venv/bin/activate
+          maturin build --locked --release -m rusty-haystack/Cargo.toml --out "$RUNNER_TEMP/python-wheels" -i python
+          uv pip install twine
+          python -m twine check "$RUNNER_TEMP"/python-wheels/*.whl
+      - name: Test wheel in a clean environment
+        run: |
+          uv venv --python ${{ matrix.python }} "$RUNNER_TEMP/wheel-venv"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" "$RUNNER_TEMP"/python-wheels/*.whl pytest
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I -c "import rusty_haystack; print(rusty_haystack.__file__)"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I -m pytest --import-mode=importlib rusty-haystack/tests -q
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-wheel-${{ matrix.python }}
+          path: ${{ runner.temp }}/python-wheels/*.whl
+          if-no-files-found: error
+      # Isolated locked tooling; no product PyO3 environment or generated code is reused.
+      - name: Validate schemas and generated client over loopback HTTP
+        if: matrix.python == '3.12'
+        run: uv run --locked --project scripts/schema-client --python 3.12 python scripts/schema-client/validate.py
+      - name: Qualify installed MCP schemas, scope, signals and pipe cleanup
+        if: matrix.python == '3.12'
+        run: uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify.py
+      - name: Qualify installed authenticated MCP HTTP and combined profiles
+        if: matrix.python == '3.12'
+        run: |
+          uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py
+          uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py --features mcp,mcp-http
 
   deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.99.1"
+          arguments: --locked --all-features
+
+  codeql:
+    name: CodeQL
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    uses: ./.github/workflows/codeql.yml
+
+  # Keep the explicit needs list synchronized with policy.py, its independent
+  # tests, and docs/support-matrix.md. Never infer required jobs from toJSON(needs).
+  ci-ok:
+    name: CI OK
+    if: ${{ always() }}
+    needs: [ci-policy, fmt, clippy, test, current-stable, python, deny, postgres, sqlite, core-features, codeql]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require every check to succeed
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_PROFILE: ${{ needs.ci-policy.outputs.profile }}
+        run: python3 scripts/ci/policy.py aggregate

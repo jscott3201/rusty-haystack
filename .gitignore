@@ -5,6 +5,9 @@
 __pycache__/
 .venv/
 *.egg-info/
+# Maturin develop writes native extensions into the mixed Python package.
+/rusty-haystack/rusty_haystack/rusty_haystack*.so
+/rusty-haystack/rusty_haystack/rusty_haystack*.pyd
 dist/
 haystack-core/src/ontology/generated.rs
 
@@ -13,5 +16,6 @@ haystack-core/src/ontology/generated.rs
 CLAUDE.md
 claude-id.json
 .DS_Store
+/_roadmap/
 _plan/
 _codex-briefs/

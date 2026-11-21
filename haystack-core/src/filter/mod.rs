@@ -29,9 +29,12 @@
 //! from maliciously nested filter expressions.
 
 mod ast;
+mod controlled;
 mod eval;
 mod parser;
 
 pub use ast::{CmpOp, FilterNode, Path};
 pub use eval::{matches, matches_with_ns, unresolved_specs};
-pub use parser::{FilterError, parse_filter};
+pub use parser::{FilterError, FilterParseLimits, parse_filter, parse_filter_controlled};
+
+pub use controlled::{CatalogKind, QueryEnvironment, catalog_term_available, matches_controlled};

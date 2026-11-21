@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 
+use haystack_app::HisStore;
 use haystack_server::app::HaystackServer;
 use haystack_server::auth::AuthManager;
-use haystack_server::his_store::HisStore;
 
 use crate::exceptions;
 use crate::graph::PySharedGraph;
@@ -49,11 +49,11 @@ pub struct PyAuthManager {
 }
 
 impl PyAuthManager {
-    fn check_live(&self) -> PyResult<()> {
+    pub(crate) fn check_live(&self) -> PyResult<()> {
         if self.consumed {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "this AuthManager was given to a HaystackServer and is no longer \
-                 usable; configure it fully before calling with_auth",
+                "this AuthManager was given to a server/application and is no longer \
+                 usable; configure it fully before transferring it",
             ));
         }
         Ok(())

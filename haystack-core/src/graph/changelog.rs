@@ -7,6 +7,39 @@ use crate::data::HDict;
 
 /// Default changelog capacity (50,000 entries).
 pub const DEFAULT_CHANGELOG_CAPACITY: usize = 50_000;
+/// Conservative retained-value budget for the changelog (64 MiB).
+pub const DEFAULT_CHANGELOG_BYTES: usize = 64 * 1024 * 1024;
+
+/// One complete public commit unit. This contains no submitter identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitSpan {
+    pub first: u64,
+    pub last: u64,
+}
+impl CommitSpan {
+    pub(crate) fn singleton(version: u64) -> Self {
+        Self {
+            first: version,
+            last: version,
+        }
+    }
+}
+
+/// Coherent entity/catalog identity captured under one graph guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphState {
+    pub incarnation: [u8; 16],
+    pub revision: u64,
+    pub catalog_generation: u64,
+}
+
+/// Wakeup hints only; callers retrieve retained changes for authoritative data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphWake {
+    Entities(GraphState),
+    Reset(GraphState),
+    Catalog(GraphState),
+}
 
 /// The kind of mutation that was applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +61,9 @@ pub enum DiffOp {
 pub struct GraphDiff {
     /// The graph version *after* this mutation.
     pub version: u64,
+    /// Common first/last revisions for every diff in this atomic unit.
+    pub span: CommitSpan,
+    pub(crate) retained_bytes: usize,
     /// Wall-clock timestamp as Unix nanoseconds (0 if unavailable).
     pub timestamp: i64,
     /// The kind of mutation.
@@ -45,6 +81,10 @@ pub struct GraphDiff {
 }
 
 impl GraphDiff {
+    /// Conservative owned-value bytes retained for this diff.
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
     /// Returns the current wall-clock time as Unix nanoseconds.
     pub(crate) fn now_nanos() -> i64 {
         SystemTime::now()
@@ -60,7 +100,7 @@ impl GraphDiff {
 pub struct ChangelogGap {
     /// The version the subscriber requested changes since.
     pub subscriber_version: u64,
-    /// The lowest version still retained in the changelog.
+    /// Last revision wholly discarded; changes strictly after it remain available.
     pub floor_version: u64,
 }
 
@@ -75,6 +115,65 @@ impl fmt::Display for ChangelogGap {
 }
 
 impl std::error::Error for ChangelogGap {}
+
+/// An application feed position must be a complete unit boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChangeCursorError {
+    #[error(transparent)]
+    Gap(#[from] ChangelogGap),
+    #[error("change cursor exceeds current head {head}")]
+    Future { head: u64 },
+    #[error("change cursor lies inside commit span {span:?}")]
+    InsideUnit { span: CommitSpan },
+}
+
+/// One borrowed complete unit. No whole-suffix allocation or cloning occurs.
+pub struct ChangeUnit<'a> {
+    pub span: CommitSpan,
+    log: &'a std::collections::VecDeque<GraphDiff>,
+    start: usize,
+    end: usize,
+}
+impl ChangeUnit<'_> {
+    pub fn len(&self) -> usize {
+        self.end - self.start
+    }
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+    pub fn diffs(&self) -> impl Iterator<Item = &GraphDiff> {
+        self.log.range(self.start..self.end)
+    }
+    pub fn retained_bytes(&self) -> usize {
+        self.diffs().map(|diff| diff.retained_bytes).sum()
+    }
+}
+
+/// Identity/head/floor and span traversal borrow the same coherent graph view.
+/// Consumers must charge and fully evaluate a unit before advancing a cursor.
+pub struct ChangeUnits<'a> {
+    pub state: GraphState,
+    pub floor: u64,
+    pub(crate) log: &'a std::collections::VecDeque<GraphDiff>,
+    pub(crate) next: usize,
+}
+impl<'a> Iterator for ChangeUnits<'a> {
+    type Item = ChangeUnit<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let first = self.log.get(self.next)?;
+        let count = usize::try_from(first.span.last - first.span.first)
+            .expect("retained span fits usize")
+            + 1;
+        let start = self.next;
+        self.next += count;
+        Some(ChangeUnit {
+            span: first.span,
+            log: self.log,
+            start,
+            end: self.next,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -98,6 +197,8 @@ mod tests {
     fn graph_diff_construction() {
         let diff = GraphDiff {
             version: 1,
+            span: CommitSpan::singleton(1),
+            retained_bytes: 256,
             timestamp: 0,
             op: DiffOp::Add,
             ref_val: "site-1".to_string(),
@@ -119,6 +220,8 @@ mod tests {
     fn graph_diff_clone() {
         let diff = GraphDiff {
             version: 2,
+            span: CommitSpan::singleton(2),
+            retained_bytes: 256,
             timestamp: 0,
             op: DiffOp::Update,
             ref_val: "equip-1".to_string(),

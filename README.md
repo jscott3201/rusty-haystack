@@ -1,182 +1,180 @@
 # Rusty Haystack
 
-A high-performance Rust implementation of the [Project Haystack](https://project-haystack.org) specification for building automation and IoT data modeling.
+Rust libraries, a CLI and Python bindings for [Project Haystack](https://project-haystack.org) building data: typed values, entity graphs, filters and codecs, managed applications, HTTP clients and servers, optional PostgreSQL and SQLite storage, and read-only MCP tools.
 
-<!-- Badges -->
-<!-- [![Crates.io](https://img.shields.io/crates/v/haystack-core.svg)](https://crates.io/crates/haystack-core) -->
-<!-- [![docs.rs](https://docs.rs/haystack-core/badge.svg)](https://docs.rs/haystack-core) -->
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Features
+This README describes the **0.10.0 source on `dev`**. Build this checkout to use the capabilities below; a previously published crate, wheel or executable may have a different API. Haystack 4 interfaces and a selected Xeto/typed HTTP profile are available. The selected typed profile does not claim complete Haystack 5 or upstream runtime interoperability.
 
-- **Full Haystack 4 type system** — all 15 scalar kinds (Marker, Number, Ref, DateTime, Coord, etc.) plus Dict, Grid, and List
-- **5 codecs** — Zinc 3.0, JSON v4, JSON v3, Trio, CSV with content negotiation
-- **High-performance entity graph** — in-memory EntityGraph with RoaringBitmap tag indexes, B-tree value indexes, bidirectional ref adjacency, reactive changelog for watches, and concurrent read/write via `SharedGraph`
-- **Haystack filter engine** — parse and evaluate Haystack filter expressions with path traversal
-- **Unit conversion** — Haystack unit database with quantity lookup, compatibility checking, and affine temperature conversions
-- **Graph traversal helpers** — hierarchy tree building, entity classification, ref chain walking, parent/child queries, site resolution, and equipment point enumeration
-- **Haystack ontology** — bundled `ph`, `phScience`, `phIoT`, `phIct` definitions with taxonomy, subtype checking, and entity validation
-- **Xeto type system** — schema language parser, structural type fitting, slot resolution with inheritance, spec resolution, and library management (scan, load, validate)
-- **HTTP server** — Axum 0.8 with 25 API endpoints, Tower auth middleware, SCRAM SHA-256 authentication, WebSocket watches, role-based access control, and 2 MB body limit
-- **HTTP/WS client** — async client with SCRAM handshake, mTLS, token zeroization, and pluggable transport (HTTP + WebSocket)
-- **CLI** — import, export, serve, validate, info, libs, specs, client queries, and user management. Password via `HAYSTACK_PASSWORD` env var.
-- **Python bindings** — PyO3 0.29 module with types, codecs, graph, filter, ontology, Xeto, client, server, and auth (`import rusty_haystack`)
-- **Docker** — multi-stage Alpine image (~15 MB)
+## What you can build
 
-## Performance
+- **Model and query building data.** Work with Dicts, Grids, references, units, Haystack filters, indexed graphs, relationship traversal and the bundled ontology. Exact typed Int, Float, None, Buf and nominal values have explicit conversion and encoding rules.
+- **Exchange and validate data.** Read and write Zinc, Haystack JSON and Trio; export CSV. Contextual Jeto and the project-owned typed payload preserve selected richer values. Load Xeto libraries, inspect and fit admitted specs, and validate entities against the selected catalog.
+- **Embed a bounded application.** Share authorization, catalog observations, paging, cancellation and resource limits across Rust reads and scoped HTTP adapters. Select entity mutations, history reads/writes, state subscriptions and local point-write simulation when your application needs them.
+- **Use typed contracts and generated clients.** Admitted Xeto signatures drive argument defaults, fitting, discovery and encoding. Scoped applications export OpenAPI 3.1 and JSON Schema 2020-12; an independent generated-client fixture exercises the selected contract over real HTTP.
+- **Choose storage and access profiles.** Use process-memory services or explicitly select PostgreSQL durability or a local SQLite entity and history authority. Python offers semantic values, graph APIs, an async HTTP client and a controlled embedded application. MCP exposes two authorized read tools over stdio or protected local HTTP.
+- **Consume remote history incrementally in Rust.** The Zinc `his_read_stream` session preserves remote observations, delivers bounded batches and validates completion at EOF. [History client contract](docs/history-reads.md#incremental-rust-http-consumption).
 
-| Operation | Throughput |
-|-----------|-----------|
-| Zinc encode | ~1,920 rows/ms |
-| Zinc decode | ~921 rows/ms |
-| Graph lookup | 18 ns per entity (O(1)) |
-| Filter (1,000 entities) | ~610 us |
-| Unit conversion | ~95 ns per convert |
-| Ontology fitting | < 1 us |
-| HTTP read (single entity) | ~59 us end-to-end |
-| HTTP concurrent (50 clients) | ~14 us effective per request |
+![An admitted catalog supplies the executable registry. Scoped application requests share policy, budgets and lifecycle ownership across Rust and HTTP adapters and schema export; optional service owners are selected by the application.](docs/images/admitted-api.svg)
 
-See [Benchmarks.md](Benchmarks.md) for full results on Apple M2.
+## Start from source
 
-## Quick Start
-
-### Prerequisites
-
-- Rust 1.97+ (edition 2024)
-- cargo
-
-### Build
+Use the repository-pinned Rust **1.99.1** toolchain:
 
 ```sh
-cargo build --workspace --exclude rusty-haystack
+git clone --branch dev https://github.com/jscott3201/rusty-haystack.git
+cd rusty-haystack
+cargo +1.99.1 build --locked --workspace --exclude rusty-haystack
+cargo +1.99.1 run --locked -p rusty-haystack-cli -- serve --demo --port 8080
 ```
 
-`--exclude rusty-haystack` skips the PyO3 extension module, which cannot be linked without
-a Python interpreter. [CONTRIBUTING.md](CONTRIBUTING.md) explains what fails without the
-flag and how the crate is built and tested instead.
-
-### Cargo Features
-
-`rusty-haystack-core` keeps timezone rule data optional. Enable its default-off
-`chrono-tz` feature to resolve a Haystack timezone name and naive local date/time
-to DST-aware UTC offsets:
+The excluded `rusty-haystack` package is the PyO3 extension; build it through Maturin with a Python interpreter as shown below. The demo uses process memory and the legacy HTTP profile, listening on `127.0.0.1:8080`. In another terminal:
 
 ```sh
-cargo build -p rusty-haystack-core --features chrono-tz
-```
-
-### Run Tests
-
-```sh
-cargo test --workspace --exclude rusty-haystack
-# ~970 tests across all crates
-```
-
-### Start a Demo Server
-
-```sh
-cargo run -p rusty-haystack-cli -- serve --demo --port 8080
-```
-
-The server binds to `127.0.0.1` by default. To listen on all interfaces, pass `--host 0.0.0.0`.
-
-Then query it:
-
-```sh
-curl http://localhost:8080/api/about
-curl -X POST http://localhost:8080/api/read \
-  -H "Content-Type: text/zinc" \
+curl http://127.0.0.1:8080/api/about
+curl -X POST http://127.0.0.1:8080/api/read \
+  -H 'Content-Type: text/zinc' \
   -d 'ver:"3.0"
 filter
 "site"'
 ```
 
-### Docker
+To install a standalone CLI from the checkout:
 
 ```sh
-docker build -t rusty-haystack .
-docker run -p 8080:8080 rusty-haystack serve --demo --port 8080
+cargo +1.99.1 install --locked --path haystack-cli --root "$PWD/haystack-install"
+./haystack-install/bin/haystack --help
 ```
 
-## Workspace Structure
+Select optional CLI features in that install command according to the profile you need:
 
-| Crate | Description |
-|-------|-------------|
-| [`haystack-core`](haystack-core/) | Core library: kinds, data (HGrid/HDict/HCol), codecs (Zinc/Trio/JSON/CSV), filter engine, unit conversion, graph with RoaringBitmap/B-tree indexes and ref adjacency, ontology, Xeto, SCRAM auth |
-| [`haystack-server`](haystack-server/) | Axum HTTP API server with 25 endpoints, Tower auth middleware, SCRAM auth, WebSocket watches |
-| [`haystack-client`](haystack-client/) | Async HTTP + WebSocket client with SCRAM handshake, mTLS, token zeroization |
-| [`haystack-cli`](haystack-cli/) | CLI binary (`haystack`): import, export, serve, validate, info, libs, specs, client, user management |
-| [`rusty-haystack`](rusty-haystack/) | PyO3 0.29 Python bindings with full API parity (requires maturin) |
+| Profile | Selection | Entry point and contract |
+| --- | --- | --- |
+| Core Rust data model | `rusty-haystack-core`; optional `chrono-tz` feature | Trusted in-process graph, values, filters and codecs. [Typed values](docs/typed-values.md) |
+| Managed Rust application | `rusty-haystack-app` and chosen adapters/services | One application owner, borrowed handles and Tokio runtime. [Shared reads](docs/shared-reads.md), [lifecycle](docs/application-lifecycle.md) |
+| Ordinary CLI/HTTP demo | No optional feature required | `haystack serve --demo`, data tools and HTTP client commands. [CLI](docs/cli.md) |
+| SQLite Rust application | `rusty-haystack-app` with `features = ["sqlite"]` | One local-file owner, durable entity mutations/feed and bounded history upserts/receipts; no CLI selector. [SQLite contract](docs/sqlite-durability.md) |
+| Parquet history capture (preview) | `rusty-haystack-analytics` library | One completed remote history read exported to an immutable local Parquet dataset and reopened with bounded validation; Rust only, no CLI/Python. [Parquet contract](docs/parquet-history.md) |
+| Snapshot SQL (preview) | `rusty-haystack-analytics` `sql` feature | Bounded read-only DataFusion SQL over fully validated captures sealed in memory, with provenance; no live pushdown, server or Python. [Snapshot SQL](docs/sql-snapshots.md) |
+| PostgreSQL CLI | `--features postgres` | `haystack serve --postgres-config FILE --users FILE`; explicit database and SCRAM configuration. [Standalone workflow](docs/standalone-postgres.md) |
+| MCP stdio CLI | `--features mcp` | `haystack mcp stdio --config FILE`; trusted launch scope and Unix pipes. [Stdio configuration](docs/mcp-stdio.md) |
+| MCP HTTP CLI | `--features mcp-http` | `haystack mcp http --config FILE`; numeric loopback, issuer/public keys and per-subject scope. [HTTP configuration](docs/mcp-http.md) |
+| Python | Maturin source build below; Python ≥3.11 package requirement | Values, graphs, async client and controlled in-memory application. [Python API](rusty-haystack/README.md) |
 
-## Documentation
+`--features mcp,mcp-http` installs both independent MCP commands. The MCP library selects `stdio` and `http` separately. These options do not make PostgreSQL the MCP CLI dataset provider or enable every application service. Default MCP and application crate features are empty; optional profiles need their own configuration and qualification.
 
-| Document | Description |
-|----------|-------------|
-| [Architecture](docs/architecture.md) | System design, crate dependencies, core abstractions |
-| [Getting Started](docs/getting-started.md) | Build, run, first API call, Docker |
-| [Server API](docs/server-api.md) | All HTTP endpoints, auth flow, WebSocket protocol |
-| [Client Library](docs/client.md) | HaystackClient API, transports, authentication |
-| [CLI Reference](docs/cli.md) | All commands, flags, and examples |
-| [Python Bindings](docs/python.md) | Core types, codecs, graph, filter, client, server, auth |
-| [Configuration](docs/configuration.md) | Server config, users TOML, permissions, Docker |
-| [Contributing](CONTRIBUTING.md) | Build flags and why, the gate, CI jobs, conventions |
+## Managed applications and typed HTTP
 
-## Security
+`EntityGraph` is a trusted in-process data structure. `ApplicationBuilder` adds an explicit read policy, finite budgets and lifecycle ownership. Its handles give adapters the same managed service, so authorization, hidden tags, reference disclosure, current catalog observations and continuation checks apply at the shared boundary. New pages recheck policy; a cursor is not an authorization grant.
 
-- **No `unsafe` code** — entire codebase is safe Rust (by convention; not enforced by a `forbid` lint)
-- **SCRAM SHA-256** authentication with PBKDF2 (100k iterations) credential storage
-- **Credential zeroization** — `zeroize` crate clears salted passwords, client keys, and SCRAM state from memory on drop (both server and client)
-- **Username enumeration prevention** — fake SCRAM challenges for unknown users
-- **Constant-time comparison** — prevents timing side-channels during auth
-- **Request limits** — 2 MB body size, 100 concurrent watches, 1,000 IDs per watch, 1M history items
-- **Filter recursion depth limit** — max depth 100 to prevent stack overflow
-- **Parser DoS protection** — depth limits and size limits on all parsers
-- **Xeto loader safety** — symlink traversal protection, file size limits, and directory depth guards
-- **Token TTL** — configurable TTL with periodic cleanup of expired tokens
-- **Arithmetic overflow protection** — checked operations throughout
-- **Sanitized error messages** — internal details not leaked to clients
+The builder fixes configuration at start and produces one `ApplicationOwner`. Readiness follows initialization of the selected providers and listeners. Handles and the Tokio runtime are borrowed. Await `close()` for the shutdown result and `terminated()` to observe actual cleanup after an unsuccessful or cancelled close observation; an embedding that owns the runtime drops it outside async after termination. Dropping an owner requests cleanup but is not a completed cleanup receipt. See [Application lifecycle](docs/application-lifecycle.md) for seal/drain behavior and resource ownership.
 
-## Key Dependencies
+Entity mutation, history, subscription and command services are explicit selections. A schema declaration alone installs no handler or provider. Mutation APIs preserve committed, rejected and unknown outcomes; transport success alone does not establish an effect, and an unknown outcome does not authorize blind replay. Process-memory providers do not survive restart. Point-write support is a **local simulator**, with no physical equipment command authority.
 
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| axum | 0.8 | HTTP server framework |
-| tower / tower-http | 0.5 / 0.7 | Middleware (auth, CORS, body limits) |
-| reqwest | 0.13 | HTTP client (rustls TLS) |
-| tokio | 1.x | Async runtime |
-| tokio-tungstenite | 0.30 | WebSocket client |
-| serde / serde_json | 1.0 | Serialization framework |
-| roaring | 0.11 | Compressed bitmap indexes (RoaringBitmap) |
-| parking_lot | 0.12 | Fast synchronization primitives |
-| zeroize | 1.x | Secure memory zeroing for credentials |
-| pyo3 | 0.29 | Python bindings |
-| criterion | 0.8 | Benchmarking |
-| rustc-hash | 2 | Fast non-cryptographic hashing (FxHasher) |
+Trusted catalog activation validates affected data and publishes an immutable observation. A typed invocation retains one observation for resolution, argument/default handling, fitting and result encoding. The executable catalog is a bounded admitted subset; see [Typed HTTP](docs/typed-http-read.md), [Jeto](docs/jeto.md) and [repository serving admission](docs/repository-serving-admission.md).
 
-## What's New in v0.8.0
+A **separately configured managed scoped server** exposes this project-owned schema endpoint; the CLI demo above does not select it:
 
-v0.8.0 is a major simplification of the codebase, removing federation, the HBF binary codec, RDF output, the expression evaluator, HLSS snapshots, graph visualization endpoints, and CSR adjacency. The server framework was migrated from Actix Web to Axum.
+```sh
+curl -H 'Xeto-Version: 5' -H 'Accept: application/json' \
+  http://127.0.0.1:8080/api/rusty-haystack/openapi.json
+```
 
-**Removed:**
-- Federation (hub-and-spoke, connectors, delta sync, write forwarding, watch federation)
-- HBF codec (Haystack Binary Format, zstd compression, binary encode/decode)
-- RDF output (Turtle, JSON-LD)
-- Arrow IPC codec
-- Expression evaluator (arithmetic expressions, variables, functions)
-- HLSS snapshots (graph serialization, snapshot commands)
-- Graph visualization API (6 endpoints under `/api/graph/*`)
-- System management endpoints (backup/restore/status)
-- CSR adjacency, columnar storage, query planner, WL structural fingerprinting
-- Streaming responses
-- Dependencies: rayon, dashmap, flate2, zstd, crc32fast
+Supply that server's authentication header when enabled. Its caller-filtered export describes qualified POST operations with `Xeto-Version: 5` and `application/json;box=none` output. `x-rusty-haystack-json-schema` contains the standalone Draft 2020-12 library. Unsupported visible declarations have explicit exclusions; hidden declarations remain undisclosed. JSON Schema validates JSON shape, but cannot prove nominal identity, resolve graph references or preserve every rich value/ambiguous union without boxes. [Schema export and generated clients](docs/schema-export.md) documents the executable subset and independent validation recipe.
 
-**Changed:**
-- Server framework migrated from Actix Web 4 to Axum 0.8 with Tower middleware
-- CLI defaults to `127.0.0.1` (was `0.0.0.0`)
-- Password can be set via `HAYSTACK_PASSWORD` environment variable
-- 5 codecs remain: Zinc 3.0, JSON v4, JSON v3, Trio, CSV
-- 25 API endpoints (standard Haystack ops plus extensions)
+## Python from this checkout
+
+The package requires Python **3.11 or newer**. The source-build and test recipe uses CPython **3.12** and pinned Maturin **1.16.0**:
+
+```sh
+uv venv --python 3.12
+uv pip install maturin==1.16.0 pytest
+source .venv/bin/activate
+maturin develop --locked --release -m rusty-haystack/Cargo.toml
+pytest rusty-haystack/tests -q
+```
+
+The bindings include core values, filters, graphs, codecs and static typing. Use `Int`, `Float`, `NoneValue`, `Buf` and `Nominal` when their typed identity matters; native Python integers mapped to Haystack Number must be exactly representable within the documented limits. Rich typed payloads and H4 codec projection have separate contracts. See [Python values and codecs](rusty-haystack/README.md#codecs) and [typed values](docs/typed-values.md).
+
+A controlled embedded application shares a bounded native read service with its selected HTTP listener:
+
+```python
+import asyncio
+from rusty_haystack import ApplicationBuilder, HDict, Marker, Ref, SharedGraph
+
+async def main():
+    graph = SharedGraph()
+    graph.add(HDict({"id": Ref("site-a"), "site": Marker()}))
+    owner = ApplicationBuilder(graph, port=0).start()
+    async with owner:
+        print("Listening:", await owner.ready())
+        page = await owner.handle().read("site", limit=100)
+        print("Rows:", len(page), "Complete:", page.meta()["complete"])
+    assert graph.contains("site-a")
+
+asyncio.run(main())
+```
+
+`start()` runs inside an asyncio loop and returns the owner synchronously; `async with` awaits readiness and owns shutdown. Handles have no close authority, and the supplied graph remains usable after close. This profile selects in-memory reads, catalog and system routes. Direct Python reads use trusted embedding authority; HTTP entity data requires explicitly configured authentication. It does not install database, mutation, history, watch or callback providers.
+
+For remote HTTP, [`AsyncHaystackClient`](rusty-haystack/README.md#async-http-client) owns its HTTP/SCRAM session and native I/O resources. It binds to one exact loop/thread, supports deadlines and request cancellation, and joins owned resources on successful close. Its [bounded remote watches](rusty-haystack/README.md#bounded-remote-async-watches) retain one pending typed delivery with explicit ACK, renewal and recovery, and close independently of siblings. Its async operations return asyncio Futures: await them directly or wrap them in a coroutine for `create_task`. The [controlled application contract](rusty-haystack/README.md#controlled-embedded-applications) explains owner/handle shutdown, cancellation and interpreter-finalization limits. Python package metadata and release matrices do not establish runtime support on every listed interpreter or platform; consult the [support matrix](docs/support-matrix.md).
+
+For synchronous scripts, [`SyncHaystackClient`](rusty-haystack/README.md#owned-synchronous-http-client) provides owned H4 connect/read/close with direct return values, one OS thread per client, and finite relative timeout budgets. Native waits release Python, and successful close joins owned native resources. Existing `HaystackClient` and `WsClient` capabilities remain available.
+
+## Optional SQLite storage
+
+The application crate's `sqlite` feature selects a single-owner local file using bundled SQLite **3.54.1**. Entity CRUD, expected revisions, retained receipts and change-feed cursors survive close/reopen. Bounded live history reads and authorized one-point timestamp upserts retain samples, generations and receipts in a separate history authority. The [SQLite contract](docs/sqlite-durability.md) describes format 2, native cleanup, process-crash qualification and scope; a CLI selector and SQLite Python wheels are not selected.
+
+## Optional PostgreSQL storage
+
+The `postgres` application/CLI feature selects bounded durable entity and history services for cooperating processes sharing one database/schema. It supports verified TLS, retained operation receipts, coherent admission refresh, bounded periodic cache convergence, restart recovery and bounded entity snapshot sessions. Runtime qualification uses PostgreSQL **18.6**. History remains bounded live data; entity and history mutation domains do not form one atomic combined commit.
+
+The [standalone PostgreSQL workflow](docs/standalone-postgres.md) covers installation, explicit private configuration, SCRAM users, useful writes/reads and recovery after restart. Its disposable recipe installs a fresh CLI and provisions its own test database:
+
+```sh
+python3 scripts/postgres/standalone.py --docker
+```
+
+Follow that document's prerequisites before running the recipe. [PostgreSQL durability](docs/postgres-durability.md) defines the selected storage guarantees. [Backup and restore](docs/postgres-recovery.md) provides bounded authority transfer between distinct schemas in the same surviving database/control journal; it does not establish cross-database disaster recovery or production deployment qualification.
+
+## Read-only MCP tools
+
+Both MCP transports expose only `haystack_query` and `haystack_read`, with fixed schemas and bounded H4 JSON results by default. An explicit launch may select the [rich Jeto profile](docs/mcp-rich-values.md) for exact typed scalars, admitted nominal provenance and Buf values. They share application read policy, hidden-tag/reference filtering and principal-bound continuation checks. No write, history, command, resource, prompt or task capability is exposed.
+
+[Stdio](docs/mcp-stdio.md) uses an explicit trusted launch principal and dataset scope. A host launches the installed command with cancellable **Unix pipes on both stdin and stdout**; an interactive terminal or regular-file redirection is not the selected runtime profile. It supports the documented modern discovery and legacy initialization revisions.
+
+[Streamable HTTP](docs/mcp-http.md) uses modern MCP `2026-07-28`, numeric loopback HTTP/1 and one POST per connection with a JSON response. Configure the issuer, trusted RS256 public keys, required read scope and admitted subjects before launch. Every request verifies its signed access token and current local revocation set. Resource metadata and challenges identify the actual bound audience. Offline verification does not learn remote issuer revocations automatically.
+
+```sh
+# Each command requires its selected feature and a complete configuration.
+./haystack-install/bin/haystack mcp stdio --config /absolute/path/mcp-stdio.toml
+./haystack-install/bin/haystack mcp http --config /absolute/path/mcp-http.toml
+```
+
+The adapters bound input, response size, concurrent work and complete request deadlines. Shutdown retains work until native reads and completed/suppressed output are joined. Installed fixtures exercise independent schemas, scoped reads and real process/pipe/socket cleanup. This local HTTP profile does not claim SSE sessions, public TLS/reverse-proxy deployment, production identity-provider integration or external agent-host/model-call qualification.
+
+## Workspace and documentation
+
+| Crate | Role |
+| --- | --- |
+| [haystack-core](haystack-core/) | Values, codecs, filters, units, graph, ontology, Xeto admission and fitting |
+| [haystack-app](haystack-app/) | Scoped reads, selected mutations/history/subscriptions/commands, catalog activation, optional PostgreSQL/SQLite and lifecycle ownership |
+| [haystack-server](haystack-server/) | Axum HTTP adapters, SCRAM authentication and WebSocket transport |
+| [haystack-client](haystack-client/) | Async Rust HTTP/WebSocket client, SCRAM and TLS configuration |
+| [haystack-analytics](haystack-analytics/) | Bounded immutable Parquet captures of one remote history read |
+| [haystack-cli](haystack-cli/) | `haystack` data/validation tools, server/client commands, user management, storage administration and selected MCP launchers |
+| [haystack-mcp](haystack-mcp/) | Optional bounded read-only stdio and authenticated local HTTP adapters |
+| [rusty-haystack](rusty-haystack/) | Python values, graph/codec APIs, async client and controlled embedded application |
+
+- Architecture and setup: [Architecture](docs/architecture.md), [Getting started](docs/getting-started.md), [CLI](docs/cli.md), [Configuration](docs/configuration.md), [Client](docs/client.md), [Server API](docs/server-api.md).
+- Application services: [Shared reads](docs/shared-reads.md), [Lifecycle](docs/application-lifecycle.md), [Entity mutations](docs/entity-mutations.md), [History reads](docs/history-reads.md), [History writes](docs/history-mutations.md), [Parquet history captures](docs/parquet-history.md), [Snapshot SQL](docs/sql-snapshots.md), [State subscriptions](docs/state-subscriptions.md), [Point-write simulation](docs/typed-http-read.md#local-point-command-simulation-m2-pr12).
+- Types and contracts: [Typed values](docs/typed-values.md), [Jeto](docs/jeto.md), [Typed HTTP](docs/typed-http-read.md), [Schema export](docs/schema-export.md), [Xeto repository downloads](docs/repository-client.md).
+- Development and evidence: [Contributing](CONTRIBUTING.md), [Support and validation matrix](docs/support-matrix.md), [Artifact validation](docs/artifact-validation.md), [Roadmap](https://github.com/users/jscott3201/projects/3), [Issues](https://github.com/jscott3201/rusty-haystack/issues).
+
+The local full gate builds and tests Rust/Python surfaces and runs the independent schema/client proof. Optional profiles, hosted jobs and release artifacts have separately recorded coverage; one local pass does not qualify another platform or a published binary. First-party Rust forbids unsafe code; dependency internals have their own policies. Authentication, authorization and resource limits remain explicit application/deployment choices.
+
+[Benchmarks.md](Benchmarks.md) records correctness-checked graph/history workloads, commands and measurement provenance. Historical March 2026 results describe v0.8.0 on Rust 1.93.1 and do not establish current latency, capacity or a speedup. Planned additional storage engines, live DataFusion pushdown and wider Arrow/Parquet integrations, broader MCP capabilities and wider Python/free-threaded qualification remain roadmap work.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Retained upstream Xeto source keeps its source license and provenance alongside the pinned profile.

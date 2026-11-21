@@ -34,9 +34,12 @@ impl PyHDict {
     fn new(tags: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut inner = data::HDict::new();
         if let Some(py_dict) = tags {
-            for (key, value) in py_dict.iter() {
+            // Own a snapshot: callers may mutate their dict on another thread,
+            // and conversion must not iterate that changing key inventory.
+            for (key, value) in py_dict.copy()?.iter() {
                 let name: String = key.extract()?;
                 let kind = py_to_kind(&value)?;
+                crate::convert::ensure_python_child(&kind)?;
                 inner.set(name, kind);
             }
         }
@@ -87,6 +90,7 @@ impl PyHDict {
     fn set(&mut self, py: Python<'_>, name: String, val: &Bound<'_, PyAny>) -> PyResult<()> {
         let _ = py;
         let kind = py_to_kind(val)?;
+        crate::convert::ensure_python_child(&kind)?;
         self.inner.set(name, kind);
         Ok(())
     }
@@ -100,9 +104,10 @@ impl PyHDict {
     #[staticmethod]
     fn from_dict(d: &Bound<'_, PyDict>) -> PyResult<Self> {
         let mut inner = data::HDict::new();
-        for (key, value) in d.iter() {
+        for (key, value) in d.copy()?.iter() {
             let name: String = key.extract()?;
             let kind = py_to_kind(&value)?;
+            crate::convert::ensure_python_child(&kind)?;
             inner.set(name, kind);
         }
         Ok(Self { inner })
@@ -173,6 +178,7 @@ impl PyHDict {
 
     fn __setitem__(&mut self, key: String, val: &Bound<'_, PyAny>) -> PyResult<()> {
         let kind = py_to_kind(val)?;
+        crate::convert::ensure_python_child(&kind)?;
         self.inner.set(key, kind);
         Ok(())
     }
@@ -219,8 +225,9 @@ impl PyHDict {
 }
 
 impl PyHDict {
-    pub fn from_core(d: &data::HDict) -> Self {
-        Self { inner: d.clone() }
+    pub fn from_core(d: &data::HDict) -> PyResult<Self> {
+        crate::convert::ensure_python_dict(d)?;
+        Ok(Self { inner: d.clone() })
     }
 
     pub fn to_core(&self) -> data::HDict {
@@ -279,7 +286,7 @@ impl PyHCol {
     /// Column metadata as an HDict.
     #[getter]
     fn meta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyHDict::from_core(&self.meta)
+        Ok(PyHDict::from_core(&self.meta)?
             .into_pyobject(py)?
             .into_any()
             .unbind())
@@ -295,11 +302,12 @@ impl PyHCol {
 }
 
 impl PyHCol {
-    pub fn from_core(c: &data::HCol) -> Self {
-        Self {
+    pub fn from_core(c: &data::HCol) -> PyResult<Self> {
+        crate::convert::ensure_python_dict(&c.meta)?;
+        Ok(Self {
             name: c.name.clone(),
             meta: c.meta.clone(),
-        }
+        })
     }
 }
 
@@ -331,35 +339,54 @@ impl PyHGrid {
 
     /// Construct a grid from meta, columns, and rows.
     #[staticmethod]
-    fn from_parts(meta: &PyHDict, cols: Vec<PyHCol>, rows: Vec<PyRef<'_, PyHDict>>) -> Self {
+    fn from_parts(
+        meta: &PyHDict,
+        cols: Vec<PyHCol>,
+        rows: Vec<PyRef<'_, PyHDict>>,
+    ) -> PyResult<Self> {
+        crate::convert::ensure_python_grid_dict(&meta.inner)?;
+        for col in &cols {
+            crate::convert::ensure_python_grid_dict(&col.meta)?;
+        }
+        for row in &rows {
+            crate::convert::ensure_python_grid_dict(&row.inner)?;
+        }
         let core_cols: Vec<data::HCol> = cols
             .into_iter()
             .map(|c| data::HCol::with_meta(c.name.clone(), c.meta.clone()))
             .collect();
         let core_rows: Vec<data::HDict> = rows.iter().map(|r| r.inner.clone()).collect();
-        Self {
+        Ok(Self {
             inner: data::HGrid::from_parts(meta.inner.clone(), core_cols, core_rows),
-        }
+        })
     }
 
     /// Add a row (HDict) to the grid.
-    fn add_row(&mut self, row: &PyHDict) {
+    fn add_row(&mut self, row: &PyHDict) -> PyResult<()> {
+        crate::convert::ensure_python_grid_dict(&row.inner)?;
         self.inner.rows.push(row.inner.clone());
+        Ok(())
     }
 
     /// Set the grid metadata.
-    fn set_meta(&mut self, meta: &PyHDict) {
+    fn set_meta(&mut self, meta: &PyHDict) -> PyResult<()> {
+        crate::convert::ensure_python_grid_dict(&meta.inner)?;
         self.inner.meta = meta.inner.clone();
+        Ok(())
     }
 
     /// Add a column to the grid.
     #[pyo3(signature = (name, meta = None))]
-    fn add_col(&mut self, name: String, meta: Option<&PyHDict>) {
+    fn add_col(&mut self, name: String, meta: Option<&PyHDict>) -> PyResult<()> {
+        if let Some(meta) = meta {
+            crate::convert::ensure_python_grid_dict(&meta.inner)?;
+        }
         let col = match meta {
             Some(m) => data::HCol::with_meta(name, m.inner.clone()),
             None => data::HCol::new(name),
         };
         self.inner.cols.push(col);
+        Ok(())
     }
 
     /// Return all rows as a list of HDict.
@@ -367,12 +394,17 @@ impl PyHGrid {
         self.inner
             .rows
             .iter()
-            .map(|r| Ok(PyHDict::from_core(r).into_pyobject(py)?.into_any().unbind()))
+            .map(|r| {
+                Ok(PyHDict::from_core(r)?
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
             .collect()
     }
 
     /// Return all columns as a list of HCol.
-    fn cols(&self) -> Vec<PyHCol> {
+    fn cols(&self) -> PyResult<Vec<PyHCol>> {
         self.inner.cols.iter().map(PyHCol::from_core).collect()
     }
 
@@ -388,8 +420,8 @@ impl PyHGrid {
 
     /// Look up a column by name. Returns HCol or None.
     #[pyo3(signature = (name,))]
-    fn col(&self, name: &str) -> Option<PyHCol> {
-        self.inner.col(name).map(PyHCol::from_core)
+    fn col(&self, name: &str) -> PyResult<Option<PyHCol>> {
+        self.inner.col(name).map(PyHCol::from_core).transpose()
     }
 
     /// Return column names as a list of strings.
@@ -404,7 +436,7 @@ impl PyHGrid {
 
     /// Return the grid metadata as an HDict.
     fn meta(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyHDict::from_core(&self.inner.meta)
+        Ok(PyHDict::from_core(&self.inner.meta)?
             .into_pyobject(py)?
             .into_any()
             .unbind())
@@ -423,7 +455,7 @@ impl PyHGrid {
             ));
         }
         match self.inner.row(idx as usize) {
-            Some(row) => Ok(PyHDict::from_core(row)
+            Some(row) => Ok(PyHDict::from_core(row)?
                 .into_pyobject(py)?
                 .into_any()
                 .unbind()),
@@ -458,8 +490,9 @@ impl PyHGrid {
 }
 
 impl PyHGrid {
-    pub fn from_core(g: &data::HGrid) -> Self {
-        Self { inner: g.clone() }
+    pub fn from_core(g: &data::HGrid) -> PyResult<Self> {
+        crate::convert::ensure_python_grid(g)?;
+        Ok(Self { inner: g.clone() })
     }
 
     pub fn to_core(&self) -> data::HGrid {
@@ -486,7 +519,7 @@ impl PyGridRowIter {
             let row = &self.rows[self.index];
             self.index += 1;
             Ok(Some(
-                PyHDict::from_core(row)
+                PyHDict::from_core(row)?
                     .into_pyobject(py)?
                     .into_any()
                     .unbind(),
@@ -517,6 +550,7 @@ impl PyHList {
         if let Some(items) = items {
             for item in items {
                 let kind = py_to_kind(&item)?;
+                crate::convert::ensure_python_child(&kind)?;
                 inner.push(kind);
             }
         }
@@ -526,6 +560,7 @@ impl PyHList {
     /// Append a single value to the list.
     fn push(&mut self, val: &Bound<'_, pyo3::PyAny>) -> PyResult<()> {
         let kind = py_to_kind(val)?;
+        crate::convert::ensure_python_child(&kind)?;
         self.inner.push(kind);
         Ok(())
     }
@@ -550,6 +585,7 @@ impl PyHList {
             ));
         }
         let kind = py_to_kind(val)?;
+        crate::convert::ensure_python_child(&kind)?;
         self.inner.0[idx as usize] = kind;
         Ok(())
     }
@@ -623,8 +659,11 @@ impl PyHList {
 }
 
 impl PyHList {
-    pub fn from_core(l: &data::HList) -> Self {
-        Self { inner: l.clone() }
+    pub fn from_core(l: &data::HList) -> PyResult<Self> {
+        for value in &l.0 {
+            crate::convert::ensure_python_child(value)?;
+        }
+        Ok(Self { inner: l.clone() })
     }
 
     pub fn to_core(&self) -> data::HList {

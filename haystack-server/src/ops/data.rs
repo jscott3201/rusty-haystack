@@ -50,6 +50,12 @@ pub async fn handle_import(
     let request_grid = content::decode_request_grid(&body, content_type)
         .map_err(|e| HaystackError::bad_request(format!("failed to decode request: {e}")))?;
 
+    let writer = state.native_graph.as_ref().ok_or_else(|| {
+        HaystackError::new(
+            "native import is unavailable for durable storage",
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+        )
+    })?;
     let mut count: usize = 0;
 
     for row in &request_grid.rows {
@@ -63,13 +69,12 @@ pub async fn handle_import(
 
         if state.graph.contains(&ref_val) {
             // Update existing entity
-            state.graph.update(&ref_val, row.clone()).map_err(|e| {
+            writer.update(&ref_val, row.clone()).map_err(|e| {
                 HaystackError::internal(format!("update failed for {ref_val}: {e}"))
             })?;
         } else {
             // Add new entity
-            state
-                .graph
+            writer
                 .add(row.clone())
                 .map_err(|e| HaystackError::internal(format!("add failed for {ref_val}: {e}")))?;
         }

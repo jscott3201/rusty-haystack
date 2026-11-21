@@ -3,4 +3,5 @@ target/
 *.md
 docs/
 .DS_Store
-rusty-haystack/
+rusty-haystack/*
+!rusty-haystack/Cargo.toml

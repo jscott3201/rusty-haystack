@@ -254,3 +254,26 @@ class TestHDateTime:
     def test_repr(self):
         dt = rh.HDateTime(2024, 1, 15, 10, 30, 0, 0, "UTC")
         assert "2024" in repr(dt)
+
+
+def test_number_representation_identity_and_hash():
+    import struct
+
+    positive = rh.Number(0.0)
+    negative = rh.Number(-0.0)
+    assert positive != negative
+    assert len({positive, negative}) == 2
+    nan1 = struct.unpack(">d", bytes.fromhex("7ff8000000000001"))[0]
+    nan2 = struct.unpack(">d", bytes.fromhex("7ff8000000000002"))[0]
+    assert rh.Number(nan1) == rh.Number(nan1)
+    assert hash(rh.Number(nan1)) == hash(rh.Number(nan1))
+    assert rh.Number(nan1) != rh.Number(nan2)
+    assert len({rh.Number(nan1), rh.Number(nan2)}) == 2
+    assert rh.Number(1.0, "kW") != rh.Number(1.0, "kilowatt")
+
+
+def test_coord_representation_identity_and_hash():
+    positive = rh.Coord(0.0, 1.0)
+    negative = rh.Coord(-0.0, 1.0)
+    assert positive != negative
+    assert len({positive, negative}) == 2

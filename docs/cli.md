@@ -3,7 +3,7 @@
 The `haystack` CLI binary provides commands for serving, importing, exporting, validating data, and querying remote servers.
 
 ```sh
-cargo build -p haystack-cli --release
+cargo build --locked -p rusty-haystack-cli --release
 ./target/release/haystack --help
 ```
 
@@ -11,7 +11,13 @@ cargo build -p haystack-cli --release
 
 ### `serve`
 
-Start the Haystack HTTP API server.
+Start the Haystack HTTP API server. The `Listening on` banner reports the actual
+bound address after application readiness, including when `--port 0` is used.
+Ctrl-C and, on Unix, SIGTERM seal admission and initiate shutdown. The CLI waits
+for owned HTTP/WebSocket work and provider cleanup before dropping its Tokio
+runtime outside the asynchronous context. If the close deadline expires, it
+reports the error and keeps waiting for actual termination; non-cooperative
+code can therefore delay process exit. See [application lifecycle](application-lifecycle.md).
 
 ```sh
 haystack serve [OPTIONS]
@@ -23,10 +29,14 @@ haystack serve [OPTIONS]
 | `--host` | | Host to bind to | `127.0.0.1` |
 | `--file` | `-f` | Load entities from file at startup | |
 | `--users` | `-u` | TOML file with user credentials for SCRAM auth | |
+| `--postgres-config` | | Explicit PostgreSQL TOML; requires the `postgres` build feature and nonempty `--users`; conflicts with `--file`/`--demo` | Memory |
 | `--demo` | | Load a demo building automation dataset | |
 | `--cors-origin` | | Allow cross-origin browser requests from this origin (repeatable) | No CORS headers |
 
-The server password can also be provided via the `HAYSTACK_PASSWORD` environment variable, which is useful for containerized deployments where CLI flags are less convenient.
+`HAYSTACK_PASSWORD` supplies passwords to `user` and `client` commands. Serving
+reads hashed credentials from `--users`, not that variable. For a runnable
+authenticated durable server, configuration, write/history flow, restart and
+cleanup recipe, see [standalone PostgreSQL](standalone-postgres.md).
 
 Origins are matched verbatim, scheme and port included. See [Configuration](configuration.md#cross-origin-requests) for what the policy allows.
 
@@ -36,14 +46,11 @@ Examples:
 # Demo server
 haystack serve --demo
 
-# Production with auth
+# Memory server with auth
 haystack serve --file data/entities.zinc --users users.toml --port 9090
 
 # Bind to all interfaces (e.g., for Docker)
 haystack serve --demo --host 0.0.0.0 --port 8080
-
-# Password via environment variable
-HAYSTACK_PASSWORD=s3cret haystack serve --file data/entities.zinc --users users.toml
 
 # Reachable from a dashboard on another origin
 haystack serve --demo --cors-origin https://ops.example.com

@@ -1,0 +1,5 @@
+# Embedded sources are admitted by digest (haystack-core/xeto-profiles) and
+# compared byte-for-byte in fixtures. A Windows checkout with core.autocrlf
+# rewrote them to CRLF, the digests stopped matching and the pinned catalog
+# refused to load. Check every text file out with LF on every platform.
+* text=auto eol=lf

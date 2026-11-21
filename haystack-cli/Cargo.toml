@@ -9,19 +9,36 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "haystack"
 path = "src/main.rs"
 
+[features]
+default = []
+postgres = ["haystack-app/postgres"]
+mcp = ["dep:haystack-mcp", "haystack-mcp/stdio", "dep:libc"]
+mcp-http = ["dep:haystack-mcp", "haystack-mcp/http", "dep:libc", "dep:base64"]
+
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.9.0", path = "../haystack-core" }
-haystack-server = { package = "rusty-haystack-server", version = "0.9.0", path = "../haystack-server" }
-haystack-client = { package = "rusty-haystack-client", version = "0.9.0", path = "../haystack-client" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-clap = { version = "4", features = ["derive"] }
-toml = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-env_logger = "0.11"
+haystack-app.workspace = true
+haystack-mcp = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+haystack-core.workspace = true
+haystack-server.workspace = true
+haystack-client.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+clap = { workspace = true, features = ["derive"] }
+toml.workspace = true
+serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+env_logger.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
-tempfile = "3"
+reqwest.workspace = true
+tempfile.workspace = true

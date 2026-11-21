@@ -2,19 +2,21 @@
 
 ## Crate Dependency Graph
 
-```
-haystack-core          (foundation -- no workspace deps)
-    |
-    +-- haystack-client    (HTTP/WS client, SCRAM handshake)
-    |       |
-    +-------+-- haystack-server  (HTTP API, 20+ ops, WebSocket, auth)
-    |               |
-    +-------+-------+-- haystack-cli   (CLI binary, depends on all three)
-    |
-    +-- rusty-haystack     (PyO3 Python bindings, core only)
-```
+| Crate | Workspace dependencies | Responsibility |
+| --- | --- | --- |
+| `haystack-core` | None | Types, codecs, pure graph and query/catalog machinery |
+| `haystack-app` | core | Application lifecycle, resource ownership, and bounded shared reads |
+| `haystack-client` | core | HTTP/WebSocket client and authentication |
+| `haystack-server` | core, app, client | HTTP profiles, authentication and legacy providers |
+| `haystack-cli` | core, client, server | Command-line application |
+| `rusty-haystack` | core, client, server | Python bindings |
 
-`haystack-core` is the foundation. Every other crate depends on it directly. `haystack-cli` ties everything together into a single binary.
+The application read service has no HTTP-framework dependency. Its scoped HTTP
+adapter and embedded callers share the same policy and execution contracts;
+see [shared reads](shared-reads.md). The legacy server profile remains explicit
+compatibility behavior. The [application lifecycle](application-lifecycle.md)
+owns admission, selected resources, and actual work completion; caller-provided
+Tokio runtimes remain borrowed.
 
 ## Core Abstractions
 
@@ -62,11 +64,12 @@ An in-memory entity store with bitmap indexing for fast tag-based queries and re
 
 ```
 EntityGraph
-  +-- entities: HashMap<String, HDict>    (ref_val -> entity)
+  +-- entities: BTreeMap<String, HDict>    (ref_val -> entity)
   +-- tag_index: TagBitmapIndex           (fast has/missing queries)
   +-- adjacency: RefAdjacency             (bidirectional ref links)
-  +-- namespace: Option<DefNamespace>     (ontology for spec-aware ops)
-  +-- version: u64                        (monotonic counter)
+  +-- namespace: Option<Arc<DefNamespace>>     (ontology for spec-aware ops)
+  +-- version: u64                        (entity change counter)
+  +-- catalog_generation: u64             (namespace publication counter)
   +-- changelog: Vec<GraphDiff>           (capped at 50,000 entries)
 ```
 
@@ -102,44 +105,22 @@ Codecs are registered in a static registry accessed via `codecs::codec_for(mime)
 
 ## Auth Flow (SCRAM SHA-256)
 
-The server implements [RFC 5802](https://tools.ietf.org/html/rfc5802) SCRAM-SHA-256 authentication:
+The HTTP profile follows [Haystack Auth](https://project-haystack.org/doc/docHaystack/Auth), using SCRAM-SHA-256 from [RFC 7677](https://www.rfc-editor.org/rfc/rfc7677.html). All three authentication requests use `/api/about`:
 
-```
-Client                              Server
-  |                                    |
-  |-- GET /api/about ----------------->|
-  |   Authorization: HELLO             |
-  |   username=<base64(user)>          |
-  |                                    |
-  |<--- 401 Unauthorized --------------|
-  |   WWW-Authenticate: SCRAM          |
-  |   handshakeToken=<tok>             |
-  |   hash=SHA-256                     |
-  |   data=<server_first_b64>          |
-  |                                    |
-  |-- GET /api/about ----------------->|
-  |   Authorization: SCRAM             |
-  |   handshakeToken=<tok>             |
-  |   data=<client_final_b64>          |
-  |                                    |
-  |<--- 200 OK ------------------------|
-  |   Authentication-Info:             |
-  |   authToken=<tok>                  |
-  |   data=<server_final_b64>          |
-  |                                    |
-  |-- POST /api/read ----------------->|
-  |   Authorization: BEARER            |
-  |   authToken=<tok>                  |
-  |                                    |
-  |<--- 200 OK ------------------------|
+```text
+Client                                       Server
+HELLO username=<base64url>                 -> admit AwaitFirst
+                                          <- 401 SCRAM hash=SHA-256, handshakeToken=A
+SCRAM handshakeToken=A, data=<first>       -> consume A, preserve exact first-bare
+                                          <- 401 SCRAM hash=SHA-256, handshakeToken=B, data=<server-first>
+SCRAM handshakeToken=B, data=<proof>       -> consume B, verify proof and registered identity
+                                          <- 200 Authentication-Info: authToken=C, hash=SHA-256, data=<verifier>
+BEARER authToken=C                         -> protected operation
 ```
 
-Security measures:
-- 100,000 PBKDF2 iterations
-- Constant-time credential comparison (`subtle` crate)
-- Fake challenge for unknown users (prevents enumeration)
-- 60s handshake TTL, configurable token TTL (default 3600s)
-- Periodic auth token cleanup
+Outer username/data use unpadded base64url; the inner salt/proof/verifier and stored credential records retain standard padded Base64. Client helpers preserve received transcript bytes, validate nonce extension and lengths, and verify the final signature before accepting the bearer. The independent fixture pins canonical RFC 7677 bytes: the Haystack page's illustration omits part of that RFC nonce and includes trailing LF in outer data, so it is not used as a complete cryptographic vector.
+
+The server keeps `AwaitFirst` and `AwaitFinal` phases and bearer records under one lock, with atomic sweep/admission and one-time consumption. Defaults cap handshakes at 1,024 for 60 seconds and bearer records at 4,096 for 3,600 seconds; rotation preserves HELLO's original deadline. Unknown-user decoys use domain-separated HMAC values without per-HELLO PBKDF2. A registered identity remains mandatory even after a valid decoy proof. These bounds do not constitute deployment rate limiting or exhaustive timing qualification.
 
 ## Server Request Lifecycle
 
@@ -152,6 +133,26 @@ Security measures:
 4. **Content negotiation** -- `Content-Type` header selects request codec, `Accept` header selects response codec (default: `text/zinc`)
 5. **Op handler** -- decodes request grid, executes operation, encodes response grid
 6. **Response** -- grid serialized with negotiated codec and returned
+
+## WebSocket Watch Lifecycle
+
+The client and server share a text-only watch JSON profile with string `reqId`
+correlation and JSON v3 typed rows. Both cap frames and reassembled messages at
+1 MiB. The client atomically admits 1,024 pending calls; one deadline covers
+writer queueing, sending, and response waiting. A cancellation guard unregisters
+a call and seals the connection if cancellation interrupts a write. Terminal
+paths seal admission and settle every waiter before the reader is joined.
+
+Push notifications use a separate client queue of 64 entries. The server also
+bounds its outbound queue at 64 and owns the writer through a task set, ensuring
+that connection cancellation aborts it. Overflow and protocol failures terminate
+the connection explicitly. Reconnection belongs to a later new call; no accepted
+operation is automatically replayed. Explicit close permanently disables reconnect.
+
+This slice preserves username ownership in `WatchManager`: a socket disconnect
+removes that username's watches across connections. It does not introduce
+connection-scoped watches, subscription recovery, or leases. HTTP TLS configuration
+also remains separate from the existing public-root WSS connection path.
 
 ## Parser DoS Protection
 

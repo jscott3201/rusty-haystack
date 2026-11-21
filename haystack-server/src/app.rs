@@ -8,30 +8,33 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
 
 use haystack_core::auth::{AuthHeader, parse_auth_header};
-use haystack_core::graph::SharedGraph;
+use haystack_core::graph::{GraphView, SharedGraph};
 use haystack_core::ontology::DefNamespace;
 
 use crate::actions::ActionRegistry;
 use crate::auth::AuthManager;
+use crate::capabilities::{CAPABILITIES, ServiceProfile};
 use crate::cors::CorsPolicy;
-use crate::his_store::HisStore;
 use crate::ops;
 use crate::state::{AppState, SharedState};
-use crate::ws;
-use crate::ws::WatchManager;
+use haystack_app::HisStore;
 
 /// Builder for the Haystack HTTP server.
 pub struct HaystackServer {
-    graph: SharedGraph,
-    namespace: DefNamespace,
+    repository: Option<Arc<haystack_core::xeto::repository::LibraryRepository>>,
+    graph: GraphView,
+    native_graph: Option<SharedGraph>,
+    namespace: Option<DefNamespace>,
+    read_service: Option<haystack_app::ReadService>,
+    application: Option<haystack_app::ApplicationHandle>,
+    trusted_external_routes: bool,
     auth_manager: AuthManager,
     actions: ActionRegistry,
     custom_router: Option<Router<SharedState>>,
     authenticated_router: Option<Router<SharedState>>,
-    history_provider: Option<Box<dyn crate::his_provider::HistoryProvider>>,
+    history_provider: Option<HistoryBinding>,
     cors: CorsPolicy,
     port: u16,
     host: String,
@@ -41,8 +44,13 @@ impl HaystackServer {
     /// Create a new server with the given entity graph.
     pub fn new(graph: SharedGraph) -> Self {
         Self {
-            graph,
-            namespace: DefNamespace::new(),
+            graph: graph.view(),
+            native_graph: Some(graph),
+            repository: None,
+            namespace: None,
+            read_service: None,
+            application: None,
+            trusted_external_routes: false,
             auth_manager: AuthManager::empty(),
             actions: ActionRegistry::new(),
             custom_router: None,
@@ -54,9 +62,59 @@ impl HaystackServer {
         }
     }
 
+    /// Explicitly expose this immutable repository publicly at `/repo/`.
+    /// GET-only metadata and exact bytes share this server's application lifetime.
+    /// No upload, catalog admission, publication or authentication API is enabled.
+    pub fn with_public_repository(
+        mut self,
+        repository: haystack_core::xeto::repository::LibraryRepository,
+    ) -> Self {
+        self.repository = Some(Arc::new(repository));
+        self
+    }
+
     /// Set the ontology namespace for def/spec operations.
     pub fn with_namespace(mut self, ns: DefNamespace) -> Self {
-        self.namespace = ns;
+        self.namespace = Some(ns);
+        self
+    }
+
+    /// Serve the exact managed service shared with this application's embedded
+    /// callers, including its policy, dataset identity and cursor authority.
+    /// Attach `into_listener()` to that builder before start, or explicitly use
+    /// `into_external_router()` when the caller owns the listener.
+    pub fn with_scoped_reads(mut self, application: haystack_app::ApplicationHandle) -> Self {
+        let service = application.read_service();
+        self.graph = service.graph();
+        self.native_graph = service.native_graph();
+        self.read_service = Some(service);
+        self.application.get_or_insert(application);
+        self
+    }
+
+    /// Attach an existing application lifetime, preserving the selected API
+    /// profile. Scoped reads must belong to this same application in either
+    /// configuration order; mismatches are rejected before router publication.
+    /// Use `with_legacy_unrestricted` explicitly to change that profile.
+    /// Watch endpoints require selecting `state_subscriptions` on the builder
+    /// that owns this handle, including for the legacy profile.
+    pub fn with_application(mut self, application: haystack_app::ApplicationHandle) -> Self {
+        self.graph = application.read_service().graph();
+        self.native_graph = application.read_service().native_graph();
+        self.application = Some(application);
+        self
+    }
+
+    /// Select the legacy coarse-permission API (also the compatibility default).
+    pub fn with_legacy_unrestricted(mut self) -> Self {
+        self.read_service = None;
+        self
+    }
+
+    /// Explicitly authorize custom routes as a separate trusted authority.
+    /// The read service cannot police arbitrary handlers receiving `AppState`.
+    pub fn with_trusted_external_routes(mut self) -> Self {
+        self.trusted_external_routes = true;
         self
     }
 
@@ -117,10 +175,103 @@ impl HaystackServer {
     /// Set the history storage provider (default: in-memory [`HisStore`]).
     pub fn with_history_provider(
         mut self,
-        provider: Box<dyn crate::his_provider::HistoryProvider>,
+        provider: Box<dyn haystack_app::HistoryProvider>,
     ) -> Self {
-        self.history_provider = Some(provider);
+        self.history_provider = Some(HistoryBinding {
+            provider: Arc::from(provider),
+            owned: true,
+        });
         self
+    }
+
+    /// Use an already-initialized provider whose lifetime stays with its caller.
+    /// The application invokes neither initialization nor cleanup hooks.
+    pub fn with_borrowed_history_provider(
+        mut self,
+        provider: Arc<dyn haystack_app::HistoryProvider>,
+    ) -> Self {
+        self.history_provider = Some(HistoryBinding {
+            provider,
+            owned: false,
+        });
+        self
+    }
+
+    /// Transfer this listener configuration to ApplicationBuilder::owned_resource.
+    pub fn into_listener(self) -> HttpListener {
+        HttpListener { server: Some(self) }
+    }
+
+    /// Start a legacy application borrowing the current runtime. Scoped setups
+    /// use their ApplicationBuilder so one managed service owns their authority.
+    pub fn start(mut self) -> std::io::Result<haystack_app::ApplicationOwner> {
+        self.validate_configuration()?;
+        if self.application.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "attach configured application adapters before starting their ApplicationBuilder",
+            ));
+        }
+        let graph = self.native_graph.clone().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "durable storage requires its application owner",
+            )
+        })?;
+        let builder = haystack_app::ApplicationBuilder::new(
+            graph.clone(),
+            Arc::new(haystack_app::AllowAll),
+            haystack_app::ReadLimits::default(),
+        )
+        .map_err(std::io::Error::other)?;
+        let subscriptions = haystack_app::StateSubscriptionService::new(
+            builder.handle().read_service(),
+            haystack_app::EntityMutationStore::new(graph),
+            haystack_app::SubscriptionLimits::default(),
+        )
+        .map_err(std::io::Error::other)?;
+        let builder = builder
+            .state_subscriptions(subscriptions)
+            .map_err(std::io::Error::other)?;
+        let binding = self
+            .history_provider
+            .take()
+            .unwrap_or_else(|| HistoryBinding {
+                provider: Arc::new(HisStore::new()),
+                owned: true,
+            });
+        let history = haystack_app::HistoryService::new(
+            builder.handle().read_service(),
+            binding.provider,
+            haystack_app::HistoryLimits::default(),
+        )
+        .map_err(std::io::Error::other)?;
+        let builder = if binding.owned {
+            builder.owned_history(history)
+        } else {
+            builder.borrowed_history(history)
+        }
+        .map_err(std::io::Error::other)?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
+        builder
+            .owned_resource(self.into_listener())
+            .start(&runtime)
+            .map_err(std::io::Error::other)
+    }
+
+    /// Assemble an adapter for a caller-owned listener. The application still
+    /// seals built-in admission and observes admitted reads/upgrades, but owns
+    /// neither this router's listener nor arbitrary tasks spawned by custom
+    /// routes. History comes from the exact application selection; independent
+    /// listener providers are rejected. Borrowed provider hooks remain external.
+    pub fn into_external_router(self) -> std::io::Result<Router> {
+        if self.application.is_none() || self.history_provider.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "external routers require application-selected history and an application handle",
+            ));
+        }
+        self.build_router()
     }
 
     /// Start the HTTP server. This blocks until the server is stopped.
@@ -128,31 +279,66 @@ impl HaystackServer {
         self.run_reporting_addr(|_| {}).await
     }
 
-    /// Run, invoking `on_bound` with the address actually bound.
-    ///
-    /// The callback fires after a successful bind and before the first connection
-    /// is accepted, so a caller that prints or publishes the address cannot race a
-    /// client that reads it. This is what makes `--port 0` usable: the kernel picks
-    /// the port and this is the only place it can be observed.
+    /// Run a legacy application, reporting its bound address only after
+    /// initialization and readiness. Dropping this future requests shutdown;
+    /// use `start()` and await owner.close() to observe cleanup before returning.
     pub async fn run_reporting_addr<F>(self, on_bound: F) -> std::io::Result<()>
     where
         F: FnOnce(std::net::SocketAddr),
     {
-        let (host, port) = (self.host.clone(), self.port);
-        let app = self.build_router();
+        let owner = self.start()?;
+        let ready = match owner.ready().await {
+            Ok(ready) => ready,
+            Err(error) => {
+                owner.terminated().await;
+                return Err(std::io::Error::other(error));
+            }
+        };
+        on_bound(ready.listeners[0].address);
+        owner
+            .terminated()
+            .await
+            .close
+            .map(|_| ())
+            .map_err(std::io::Error::other)
+    }
 
-        log::info!("Starting haystack-server on {host}:{port}");
+    fn profile(&self) -> ServiceProfile {
+        if self.read_service.is_some() {
+            ServiceProfile::ScopedReadService
+        } else {
+            ServiceProfile::LegacyUnrestricted
+        }
+    }
+    fn validate_configuration(&self) -> std::io::Result<()> {
+        if self.application.is_some() && self.history_provider.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "select history once on the application builder",
+            ));
+        }
 
-        let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
-
-        // Report the address actually bound, not the one requested. With `--port 0`
-        // the kernel picks the port, and nothing outside the process could discover
-        // it — so callers had to guess a free port and race the bind (issue #35).
-        let bound = listener.local_addr()?;
-        log::info!("haystack-server listening on {bound}");
-        on_bound(bound);
-
-        axum::serve(listener, app).await
+        if let Some(reads) = &self.read_service
+            && !self
+                .application
+                .as_ref()
+                .is_some_and(|application| reads.same_service(&application.read_service()))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scoped reads and lifecycle attachment must share the exact application service",
+            ));
+        }
+        if self.profile() == ServiceProfile::ScopedReadService
+            && (self.custom_router.is_some() || self.authenticated_router.is_some())
+            && !self.trusted_external_routes
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scoped reads require explicit trusted external authority for custom routes",
+            ));
+        }
+        Ok(())
     }
 
     /// Assemble the router and its middleware stack, without binding a socket.
@@ -161,67 +347,128 @@ impl HaystackServer {
     /// directly in tests. Layer *order* below is load-bearing rather than
     /// incidental, and an assertion about it in a comment is worth only as much
     /// as the test that exercises it.
-    fn build_router(self) -> Router {
-        let his: Box<dyn crate::his_provider::HistoryProvider> = self
-            .history_provider
-            .unwrap_or_else(|| Box::new(HisStore::new()));
+    fn build_router(self) -> std::io::Result<Router> {
+        self.validate_configuration()?;
+        let profile = self.profile();
+        // Namespace initialization requires the explicit native capability.
+        if let Some(writer) = &self.native_graph {
+            writer.write(|graph| {
+                if let Some(namespace) = self.namespace {
+                    graph.set_namespace(Arc::new(namespace));
+                } else if graph.namespace_arc().is_none() {
+                    graph.set_namespace(Arc::new(DefNamespace::new()));
+                }
+            });
+        } else if self.namespace.is_some() || self.graph.read(|g| g.namespace_arc().is_none()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "durable catalog replacement is unavailable",
+            ));
+        }
+        let history_service = self
+            .application
+            .as_ref()
+            .and_then(|app| app.history_service());
+        let history_mutation_service = self
+            .application
+            .as_ref()
+            .and_then(|app| app.history_mutation_service());
+        let his = history_service.as_ref().map(|service| service.provider());
 
+        let mutation_service = self.application.as_ref().and_then(|a| a.mutation_service());
+        let subscription_service = self
+            .application
+            .as_ref()
+            .and_then(|app| app.subscription_service());
         let state: SharedState = Arc::new(AppState {
+            repository: self.repository,
+            command_service: self
+                .application
+                .as_ref()
+                .and_then(|app| app.command_service()),
+            subscription_service,
+            mutation_service,
+            history_service,
+            history_mutation_service,
+            application: self.application,
             graph: self.graph,
-            namespace: parking_lot::RwLock::new(self.namespace),
+            native_graph: self.native_graph,
+            read_service: self.read_service,
+            profile,
             lib_mutations: parking_lot::Mutex::new(()),
             auth: self.auth_manager,
-            watches: WatchManager::new(),
             actions: self.actions,
             his,
             started_at: std::time::Instant::now(),
         });
 
-        let mut core_router = Router::new()
-            // GET routes
-            .route("/api/about", get(ops::about::handle))
-            .route("/api/ops", get(ops::ops_handler::handle))
-            .route("/api/formats", get(ops::formats::handle))
-            .route("/api/ws", get(ws::ws_handler))
-            // POST routes
-            .route("/api/read", post(ops::read::handle))
-            .route("/api/nav", post(ops::nav::handle))
-            .route("/api/defs", post(ops::defs::handle))
-            .route("/api/libs", post(ops::defs::handle_libs))
-            .route("/api/hisRead", post(ops::his::handle_read))
-            .route("/api/hisWrite", post(ops::his::handle_write))
-            .route("/api/watchSub", post(ops::watch::handle_sub))
-            .route("/api/watchPoll", post(ops::watch::handle_poll))
-            .route("/api/watchUnsub", post(ops::watch::handle_unsub))
-            .route("/api/pointWrite", post(ops::point_write::handle))
-            .route("/api/invokeAction", post(ops::invoke::handle))
-            .route("/api/close", post(ops::about::handle_close))
-            .route("/api/import", post(ops::data::handle_import))
-            .route("/api/export", post(ops::data::handle_export))
-            .route("/api/validate", post(ops::libs::handle_validate))
-            .route("/api/specs", post(ops::libs::handle_specs))
-            .route("/api/spec", post(ops::libs::handle_spec))
-            .route("/api/loadLib", post(ops::libs::handle_load_lib))
-            .route("/api/unloadLib", post(ops::libs::handle_unload_lib))
-            .route("/api/exportLib", post(ops::libs::handle_export_lib))
-            .route("/api/changes", post(ops::changes::handle));
-
-        // Merge the authenticated custom router before applying the auth layer,
-        // so its routes are also protected by the built-in auth middleware.
-        if let Some(auth_router) = self.authenticated_router {
-            core_router = core_router.merge(auth_router);
+        let mut core_router = Router::new().layer(middleware::from_fn(crate::typed_http::fallback));
+        for capability in CAPABILITIES.iter().filter(|capability| {
+            capability.enabled(
+                profile,
+                state.mutation_service.is_some(),
+                state.history_service.is_some(),
+                state.history_mutation_service.is_some(),
+                state.subscription_service.is_some(),
+            )
+        }) {
+            core_router = core_router.route(capability.path, capability.router(profile));
         }
 
-        let mut app = core_router
-            .route_layer(middleware::from_fn_with_state(
+        // Routes come from the fixed supported-handler inventory; the
+        // current catalog observation drives dispatch and discovery per
+        // request, so a newly parsed declaration never creates a route.
+        // A simple name that is already an H4 capability path keeps that
+        // route: typed `ph.api::nav` is served only at its qualified path and
+        // `/api/nav` stays scoped H4 navigation for every protocol version.
+        if state.application.is_some() {
+            for (name, qname) in haystack_app::ReadService::supported_functions() {
+                for name in [name, qname] {
+                    let path = format!("/api/{name}");
+                    if !CAPABILITIES
+                        .iter()
+                        .any(|capability| capability.path == path)
+                    {
+                        core_router =
+                            core_router.route(&path, axum::routing::any(crate::typed_http::handle));
+                    }
+                }
+            }
+        }
+        core_router = core_router
+            .layer(middleware::from_fn_with_state(
                 state.clone(),
-                auth_middleware,
+                builtin_auth_middleware,
             ))
+            .layer(middleware::from_fn(crate::typed_http::version_header));
+
+        // Custom fallbacks own unmatched paths, including /api paths. Apply
+        // ordinary authentication without typed dispatch or version rewriting.
+        // Axum chooses the right-hand default fallback, but preserves an
+        // explicit custom fallback from either side.
+        if let Some(auth_router) = self.authenticated_router {
+            core_router = auth_router
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    auth_middleware,
+                ))
+                .merge(core_router);
+        }
+        let mut app = core_router
             .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
             .with_state(state.clone());
 
+        if state.repository.is_some() {
+            app = app.nest(
+                "/repo",
+                Router::new()
+                    .fallback(crate::repository::handle)
+                    .with_state(state.clone()),
+            );
+        }
+
         if let Some(custom) = self.custom_router {
-            app = app.merge(custom.with_state(state));
+            app = custom.with_state(state.clone()).merge(app);
         }
 
         // Outermost, and after the custom-router merge so those routes are
@@ -243,7 +490,134 @@ impl HaystackServer {
             app = app.layer(cors);
         }
 
-        app
+        // Admission encloses auth, body extraction, and even custom routes.
+        // CORS remains outside auth but cannot bypass application shutdown.
+        app = app.layer(middleware::from_fn_with_state(state, lifecycle_middleware));
+        Ok(app)
+    }
+}
+
+struct HistoryBinding {
+    provider: Arc<dyn haystack_app::HistoryProvider>,
+    owned: bool,
+}
+
+/// An owned HTTP listener, initialized and closed by the application coordinator.
+pub struct HttpListener {
+    server: Option<HaystackServer>,
+}
+impl haystack_app::ApplicationResource for HttpListener {
+    fn name(&self) -> &str {
+        "http"
+    }
+    fn initialize(
+        &mut self,
+        context: haystack_app::ResourceContext,
+    ) -> haystack_app::ResourceFuture<'_, haystack_app::ReadyInfo> {
+        Box::pin(async move {
+            let mut server =
+                self.server
+                    .take()
+                    .ok_or(haystack_app::ApplicationError::Configuration(
+                        "listener already initialized",
+                    ))?;
+            server.validate_configuration().map_err(|error| {
+                haystack_app::ApplicationError::resource("http", error.to_string())
+            })?;
+            let application = context.application();
+            if server
+                .application
+                .as_ref()
+                .is_some_and(|configured| !configured.same_application(&application))
+                || !server
+                    .graph
+                    .shares_storage(&application.read_service().graph())
+            {
+                return Err(haystack_app::ApplicationError::Configuration(
+                    "listener and application must share the same authority and graph",
+                ));
+            }
+            server.application = Some(application.clone());
+            if server.history_provider.is_some() {
+                return Err(haystack_app::ApplicationError::Configuration(
+                    "select history once on the application builder",
+                ));
+            }
+            let listener =
+                tokio::net::TcpListener::bind(format!("{}:{}", server.host, server.port))
+                    .await
+                    .map_err(|error| {
+                        haystack_app::ApplicationError::resource("http bind", error.to_string())
+                    })?;
+            let address = listener.local_addr().map_err(|error| {
+                haystack_app::ApplicationError::resource("http address", error.to_string())
+            })?;
+            let router = server.build_router().map_err(|error| {
+                haystack_app::ApplicationError::resource("http router", error.to_string())
+            })?;
+            let closing = application.closing();
+            context.spawn("http listener", async move {
+                // A bound listener is part of readiness; no requests are accepted
+                // until every selected application resource has initialized.
+                if application.ready().await.is_err() {
+                    return Ok(());
+                }
+                let listener = crate::owned_io::OwnedListener::new(listener, application);
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(closing.cancelled_owned())
+                    .await
+                    .map_err(|error| {
+                        haystack_app::ApplicationError::resource("http listener", error.to_string())
+                    })
+            })?;
+            Ok(haystack_app::ReadyInfo {
+                listeners: vec![haystack_app::ListenerInfo {
+                    resource: "http".into(),
+                    address,
+                }],
+            })
+        })
+    }
+    fn rollback_start(&mut self) -> haystack_app::ResourceFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+    fn close(&mut self) -> haystack_app::ResourceFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+async fn lifecycle_middleware(
+    State(state): State<SharedState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    let typed = crate::typed_http::selected(&request)
+        || (state.repository.is_some()
+            && (request.uri().path() == "/repo" || request.uri().path().starts_with("/repo/")));
+    let Some(application) = &state.application else {
+        return next.run(request).await;
+    };
+    let guard = match application.admit() {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            if typed {
+                return crate::typed_http::error(haystack_app::ApiError::Unavailable);
+            }
+            return crate::error::HaystackError::new(
+                error.to_string(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+            .into_response();
+        }
+    };
+    let cancellation = guard.cancellation();
+    let command_attempt = haystack_app::CommandAttempt::default();
+    request.extensions_mut().insert(command_attempt.clone());
+    request.extensions_mut().insert(guard.clone());
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => if typed { crate::typed_http::error(command_attempt.classify(haystack_app::ApiError::Unavailable)) } else { crate::error::HaystackError::new("application stopping", StatusCode::SERVICE_UNAVAILABLE).into_response() },
+        response = next.run(request) => response,
     }
 }
 
@@ -255,7 +629,7 @@ fn required_permission(path: &str) -> Option<&'static str> {
     // Write operations
     match path {
         "/api/pointWrite" | "/api/hisWrite" | "/api/invokeAction" | "/api/loadLib"
-        | "/api/unloadLib" | "/api/import" => return Some("write"),
+        | "/api/unloadLib" | "/api/import" | "/api/entityBatch" => return Some("write"),
         _ => {}
     }
 
@@ -264,6 +638,27 @@ fn required_permission(path: &str) -> Option<&'static str> {
     // /api/hisRead, /api/watchSub, /api/watchPoll, /api/watchUnsub,
     // /api/close, /api/ops, /api/formats, etc.
     Some("read")
+}
+
+#[derive(Clone, Copy)]
+struct BuiltinSessionGuard;
+
+// The built-in default fallback participates in typed dispatch. Custom
+// authenticated routers use only auth_middleware and retain their own fallback.
+async fn builtin_auth_middleware(
+    State(state): State<SharedState>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Response {
+    req.extensions_mut()
+        .insert(ops::shared_read::ReadStarted(std::time::Instant::now()));
+    if crate::typed_http::selected(&req)
+        || (req.uri().path() == "/api/close" && state.auth.is_enabled())
+    {
+        return crate::typed_http::handle(State(state), req).await;
+    }
+    req.extensions_mut().insert(BuiltinSessionGuard);
+    auth_middleware(State(state), req, next).await
 }
 
 /// Authentication middleware for Axum.
@@ -305,8 +700,8 @@ async fn auth_middleware(
     match auth_header {
         Some(header) => match parse_auth_header(&header) {
             Ok(AuthHeader::Bearer { auth_token }) => {
-                match state.auth.validate_token(&auth_token) {
-                    Some(auth_user) => {
+                match state.auth.validate_session(&auth_token) {
+                    Some((auth_user, session)) => {
                         // Check permission for the requested path
                         if let Some(required) = required_permission(&path)
                             && !AuthManager::check_permission(&auth_user, required)
@@ -320,7 +715,31 @@ async fn auth_middleware(
 
                         // Inject AuthUser into request extensions
                         req.extensions_mut().insert(auth_user);
-                        next.run(req).await
+                        req.extensions_mut().insert(session.clone());
+                        if req.extensions().get::<BuiltinSessionGuard>().is_none() {
+                            return next.run(req).await;
+                        }
+                        let response = tokio::select! {
+                            biased;
+                            _ = session.closed() => return crate::error::HaystackError::forbidden("session closed").into_response(),
+                            response = next.run(req) => response,
+                        };
+                        if !session.is_active() {
+                            return crate::error::HaystackError::forbidden("session closed")
+                                .into_response();
+                        }
+                        let (parts, body) = response.into_parts();
+                        use futures_util::StreamExt as _;
+                        let body = body.into_data_stream().map(move |chunk| {
+                            if !session.is_active() {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    "session closed",
+                                ));
+                            }
+                            chunk.map_err(std::io::Error::other)
+                        });
+                        Response::from_parts(parts, Body::from_stream(body))
                     }
                     None => crate::error::HaystackError::new(
                         "invalid or expired auth token",
@@ -411,7 +830,8 @@ mod tests {
         #[tokio::test]
         async fn unauthenticated_post_is_rejected() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app
                 .oneshot(
@@ -434,7 +854,8 @@ mod tests {
         #[tokio::test]
         async fn preflight_is_answered_without_authentication() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -457,7 +878,8 @@ mod tests {
         #[tokio::test]
         async fn preflight_allows_post_and_the_authorization_header() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
             let headers = res.headers();
@@ -490,7 +912,8 @@ mod tests {
         #[tokio::test]
         async fn preflight_does_not_allow_credentials() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -517,7 +940,8 @@ mod tests {
                 ORIGIN.to_string(),
                 "bad\norigin".to_string(),
             ]))
-            .build_router();
+            .build_router()
+            .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -535,8 +959,9 @@ mod tests {
         /// would take the server down after it had already loaded its data.
         #[tokio::test]
         async fn a_wildcard_origin_is_refused_rather_than_panicking() {
-            let app =
-                server_with_auth_and_cors(CorsPolicy::Allow(vec!["*".to_string()])).build_router();
+            let app = server_with_auth_and_cors(CorsPolicy::Allow(vec!["*".to_string()]))
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -551,7 +976,8 @@ mod tests {
         #[tokio::test]
         async fn an_origin_off_the_allowlist_is_not_granted() {
             let app = server_with_auth_and_cors(CorsPolicy::Allow(vec![ORIGIN.to_string()]))
-                .build_router();
+                .build_router()
+                .unwrap();
 
             let res = app
                 .oneshot(preflight("https://attacker.example.com"))
@@ -575,7 +1001,9 @@ mod tests {
         /// were installed that merely granted nothing.
         #[tokio::test]
         async fn disabled_grants_nothing_and_preflight_falls_through_to_auth() {
-            let app = server_with_auth_and_cors(CorsPolicy::Disabled).build_router();
+            let app = server_with_auth_and_cors(CorsPolicy::Disabled)
+                .build_router()
+                .unwrap();
 
             let res = app.oneshot(preflight(ORIGIN)).await.unwrap();
 
@@ -588,3 +1016,11 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "scoped_body_tests.rs"]
+mod scoped_body_tests;
+
+#[cfg(test)]
+#[path = "typed_body_tests.rs"]
+mod typed_body_tests;

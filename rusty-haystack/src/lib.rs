@@ -1,3 +1,7 @@
+mod application;
+mod async_bridge;
+mod async_client;
+mod async_watch;
 mod auth;
 mod client;
 mod codecs;
@@ -6,10 +10,15 @@ mod data;
 pub mod exceptions;
 mod filter;
 mod graph;
+mod h5;
+mod http_owner;
 mod kinds;
 mod ontology;
+mod rich_kinds;
 mod server;
+mod sync_client;
 mod units;
+mod watch_owner;
 
 use pyo3::prelude::*;
 
@@ -37,6 +46,11 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ── Top-level convenience re-exports ──
     // All types also available at top level for backward compatibility
     m.add_class::<kinds::PyMarker>()?;
+    m.add_class::<rich_kinds::PyIntValue>()?;
+    m.add_class::<rich_kinds::PyFloatValue>()?;
+    m.add_class::<rich_kinds::PyNoneValue>()?;
+    m.add_class::<rich_kinds::PyBuf>()?;
+    m.add_class::<rich_kinds::PyNominal>()?;
     m.add_class::<kinds::PyNA>()?;
     m.add_class::<kinds::PyRemove>()?;
     m.add_class::<kinds::PyNumber>()?;
@@ -55,11 +69,24 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<filter::PyFilter>()?;
     m.add_class::<ontology::PyDefNamespace>()?;
 
+    m.add_class::<async_client::PyAsyncHaystackClient>()?;
+    m.add_class::<sync_client::PySyncHaystackClient>()?;
+    m.add_class::<h5::PyH5Config>()?;
+    m.add_class::<async_watch::PyAsyncWatch>()?;
+    m.add_class::<async_watch::PyWatchDelivery>()?;
+    m.add_class::<async_watch::PyWatchControl>()?;
+    m.add_class::<application::PyApplicationBuilder>()?;
+    m.add_class::<application::PyApplicationOwner>()?;
+    m.add_class::<application::PyApplicationHandle>()?;
+    m.add_class::<application::PyApplicationTermination>()?;
+
     // Top-level codec/filter functions
     m.add_function(wrap_pyfunction!(codecs::encode_grid, m)?)?;
     m.add_function(wrap_pyfunction!(codecs::decode_grid, m)?)?;
     m.add_function(wrap_pyfunction!(codecs::encode_scalar, m)?)?;
     m.add_function(wrap_pyfunction!(codecs::decode_scalar, m)?)?;
+    m.add_function(wrap_pyfunction!(codecs::encode_typed_value, m)?)?;
+    m.add_function(wrap_pyfunction!(codecs::decode_typed_value, m)?)?;
     m.add_function(wrap_pyfunction!(filter::parse_filter, m)?)?;
     m.add_function(wrap_pyfunction!(filter::matches_filter, m)?)?;
 
@@ -72,6 +99,11 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ── Submodule: kinds ──
     add_submodule(m, "kinds", |sub| {
         sub.add_class::<kinds::PyMarker>()?;
+        sub.add_class::<rich_kinds::PyIntValue>()?;
+        sub.add_class::<rich_kinds::PyFloatValue>()?;
+        sub.add_class::<rich_kinds::PyNoneValue>()?;
+        sub.add_class::<rich_kinds::PyBuf>()?;
+        sub.add_class::<rich_kinds::PyNominal>()?;
         sub.add_class::<kinds::PyNA>()?;
         sub.add_class::<kinds::PyRemove>()?;
         sub.add_class::<kinds::PyNumber>()?;
@@ -99,6 +131,8 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
         sub.add_function(wrap_pyfunction!(codecs::decode_grid, sub)?)?;
         sub.add_function(wrap_pyfunction!(codecs::encode_scalar, sub)?)?;
         sub.add_function(wrap_pyfunction!(codecs::decode_scalar, sub)?)?;
+        sub.add_function(wrap_pyfunction!(codecs::encode_typed_value, sub)?)?;
+        sub.add_function(wrap_pyfunction!(codecs::decode_typed_value, sub)?)?;
         Ok(())
     })?;
 
@@ -156,6 +190,13 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // ── Submodule: client ──
     add_submodule(m, "client", |sub| {
+        sub.add_class::<async_client::PyAsyncHaystackClient>()?;
+        sub.add_class::<sync_client::PySyncHaystackClient>()?;
+        sub.add_class::<h5::PyH5Config>()?;
+        sub.add("H5Error", m.py().get_type::<exceptions::H5Error>())?;
+        sub.add_class::<async_watch::PyAsyncWatch>()?;
+        sub.add_class::<async_watch::PyWatchDelivery>()?;
+        sub.add_class::<async_watch::PyWatchControl>()?;
         sub.add_class::<client::PyHaystackClient>()?;
         sub.add_class::<client::PyWsClient>()?;
         sub.add_class::<client::PyTlsConfig>()?;
@@ -164,6 +205,10 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // ── Submodule: server ──
     add_submodule(m, "server", |sub| {
+        sub.add_class::<application::PyApplicationBuilder>()?;
+        sub.add_class::<application::PyApplicationOwner>()?;
+        sub.add_class::<application::PyApplicationHandle>()?;
+        sub.add_class::<application::PyApplicationTermination>()?;
         sub.add_class::<server::PyHaystackServer>()?;
         sub.add_class::<server::PyAuthManager>()?;
         sub.add_class::<server::PyHisStore>()?;
@@ -180,6 +225,12 @@ fn rusty_haystack(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("GraphError", m.py().get_type::<exceptions::GraphError>())?;
     m.add("AuthError", m.py().get_type::<exceptions::AuthError>())?;
     m.add("ClientError", m.py().get_type::<exceptions::ClientError>())?;
+    m.add("H5Error", m.py().get_type::<exceptions::H5Error>())?;
+    m.add(
+        "ApplicationError",
+        m.py().get_type::<exceptions::ApplicationError>(),
+    )?;
 
+    async_bridge::register_shutdown(m.py())?;
     Ok(())
 }

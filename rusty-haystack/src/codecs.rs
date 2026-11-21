@@ -35,7 +35,7 @@ pub fn decode_grid(codec_name: &str, data: &str) -> PyResult<PyHGrid> {
     let grid = codec
         .decode_grid(data)
         .map_err(|e| PyErr::new::<exceptions::CodecError, _>(e.to_string()))?;
-    Ok(PyHGrid::from_core(&grid))
+    PyHGrid::from_core(&grid)
 }
 
 /// Encode a scalar value to a string using the specified codec.
@@ -60,4 +60,21 @@ pub fn decode_scalar(py: Python<'_>, codec_name: &str, data: &str) -> PyResult<P
         .decode_scalar(data)
         .map_err(|e| PyErr::new::<exceptions::CodecError, _>(e.to_string()))?;
     kind_to_py(py, &kind)
+}
+
+/// Encode the project-owned typed payload v1, preserving value identity.
+#[pyfunction]
+pub fn encode_typed_value(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let value = py_to_kind(value)?;
+    let bytes = codecs::typed::encode(&value)
+        .map_err(|e| exceptions::CodecError::new_err(e.to_string()))?;
+    String::from_utf8(bytes).map_err(|e| exceptions::CodecError::new_err(e.to_string()))
+}
+
+/// Decode a bounded typed payload, rejecting unrepresentable Date/Time values.
+#[pyfunction]
+pub fn decode_typed_value(py: Python<'_>, payload: &str) -> PyResult<Py<PyAny>> {
+    let value = codecs::typed::decode(payload.as_bytes())
+        .map_err(|e| exceptions::CodecError::new_err(e.to_string()))?;
+    kind_to_py(py, &value)
 }

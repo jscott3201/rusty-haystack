@@ -1,4 +1,5 @@
 pub mod http;
+pub mod subscription_ws;
 pub mod ws;
 
 use crate::error::ClientError;

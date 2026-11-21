@@ -70,6 +70,17 @@ pub fn resolve_local_offset(name: &str, local: NaiveDateTime) -> Option<LocalRes
     )
 }
 
+/// Historical offset for an instant, preserving the caller's separate spelling.
+#[cfg(feature = "chrono-tz")]
+pub fn offset_at(name: &str, instant: chrono::DateTime<FixedOffset>) -> Option<FixedOffset> {
+    let timezone = tz_for(name)?.parse::<chrono_tz::Tz>().ok()?;
+    Some(
+        timezone
+            .offset_from_utc_datetime(&instant.naive_utc())
+            .fix(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

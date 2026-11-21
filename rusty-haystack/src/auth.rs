@@ -29,7 +29,7 @@ pub fn generate_nonce() -> String {
 }
 
 /// Create the SCRAM client-first-message for a given username.
-/// Returns (client_first_message, client_nonce).
+/// Returns (client_nonce, client_first_data), using unpadded base64url.
 #[pyfunction]
 pub fn client_first_message(username: &str) -> (String, String) {
     auth::client_first_message(username)
@@ -41,12 +41,11 @@ pub fn client_first_message(username: &str) -> (String, String) {
 pub fn client_final_message(
     py: Python<'_>,
     password: &str,
-    client_nonce: &str,
-    server_first_b64: &str,
-    username: &str,
+    client_first_data: &str,
+    server_first_data: &str,
 ) -> PyResult<(String, Py<PyAny>)> {
     let (final_msg, server_sig) =
-        auth::client_final_message(password, client_nonce, server_first_b64, username)
+        auth::client_final_message(password, client_first_data, server_first_data)
             .map_err(|e| PyErr::new::<exceptions::AuthError, _>(e.to_string()))?;
     let sig_bytes = PyBytes::new(py, &server_sig);
     Ok((final_msg, sig_bytes.into_any().unbind()))
@@ -59,10 +58,10 @@ pub fn extract_client_nonce(client_first_b64: &str) -> PyResult<String> {
         .map_err(|e| PyErr::new::<exceptions::AuthError, _>(e.to_string()))
 }
 
-/// Parse an Authorization/WWW-Authenticate header into its components.
+/// Parse an Authorization credentials header into its components.
 /// Returns a dict with keys depending on the header type:
-/// - "hello": {"username": str, "data": str|None}
-/// - "scram": {"handshake_token": str, "data": str}
+/// - "hello": {"username": str}
+/// - "scram": {"handshake_token": str|None, "data": str}
 /// - "bearer": {"auth_token": str}
 #[pyfunction]
 pub fn parse_auth_header(py: Python<'_>, header: &str) -> PyResult<Py<PyAny>> {
@@ -71,10 +70,9 @@ pub fn parse_auth_header(py: Python<'_>, header: &str) -> PyResult<Py<PyAny>> {
 
     let dict = pyo3::types::PyDict::new(py);
     match parsed {
-        auth::AuthHeader::Hello { username, data } => {
+        auth::AuthHeader::Hello { username } => {
             dict.set_item("type", "hello")?;
             dict.set_item("username", username)?;
-            dict.set_item("data", data)?;
         }
         auth::AuthHeader::Scram {
             handshake_token,
@@ -93,9 +91,9 @@ pub fn parse_auth_header(py: Python<'_>, header: &str) -> PyResult<Py<PyAny>> {
 }
 
 /// Format a WWW-Authenticate SCRAM challenge header.
-#[pyfunction]
-pub fn format_www_authenticate(handshake_token: &str, hash: &str, data_b64: &str) -> String {
-    auth::format_www_authenticate(handshake_token, hash, data_b64)
+#[pyfunction(signature = (handshake_token=None, data=None))]
+pub fn format_www_authenticate(handshake_token: Option<&str>, data: Option<&str>) -> String {
+    auth::format_www_authenticate(handshake_token, data)
 }
 
 /// Format an Authentication-Info header with bearer token and data.

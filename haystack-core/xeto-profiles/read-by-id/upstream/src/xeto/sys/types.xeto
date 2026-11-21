@@ -1,0 +1,201 @@
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   2 May 2022  Brian Frank  Creation
+//
+
+// Root type for all objects
+Obj: <sealed, abstract>
+
+// This is a placeholder that always represents the parent type
+This: Obj <sealed>
+
+// Scalar is an atomic value kind with a string encoding
+Scalar: Obj <abstract>
+
+// None represents the absense of value
+None: Scalar <sealed, pattern:"∅"> "∅"
+
+// Marker labels a dict with typing information
+Marker: Scalar <sealed, pattern:"✓"> "✓"
+
+// Not available indicates invalid or missing data
+NA: Scalar <sealed> "na"
+
+// Unicode string of characters
+Str: Scalar <sealed> ""
+
+// Boolean value either true or false
+Bool: Scalar <sealed, pattern: "true|false"> "false"
+
+// Number is an integer or floating point value with an optional
+// unit of measurement. Unit symbols are defined by [Unit] enum.
+// ```
+// 45             // unitless integer
+// -23.45         // unitless floating point
+// 5.4e-7         // unitless exponent format
+// 45°F           // integer with unit
+// -23.45m²       // floating point with unit
+// 10_000         // underbar is allowed as a separator
+// 5.4E+8kW       // exponent format with unit
+// NaN            // not a number - unit is invalid
+// INF            // positive infinity - unit is invalid
+// -INF           // negative infinity - unit is invalid
+// ```
+Number: Scalar <sealed, pattern: "(-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?[a-zA-Z%_/$\\P{ASCII}]*|\"(?:NaN|-?INF)\")"> "0"
+
+// Unitless integer number
+Int: Number <sealed, pattern: "-?(?:0|[1-9]\\d*)", unitless> "0"
+
+// Unitless floating point number
+Float: Number <sealed, pattern: "(-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|\"(?:NaN|-?INF)\")", unitless> "0"
+
+// Number with a unit of time
+Duration: Number <sealed, quantity:"time"> "0sec"
+
+// Universal resource identifier
+Uri: Scalar <sealed>  ""
+
+// Reference to another dict.  The `of` meta defines target type.
+// Ref may be subtyped to classify relationship semantics such as
+// `sys.refs::ContainedByRef`.  Subtypes are nominal metadata on the
+// spec only, never value identity: values are always plain refs,
+// so reflection of a ref value always yields sys::Ref and a plain
+// ref value fits any Ref subtype.
+// Refs must adhere to the following limited set of ASCII characters:
+// - ASCII lower case letter a-z
+// - ASCII upper case letter A-Z
+// - ASCII digit 0-9
+// - Underbar "_"
+// - Colon ":"
+// - Dash "-"
+// - Period "."
+// - Tilde "~"
+// - Double colon "::" is reserved for specs/instances in a xeto lib
+Ref: Scalar <pattern: "[a-zA-Z\\d\\._~:-]*"> "x"
+
+// Reference or list of references.  The `of` meta defines target type.
+// The value may be either a single ref or a list of refs.
+MultiRef: Obj
+
+// Version string formatted as decimal digits separated by a dot: `5.0.3`
+Version: Scalar <sealed, pattern: "\\d+(\\.\\d+)*"> "0"
+
+// ISO 8601 date as year, month, day: `2011-06-07`
+Date: Scalar <sealed, pattern: "\\d{4}-\\d{2}-\\d{2}"> "2000-01-01"
+
+// ISO 8601 time as hour, minute, seconds: `09:51:27.354`
+Time: Scalar <sealed, pattern: "\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?"> "00:00:00"
+
+// ISO 8601 timestamp followed by timezone identifier. All timestamps
+// must include a [timezone](TimeZone) unless UTC zero offset. Examples:
+// ```
+// 2026-08-19T16:50:23-04:00 New_York   // eastern daylight time
+// 2026-08-19T20:50:23Z UTC             // same time in UTC
+// 2026-08-19T20:50:23Z                 // may omit timezone if offset is Z
+// 2026-08-19T14:50:23.507-06:00 Denver // fractional seconds
+// ```
+DateTime: Scalar <sealed, pattern: "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})( [a-zA-Z_\\d+-]+)?"> "2000-01-01T00:00:00Z UTC"
+
+// Span models a time range between two DateTimes.
+// It supports the following string encoding:
+//   - relative `SpanMode` name such as "yesterday"
+//   - absolute single date: `YYYY-MM-DD`
+//   - absolute date span: `YYYY-MM-DD,YYYY-MM-DD`
+//   - absolute date time span: `YYYY-MM-DDThh:mm:ss.FFF zzzz,YYYY-MM-DDThh:mm:ss.FFF zzzz`
+// In the case of two DateTime, the timezones must match.  In the other
+// cases the timezone to use is context sensitive based on the application.
+Span: Scalar <sealed>
+
+// Relative span to current date
+SpanMode: Enum {
+  today        // Current date
+  yesterday    // Day before current date
+  thisWeek     // Localized week which includes today
+  lastWeek     // Localized week before thisWeek
+  pastWeek     // Past 7 dates including today
+  thisMonth    // Calendar month which includes today
+  lastMonth    // Calendar month before thisMonth
+  pastMonth    // Past 28 days including today
+  thisQuarter  // Three month quarter which includes today
+  lastQuarter  // Three month quarter before thisQuarter
+  pastQuarter  // Past 90 days including today
+  thisYear     // Calendar year which includes today
+  lastYear     // Calendar year before thisYear
+  pastYear     // Past 365 days including today
+}
+
+// Closed enumerated set of string values
+Enum: Scalar
+
+// Open enumerated taxonomy of marker tags
+Choice: Dict
+
+// Collection is base type for all non-scalar types
+Collection: Obj <abstract>
+
+// Associative array of name/value pairs
+Dict: Collection
+
+// Ordered list of zero or more values
+List: Collection <sealed>
+
+// Two dimension table of columns and rows - see [doc.xeto::Grids]
+Grid: Collection <of:Dict>
+
+// Or type is a choice between one of multiple types.
+// It is a union of the set of types.
+Or: Obj
+
+// And type is a combination of multiple types.
+// It is an intersection of the set of types.
+And: Obj
+
+// Blob of raw binary data in base64url encoding as specified by
+// RFC 4648.  This encoding does not use padding and uses minus "-"
+// and underbar "_" as the 62nd and 63 char respectively.
+Buf: Scalar <sealed>
+
+// Filter query string
+Filter: Scalar <sealed>
+
+// Query defines a named data set
+Query: Dict <sealed>
+
+// Function represents the signature of a computation with
+// zero or more parameter types and one return type.  The `returns`
+// slot specifies the return type, and all other slots specify
+// the parameters.
+Func: Dict {
+  returns: Obj?  // Return type of the function
+}
+
+// Collection of all functions in the namespace
+Funcs: Interface
+
+// Top-level dicts with a unique identifier.
+Entity: Dict <abstract> {
+  id: Ref              // Unique identifier for entity in its project
+  spec: Ref?<of:Spec>  // Type of this entity
+}
+
+// Interface is an object oriented API defined as set of named
+// field and method slots.
+Interface: Dict
+
+// Entity that represents a file containing textual or binary data.
+// Common MIME types are mapped to specs by the `lib.files` library.
+File: Interface
+
+// BuildVar is string macro from "xeto-build.props" injected at build time.
+// See [doc.xeto::Build] for details.
+BuildVar: Scalar
+
+// Err represents an error condition.
+Err: Dict {
+  dis: Str       // Summary display string for what when wrong.
+  errTrace: Str? // Optional string for error.
+}
+

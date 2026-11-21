@@ -19,6 +19,61 @@ pub struct HaystackClient<T: Transport> {
 }
 
 impl HaystackClient<HttpTransport> {
+    /// Open a demand-driven finite Zinc history response. Remote metadata is
+    /// preserved and its terminal is provisional until validated EOF. The
+    /// session owns its response independently of the client; close it to await
+    /// cleanup. Other configured formats fail before any request is dispatched.
+    pub async fn his_read_stream(
+        &self,
+        request: &haystack_core::codecs::history::HistoryReadRequest,
+        options: crate::history::HistoryStreamOptions,
+    ) -> Result<crate::history::HttpHistorySession, crate::history::HistoryStreamError> {
+        crate::history::stream::open(&self.transport, request, options).await
+    }
+
+    /// Read with a byte budget checked before decoding and a strict row bound.
+    /// Unlike the server's advisory limit, an over-limit response is rejected.
+    pub async fn read_bounded(
+        &self,
+        filter: &str,
+        limit: usize,
+        max_response_bytes: usize,
+    ) -> Result<HGrid, ClientError> {
+        if limit == 0 || max_response_bytes == 0 {
+            return Err(ClientError::Connection(
+                "read bounds must be positive".into(),
+            ));
+        }
+        let grid = self
+            .transport
+            .call_bounded(
+                "read",
+                &read_request(filter, Some(limit)),
+                Some(max_response_bytes),
+            )
+            .await?;
+        if grid.rows.len() > limit {
+            return Err(ClientError::Codec("read response exceeds row limit".into()));
+        }
+        Ok(grid)
+    }
+
+    /// Attach scoped subscriptions using this HTTP client's existing private
+    /// bearer and exact server authority. No new authentication session is made.
+    /// WebSocket TLS uses system/public roots and does not inherit custom
+    /// reqwest TLS roots, client certificates or insecure verification settings.
+    pub async fn attach_subscription_ws(
+        &self,
+        ws_url: &str,
+    ) -> Result<
+        HaystackClient<crate::transport::subscription_ws::SubscriptionWsTransport>,
+        ClientError,
+    > {
+        Ok(HaystackClient::from_transport(
+            self.transport.attach_subscription_ws(ws_url).await?,
+        ))
+    }
+
     /// Connect to a Haystack server via HTTP, performing SCRAM authentication.
     ///
     /// # Arguments
@@ -39,12 +94,19 @@ impl HaystackClient<HttpTransport> {
         password: &str,
         config: &ClientConfig,
     ) -> Result<Self, ClientError> {
-        crate::ensure_crypto_provider();
+        let parsed_url = crate::config::validate_http_url(url)?;
+        let url = parsed_url.as_str().trim_end_matches('/');
         let client = config.build_reqwest_client()?;
         let transport = match config.auth_mode {
             crate::config::AuthMode::Scram => {
-                let auth_token =
-                    crate::auth::authenticate(&client, url, username, password).await?;
+                let auth_token = crate::auth::authenticate_with_timeout(
+                    &client,
+                    url,
+                    username,
+                    password,
+                    config.auth_timeout,
+                )
+                .await?;
                 HttpTransport::with_bearer(url, auth_token, client, &config.wire_format)
             }
             crate::config::AuthMode::Basic => {
@@ -54,61 +116,62 @@ impl HaystackClient<HttpTransport> {
                 // because there is no TLS to verify. See
                 // `ClientConfig::allow_plaintext_basic`.
                 if !url.starts_with("https://") && !config.allow_plaintext_basic {
-                    return Err(ClientError::Connection(format!(
-                        "refusing HTTP Basic auth over a non-HTTPS URL ({url}): the \
+                    return Err(ClientError::Connection(
+                        "refusing HTTP Basic auth over a non-HTTPS URL: the \
                          password would be sent base64-encoded, not encrypted, on \
                          every request. Use https://, or set \
                          ClientConfig::allow_plaintext_basic if the network is \
                          genuinely trusted"
-                    )));
+                            .into(),
+                    ));
                 }
                 HttpTransport::with_basic(url, username, password, client, &config.wire_format)
             }
         };
-        Ok(Self { transport })
+        Ok(Self {
+            transport: transport.with_entity_submission_policy(),
+        })
     }
 
-    /// Connect to a Haystack server via HTTP with mutual TLS (mTLS) client
-    /// certificate authentication, then perform SCRAM authentication.
+    /// Connect with additional server trust and optional mutual TLS identity,
+    /// then perform SCRAM authentication.
     ///
-    /// Builds a custom `reqwest::Client` configured with the provided TLS
-    /// identity (client certificate + key) and optional CA certificate, then
-    /// runs the standard SCRAM handshake over that client.
+    /// Uses the same configured HTTP client for authentication and all later
+    /// operations. Use `connect_with_config` to combine TLS with HTTP Basic or
+    /// customize deadlines.
     ///
     /// # Arguments
     /// * `url` - The server API root (e.g. `https://localhost:8443/api`)
     /// * `username` - The username to authenticate as
     /// * `password` - The user's plaintext password
-    /// * `tls` - The mTLS configuration (cert, key, optional CA)
+    /// * `tls` - Additional CA trust and optional paired client certificate/key
     pub async fn connect_with_tls(
         url: &str,
         username: &str,
         password: &str,
         tls: &crate::tls::TlsConfig,
     ) -> Result<Self, ClientError> {
-        crate::ensure_crypto_provider();
-        // Combine cert + key into a single PEM buffer for reqwest::Identity
-        let mut combined_pem = tls.client_cert_pem.clone();
-        combined_pem.extend_from_slice(&tls.client_key_pem);
+        let config = ClientConfig {
+            tls: Some(tls.clone()),
+            ..ClientConfig::default()
+        };
+        Self::connect_with_config(url, username, password, &config).await
+    }
+}
 
-        let identity = reqwest::Identity::from_pem(&combined_pem)
-            .map_err(|e| ClientError::Connection(format!("invalid client certificate: {e}")))?;
-
-        let mut builder = reqwest::Client::builder().identity(identity);
-
-        if let Some(ref ca) = tls.ca_cert_pem {
-            let cert = reqwest::Certificate::from_pem(ca)
-                .map_err(|e| ClientError::Connection(format!("invalid CA certificate: {e}")))?;
-            builder = builder.add_root_certificate(cert);
-        }
-
-        let client = builder
-            .build()
-            .map_err(|e| ClientError::Connection(format!("TLS client build failed: {e}")))?;
-
-        let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
-        let transport = HttpTransport::new(url, auth_token);
-        Ok(Self { transport })
+impl<T: crate::subscription::SubscriptionTransport> HaystackClient<T> {
+    pub(crate) fn transport_subscription_check(&self) -> Result<(), ClientError> {
+        self.transport.check_subscriptions()
+    }
+}
+impl<T: crate::history_mutation::HistoryMutationTransport> HaystackClient<T> {
+    pub(crate) fn transport_history_mutation_check(&self) -> Result<(), ClientError> {
+        self.transport.check_history_submission()
+    }
+}
+impl<T: crate::history::HistoryTransport> HaystackClient<T> {
+    pub(crate) fn transport_history_check(&self) -> Result<(), ClientError> {
+        self.transport.check_history_read()
     }
 }
 
@@ -116,7 +179,9 @@ impl HaystackClient<WsTransport> {
     /// Connect to a Haystack server via WebSocket.
     ///
     /// Performs SCRAM authentication over HTTP first to obtain an auth token,
-    /// then establishes a WebSocket connection using that token.
+    /// then establishes a WebSocket connection using that token. This creates a
+    /// new legacy session; use an HTTP client's `attach_subscription_ws` method
+    /// to resume a scoped watch in the same authentication session.
     ///
     /// # Arguments
     /// * `url` - The server API root for HTTP auth (e.g. `http://localhost:8080/api`)
@@ -131,16 +196,24 @@ impl HaystackClient<WsTransport> {
     ) -> Result<Self, ClientError> {
         crate::ensure_crypto_provider();
         // Authenticate via HTTP first to get the token
-        let client = reqwest::Client::new();
+        let client = ClientConfig::default().build_reqwest_client()?;
         let auth_token = crate::auth::authenticate(&client, url, username, password).await?;
 
         // Connect WebSocket with the token
         let transport = WsTransport::connect(ws_url, &auth_token).await?;
         Ok(Self { transport })
     }
+
+    /// Receive the next unsolicited WebSocket watch change notification.
+    pub async fn next_watch_push(&self) -> Result<crate::transport::ws::WatchPush, ClientError> {
+        self.transport.next_push().await
+    }
 }
 
 impl<T: Transport> HaystackClient<T> {
+    pub(crate) fn transport(&self) -> &T {
+        &self.transport
+    }
     /// Create a client with an already-configured transport.
     ///
     /// Useful for testing or when you have a custom [`Transport`] implementation.
@@ -190,18 +263,7 @@ impl<T: Transport> HaystackClient<T> {
     /// `"temp > 72"`). Returns a grid of matching entity dicts. Pass `limit` to
     /// cap the number of results. Returns an empty grid if nothing matches.
     pub async fn read(&self, filter: &str, limit: Option<usize>) -> Result<HGrid, ClientError> {
-        let mut row = HDict::new();
-        row.set("filter", Kind::Str(filter.to_string()));
-        if let Some(lim) = limit {
-            row.set("limit", Kind::Number(Number::unitless(lim as f64)));
-        }
-        let cols = if limit.is_some() {
-            vec![HCol::new("filter"), HCol::new("limit")]
-        } else {
-            vec![HCol::new("filter")]
-        };
-        let grid = HGrid::from_parts(HDict::new(), cols, vec![row]);
-        self.call("read", &grid).await
+        self.call("read", &read_request(filter, limit)).await
     }
 
     /// Call the `read` op with a list of entity ref ids.
@@ -252,7 +314,8 @@ impl<T: Transport> HaystackClient<T> {
     /// `ids` are ref value strings (e.g. `["@point-1", "@point-2"]`). `lease` is
     /// an optional duration string (e.g. `"1min"`, `"30sec"`, `"1hr"`) controlling
     /// how long the server keeps the watch alive without polls. Returns a grid
-    /// whose meta contains the assigned `watchId`.
+    /// whose meta contains the assigned `watchId`. WebSocket transport accepts
+    /// only `lease: None`; leases and watch display metadata are unsupported.
     pub async fn watch_sub(&self, ids: &[&str], lease: Option<&str>) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
@@ -284,8 +347,8 @@ impl<T: Transport> HaystackClient<T> {
     /// Call the `watchUnsub` op to remove entities from an active watch.
     ///
     /// `watch_id` identifies the watch. `ids` are the ref value strings to
-    /// unsubscribe (e.g. `["@point-1"]`). The watch is closed automatically
-    /// when all entities have been removed.
+    /// unsubscribe (e.g. `["@point-1"]`). Over WebSocket, an empty `ids` list
+    /// closes the watch; a nonempty list removes only those IDs, even if empty afterward.
     pub async fn watch_unsub(&self, watch_id: &str, ids: &[&str]) -> Result<HGrid, ClientError> {
         let rows: Vec<HDict> = ids
             .iter()
@@ -319,7 +382,9 @@ impl<T: Transport> HaystackClient<T> {
         self.call("pointWrite", &grid).await
     }
 
-    /// Call the `hisRead` op to read time-series history for a point.
+    /// Explicit legacy `hisRead` grid call. It does not select bounded-history-v1
+    /// and cannot obtain scoped partial-result semantics. Use `his_read_scoped`
+    /// on a history-capable transport for terminal state and provenance.
     ///
     /// `id` is the point ref (e.g. `"@sensor-1"`). `range` is a Haystack range
     /// string: `"today"`, `"yesterday"`, a single date like `"2024-01-01"`, a
@@ -337,7 +402,9 @@ impl<T: Transport> HaystackClient<T> {
         self.call("hisRead", &grid).await
     }
 
-    /// Call the `hisWrite` op to write time-series samples for a point.
+    /// Explicit legacy `hisWrite` call. Scoped servers require
+    /// `his_write_scoped` with operation identity and expected history state.
+    /// This helper cannot bypass scoped admission or reconcile a receipt.
     ///
     /// `id` is the point ref. `items` must be dicts each containing a `ts`
     /// (DateTime) and `val` tag. Returns an empty grid on success or an
@@ -473,6 +540,25 @@ impl<T: Transport> HaystackClient<T> {
     pub async fn close(&self) -> Result<(), ClientError> {
         self.transport.close().await
     }
+}
+
+impl<T: crate::entity::EntityTransport> HaystackClient<T> {
+    pub(crate) fn transport_entity_check(&self) -> Result<(), ClientError> {
+        self.transport.check_entity_submission()
+    }
+}
+
+fn read_request(filter: &str, limit: Option<usize>) -> HGrid {
+    let mut row = HDict::new();
+    row.set("filter", Kind::Str(filter.to_string()));
+    if let Some(limit) = limit {
+        row.set("limit", Kind::Number(Number::unitless(limit as f64)));
+    }
+    let mut cols = vec![HCol::new("filter")];
+    if limit.is_some() {
+        cols.push(HCol::new("limit"));
+    }
+    HGrid::from_parts(HDict::new(), cols, vec![row])
 }
 
 #[cfg(test)]

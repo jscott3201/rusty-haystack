@@ -7,7 +7,11 @@ use crate::kinds::Kind;
 
 /// Encode a single Kind value to its Zinc string representation.
 pub fn encode_scalar(val: &Kind) -> Result<String, CodecError> {
+    crate::kinds::projection::ensure_h4(val)?;
     match val {
+        Kind::Int(_) | Kind::Float(_) | Kind::None | Kind::Buf(_) | Kind::Nominal(_) => {
+            Err(CodecError::UnsupportedKind)
+        }
         Kind::Null => Ok("N".to_string()),
         Kind::Bool(true) => Ok("T".to_string()),
         Kind::Bool(false) => Ok("F".to_string()),
@@ -111,6 +115,7 @@ fn encode_dict_inline(d: &HDict) -> Result<String, CodecError> {
 /// Encode metadata tags in inline format for grid/column metadata.
 /// Format: `"tag1 tag2:val2 tag3:val3"`
 pub fn encode_meta(d: &HDict) -> Result<String, CodecError> {
+    crate::kinds::projection::ensure_h4_dict(d)?;
     let mut parts = Vec::new();
     for (k, v) in d.sorted_tags() {
         if matches!(v, Kind::Marker) {
@@ -124,6 +129,7 @@ pub fn encode_meta(d: &HDict) -> Result<String, CodecError> {
 
 /// Encode an HGrid to the Zinc wire format.
 pub fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
+    crate::kinds::projection::ensure_h4_grid(grid)?;
     let mut buf = encode_grid_header(grid)?;
 
     // Rows — write cells directly, comma-delimited.
@@ -136,6 +142,7 @@ pub fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
 
 /// Encode just the grid header: version line + meta + column definitions.
 pub fn encode_grid_header(grid: &HGrid) -> Result<String, CodecError> {
+    crate::kinds::projection::ensure_h4_grid(grid)?;
     let mut buf = String::new();
 
     // Line 1: version + grid meta
@@ -168,6 +175,10 @@ pub fn encode_grid_header(grid: &HGrid) -> Result<String, CodecError> {
 
 /// Encode a single grid row as comma-delimited values followed by newline.
 pub fn encode_grid_row(cols: &[HCol], row: &HDict) -> Result<String, CodecError> {
+    crate::kinds::projection::ensure_h4_dict(row)?;
+    for col in cols {
+        crate::kinds::projection::ensure_h4_dict(&col.meta)?;
+    }
     use std::fmt::Write;
     let mut buf = String::new();
     for (i, col) in cols.iter().enumerate() {

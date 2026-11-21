@@ -5,7 +5,10 @@
 /// Errors that can occur during Haystack client operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    /// SCRAM authentication handshake failed (invalid credentials, server rejected).
+    /// Typed failure of a selected pinned H5 request.
+    #[error(transparent)]
+    H5(#[from] crate::h5::ApiError),
+    /// Authentication failed, including rejected or expired HTTP credentials.
     #[error("authentication failed: {0}")]
     AuthFailed(String),
 
@@ -17,7 +20,7 @@ pub enum ClientError {
     #[error("transport error: {0}")]
     Transport(String),
 
-    /// Failed to establish a connection (DNS, TCP, TLS handshake).
+    /// Invalid connection configuration or failure to initialize a connection.
     #[error("connection error: {0}")]
     Connection(String),
 
@@ -33,7 +36,21 @@ pub enum ClientError {
     #[error("request timed out after {0:?}")]
     Timeout(std::time::Duration),
 
-    /// WebSocket concurrent request limit exceeded (backpressure).
+    /// Concurrent request limit exceeded (backpressure).
     #[error("too many in-flight requests")]
     TooManyRequests,
+}
+
+/// HTTP diagnostics omit URLs, credentials, and peer-controlled response text.
+pub(crate) fn http_error(error: reqwest::Error) -> ClientError {
+    let detail = if error.is_timeout() {
+        "HTTP request timed out"
+    } else if error.is_connect() {
+        "HTTP connection failed"
+    } else if error.is_body() || error.is_decode() {
+        "HTTP response body failed"
+    } else {
+        "HTTP request failed (delivery may have occurred)"
+    };
+    ClientError::Transport(detail.into())
 }

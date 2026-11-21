@@ -1,0 +1,37 @@
+{
+  "sample-store.xetolib": {
+    "sha256": "efe0ba164b04d0f1c7d578268daa5b93e5f3858f5d16e10343d122be7707187d",
+    "producer": "Python stdlib zipfile; nonseekable output for DEFLATE descriptors",
+    "source": "pragma: Lib <version: \"1.0.0\" maturity: \"stable\" depends: {{lib: \"sys\" versions: \"5.0.0\"}}>\nThing: Dict { name: Str }\n"
+  },
+  "sample-deflate.xetolib": {
+    "sha256": "07250ec0c95c626bbc6677638bb1921918f3aefa0b1682bb0c0369c21af6d0dc",
+    "producer": "Python stdlib zipfile; nonseekable output for DEFLATE descriptors",
+    "source": "pragma: Lib <version: \"1.0.0\" maturity: \"stable\" depends: {{lib: \"sys\" versions: \"5.0.0\"}}>\nThing: Dict { name: Str }\n"
+  },
+  "dependent-store.xetolib": {
+    "sha256": "bc10ce04a6d06b5f05f793bd16f41969182d9345682071a226d77fb5e08675d2",
+    "producer": "Python stdlib zipfile; nonseekable output for DEFLATE descriptors",
+    "source": "pragma: Lib <version: \"1.0.0\" maturity: \"stable\" depends: {{lib: \"sys\" versions: \"5.0.0\"}, {lib: \"sample\" versions: \"1.0.0\"}}>\nChild: sample::Thing { count: Int? }\n"
+  },
+  "dependent-deflate.xetolib": {
+    "sha256": "86522bc1045f2fc8c586c4ddfaa0de5b87e913f3ed97de4e271915b5306575e6",
+    "producer": "Python stdlib zipfile; nonseekable output for DEFLATE descriptors",
+    "source": "pragma: Lib <version: \"1.0.0\" maturity: \"stable\" depends: {{lib: \"sys\" versions: \"5.0.0\"}, {lib: \"sample\" versions: \"1.0.0\"}}>\nChild: sample::Thing { count: Int? }\n"
+  },
+  "sample-1.9.0-store.xetolib": {
+    "sha256": "040c23c8e0e3912c199f4913bb7f6ec14b0541bd825b20d6bdf78158d7791933",
+    "producer": "Python stdlib zipfile stored entries",
+    "source": "pragma: Lib <version: \"1.9.0\" maturity: \"stable\" depends: {{lib: \"sys\" versions: \"5.0.0\"}}>\nThing: Dict { name: Str }\n"
+  },
+  "sample-1.10.0-store.xetolib": {
+    "sha256": "1ac3e188231d8878f42c21b6f06fd7b0e9e9970e31965e114aeedbb434a968b9",
+    "producer": "Python stdlib zipfile stored entries",
+    "source": "pragma: Lib <version: \"1.10.0\" maturity: \"beta\" depends: {{lib: \"sys\" versions: \"5.0.0\"}}>\nThing: Dict { name: Str }\n"
+  },
+  "sample-utf8-unsigned.xetolib": {
+    "sha256": "a77485d1f71c9c5f67c3e46c2944fb2bf6a52bc256bf3db89ce2e6fdcab24bd8",
+    "producer": "Python stdlib zipfile DEFLATE/nonseekable; UTF8 flag and unsigned descriptor normalization; independently reread with ZipFile.testzip",
+    "source": "pragma: Lib <version: \"1.0.0\" maturity: \"stable\" depends: {{lib: \"sys\" versions: \"5.0.0\"}}>\nThing: Dict { name: Str }\n"
+  }
+}

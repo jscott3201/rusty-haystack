@@ -113,6 +113,101 @@ impl RefAdjacency {
     }
 }
 
+pub(crate) struct PreparedAdjacency {
+    forward: HashMap<usize, SmallVec<[(String, String); 4]>>,
+    reverse: HashMap<String, SmallVec<[(String, usize); 4]>>,
+}
+impl RefAdjacency {
+    pub(crate) fn prepare_changes(
+        &self,
+        changes: &[super::entity_graph::IndexChange<'_>],
+        budget: &mut super::size::ValueBudget,
+    ) -> Result<PreparedAdjacency, ()> {
+        use crate::kinds::Kind;
+        let mut forward = HashMap::new();
+        let mut reverse = HashMap::new();
+        for change in changes {
+            let mut outgoing = SmallVec::new();
+            for (row, add) in [(change.before, false), (change.after, true)] {
+                if let Some(row) = row {
+                    for (tag, value) in row.iter() {
+                        budget.charge(tag.len().saturating_add(1), 0)?;
+                        let Kind::Ref(target) = value else {
+                            continue;
+                        };
+                        if tag == "id" {
+                            continue;
+                        }
+                        budget.charge(
+                            target.val.len().saturating_add(1),
+                            tag.len()
+                                .saturating_add(target.val.len())
+                                .saturating_add(128),
+                        )?;
+                        if !reverse.contains_key(&target.val) {
+                            let current = self.reverse.get(&target.val);
+                            if let Some(current) = current {
+                                for (name, _) in current {
+                                    budget.charge(1, name.len().saturating_add(64))?;
+                                }
+                            }
+                            reverse
+                                .insert(target.val.clone(), current.cloned().unwrap_or_default());
+                        }
+                        let incoming = reverse
+                            .get_mut(&target.val)
+                            .expect("prepared reverse edges");
+                        if add {
+                            incoming.push((tag.to_string(), change.id));
+                            outgoing.push((tag.to_string(), target.val.clone()));
+                        } else {
+                            budget.charge(
+                                incoming.len().saturating_mul(tag.len().saturating_add(1)),
+                                0,
+                            )?;
+                            incoming.retain(|(name, id)| name != tag || *id != change.id);
+                        }
+                    }
+                }
+            }
+            forward.insert(change.id, outgoing);
+        }
+        for (len, capacity, additional) in [
+            (self.forward.len(), self.forward.capacity(), forward.len()),
+            (self.reverse.len(), self.reverse.capacity(), reverse.len()),
+        ] {
+            if additional > capacity.saturating_sub(len) {
+                budget.charge(len, len.saturating_add(additional).saturating_mul(512))?;
+            }
+        }
+        Ok(PreparedAdjacency { forward, reverse })
+    }
+    pub(crate) fn reserve_prepared(&mut self, prepared: &PreparedAdjacency) -> Result<(), ()> {
+        self.forward
+            .try_reserve(prepared.forward.len())
+            .map_err(|_| ())?;
+        self.reverse
+            .try_reserve(prepared.reverse.len())
+            .map_err(|_| ())
+    }
+    pub(crate) fn apply_prepared(&mut self, prepared: PreparedAdjacency) {
+        for (id, edges) in prepared.forward {
+            if edges.is_empty() {
+                self.forward.remove(&id);
+            } else {
+                self.forward.insert(id, edges);
+            }
+        }
+        for (target, edges) in prepared.reverse {
+            if edges.is_empty() {
+                self.reverse.remove(&target);
+            } else {
+                self.reverse.insert(target, edges);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

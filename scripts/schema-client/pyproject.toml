@@ -1,0 +1,12 @@
+[project]
+name = "rusty-haystack-schema-client-validation"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "openapi-python-client==0.29.1",
+  "jsonschema==4.26.0",
+  "openapi-spec-validator==0.9.0",
+]
+
+[tool.uv]
+package = false

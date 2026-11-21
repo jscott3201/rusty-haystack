@@ -4,7 +4,7 @@ The `rusty_haystack` Python package provides access to the Haystack core library
 
 ## Installation
 
-Requires Python 3.8+ and [maturin](https://www.maturin.rs/):
+Requires Python 3.11 or newer (CI and release wheels cover CPython 3.11–3.14) and [maturin](https://www.maturin.rs/):
 
 ```sh
 python -m venv .venv
@@ -452,7 +452,8 @@ children = client.nav(nav_id="site-1")  # -> HGrid (children)
 all_defs = client.defs()
 equip_defs = client.defs(filter="equip")
 
-# History
+# Legacy history grids; these helpers do not select bounded-history-v1
+# or scoped history-write-v1 receipts. his_write requires a legacy server.
 his = client.his_read("point-1", "today")
 his = client.his_read("point-1", "2024-01-01,2024-02-01")
 client.his_write("point-1", [
@@ -504,19 +505,77 @@ sites = client.read("site")
 client.close()
 ```
 
-### mTLS Client
+### TLS verification (`tls_verify`)
 
-Connect with mutual TLS client certificates.
+`HaystackClient.connect(..., tls_verify=True)` (the default) and
+`AsyncHaystackClient(..., tls_verify=True)` verify the HTTPS server certificate
+chain **and** hostname.
+
+Pass `tls_verify=False` only for controlled lab/development hosts (for example a
+local FIN Stack install with a self-signed certificate). That opt-out:
+
+- Disables **certificate-chain and hostname verification**, not merely trust of
+  one known self-signed leaf.
+- Applies to SCRAM authentication and subsequent HTTPS ops on that client.
+- Does **not** configure WebSocket TLS.
+- Does **not** enable HTTP redirects (the client still does not follow redirects).
+
+Prefer pinning a custom CA with `TlsConfig.with_ca(...)` when practical:
+
+- Sync: `HaystackClient.connect_tls(url, user, password, tls)`
+- Async: `AsyncHaystackClient(url, user, password, tls=tls)` (optionally with
+  `tls_verify=False` for hostname bypass in lab fixtures)
 
 ```python
+# Sync lab opt-out (development only)
+client = rh.HaystackClient.connect(
+    "https://127.0.0.1/api/demo",
+    "su",
+    "s3cret",
+    tls_verify=False,
+)
+
+# Async lab opt-out (development only)
+import asyncio
+from rusty_haystack.client import AsyncHaystackClient
+
+async def main():
+    async with AsyncHaystackClient(
+        "https://127.0.0.1/api/demo",
+        "su",
+        "s3cret",
+        tls_verify=False,
+    ) as client:
+        sites = await client.read("site")
+
+asyncio.run(main())
+```
+
+### mTLS Client
+
+Connect with mutual TLS client certificates via `TlsConfig`.
+
+```python
+import rusty_haystack as rh
+from rusty_haystack.client import TlsConfig
+
+tls = TlsConfig.from_files(
+    "/path/to/client.pem",
+    "/path/to/client-key.pem",
+    "/path/to/ca.pem",
+)
+
 client = rh.HaystackClient.connect_tls(
     "https://secure-server:8443/api",
     "admin",
-    "s3cret",
-    cert_path="/path/to/client.pem",
-    key_path="/path/to/client-key.pem",
-    ca_path="/path/to/ca.pem",        # optional
+    "your-password",
+    tls,
 )
+
+try:
+    about = client.about()
+finally:
+    client.close()
 ```
 
 ## Embedded Server
@@ -622,5 +681,5 @@ Note: Python `datetime.datetime` is not supported directly. Use `HDateTime` inst
 ## Version
 
 ```python
-rh.__version__  # -> "0.1.0"
+rh.__version__  # -> "0.10.0"
 ```

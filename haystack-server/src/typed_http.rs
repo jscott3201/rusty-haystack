@@ -1,0 +1,390 @@
+//! Pinned executable HTTP adapter. Authentication precedes protocol resolution;
+//! raw collection, native binding, authorization and encoding share admission.
+use crate::{auth::AuthManager, state::SharedState};
+use axum::{
+    body::Body,
+    extract::State,
+    http::{Request, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use futures_util::StreamExt;
+use haystack_app::{
+    ApiError, CancellationToken, Principal, ReadContext, ReadError, TypedInvocationInput,
+};
+use haystack_core::auth::{AuthHeader, parse_auth_header};
+use std::{sync::Arc, time::Instant};
+
+pub(crate) fn selected(request: &Request<Body>) -> bool {
+    let path = request.uri().path();
+    if matches!(
+        path,
+        "/api/ops"
+            | "/api/about"
+            | "/api/read"
+            | "/api/libs"
+            | "/api/close"
+            | "/api/hisRead"
+            | "/api/hisWrite"
+            | "/api/pointWrite"
+            | "/api/watchSub"
+            | "/api/watchUnsub"
+            | "/api/watchPoll"
+    ) {
+        return !legacy_selection(request);
+    }
+    path.starts_with("/api/")
+        && !crate::capabilities::CAPABILITIES
+            .iter()
+            .any(|capability| capability.path == path)
+}
+// Only absent or one explicitly selected v4 control retains the public legacy
+// GET path. This is a routing hint, not version validation: every malformed,
+// duplicate or other selection goes through authentication first.
+fn legacy_selection(request: &Request<Body>) -> bool {
+    if request.uri().path() == "/api/ops" && request.method() != axum::http::Method::GET {
+        return false;
+    }
+    let mut query_version = None;
+    for pair in request.uri().query().unwrap_or("").split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if wire_equal(key, b"xeto-version") {
+            if query_version.is_some() {
+                return false;
+            }
+            query_version = Some(wire_equal(value, b"4"));
+        }
+    }
+    let mut headers = request.headers().get_all("xeto-version").iter();
+    let first = headers.next();
+    if headers.next().is_some() {
+        return false;
+    }
+    query_version.unwrap_or_else(|| first.is_none_or(|value| value == "4"))
+}
+pub(crate) fn error(error: ApiError) -> Response {
+    let allow = match error {
+        ApiError::MethodNotAllowed => Some("POST"),
+        ApiError::SchemaMethodNotAllowed => Some("GET"),
+        _ => None,
+    };
+    let mut response = (
+        StatusCode::from_u16(error.status()).expect("fixed status"),
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::HeaderName::from_static("xeto-version"), "5"),
+        ],
+        error.json(),
+    )
+        .into_response();
+    if let Some(allow) = allow {
+        response
+            .headers_mut()
+            .insert(header::ALLOW, allow.parse().expect("fixed method"));
+    }
+    response
+}
+/// This hint affects only the documented auth-status compatibility choice. It
+/// does not validate or reject any protocol control before authentication.
+fn v5_hint(request: &Request<Body>) -> bool {
+    let mut selected = None;
+    for pair in request.uri().query().unwrap_or("").split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if wire_equal(key, b"xeto-version") {
+            if selected.is_some() {
+                return false;
+            }
+            selected = Some(wire_equal(value, b"5"));
+        }
+    }
+    selected.unwrap_or_else(|| {
+        let mut versions = request.headers().get_all("xeto-version").iter();
+        versions.next().is_some_and(|v| v == "5") && versions.next().is_none()
+    })
+}
+// Non-allocating hint only: malformed controls remain unresolved until after
+// authentication; a unique query control has the same precedence as dispatch.
+fn wire_equal(encoded: &str, expected: &[u8]) -> bool {
+    let mut source = encoded.bytes();
+    for target in expected {
+        let byte = match source.next() {
+            Some(b'%') => {
+                let Some(a) = source.next().and_then(|c| (c as char).to_digit(16)) else {
+                    return false;
+                };
+                let Some(b) = source.next().and_then(|c| (c as char).to_digit(16)) else {
+                    return false;
+                };
+                (a * 16 + b) as u8
+            }
+            Some(b'+') => b' ',
+            Some(c) => c,
+            None => return false,
+        };
+        if byte != *target {
+            return false;
+        }
+    }
+    source.next().is_none()
+}
+
+pub(crate) async fn handle(State(state): State<SharedState>, request: Request<Body>) -> Response {
+    match execute(state, request).await {
+        Ok(response) => response,
+        Err(err) => error(err),
+    }
+}
+async fn execute(state: SharedState, request: Request<Body>) -> Result<Response, ApiError> {
+    let application = state.application.as_ref().ok_or(ApiError::Unavailable)?;
+    let service = application.read_service();
+    let started = request
+        .extensions()
+        .get::<crate::ops::shared_read::ReadStarted>()
+        .map_or_else(Instant::now, |s| s.0);
+    let guard = request
+        .extensions()
+        .get::<Arc<haystack_app::WorkGuard>>()
+        .ok_or(ApiError::Unavailable)?
+        .child();
+    let raw_bytes = request.headers().iter().fold(
+        request
+            .uri()
+            .path()
+            .len()
+            .saturating_add(request.uri().query().map_or(0, str::len)),
+        |n, (key, value)| {
+            n.saturating_add(key.as_str().len())
+                .saturating_add(value.as_bytes().len())
+                .saturating_add(64)
+        },
+    );
+    if raw_bytes > service.limits().max_input_bytes {
+        return Err(ApiError::InvalidArgs);
+    }
+    let v5 = v5_hint(&request);
+    let (principal, session, can_write_history) = if state.auth.is_enabled() {
+        let mut headers = request.headers().get_all(header::AUTHORIZATION).iter();
+        let first = headers.next();
+        let malformed = if v5 {
+            ApiError::AuthMalformed
+        } else {
+            ApiError::AuthRequired
+        };
+        if headers.next().is_some() {
+            return Err(malformed);
+        }
+        let text = first
+            .ok_or(if v5 {
+                ApiError::AuthRejected
+            } else {
+                ApiError::AuthRequired
+            })?
+            .to_str()
+            .map_err(|_| malformed.clone())?;
+        let AuthHeader::Bearer { auth_token } =
+            parse_auth_header(text).map_err(|_| malformed.clone())?
+        else {
+            return Err(malformed);
+        };
+        let (user, session) = state.auth.validate_session(&auth_token).ok_or(if v5 {
+            ApiError::AuthRejected
+        } else {
+            ApiError::AuthRequired
+        })?;
+        // History publication is the first typed write binding. Read/write
+        // permissions are independent; function and mutation authorization
+        // still follow resolution under the admitted request budget.
+        let operation = request.uri().path().strip_prefix("/api/").unwrap_or("");
+        let permission =
+            if wire_equal(operation, b"hisWrite") || wire_equal(operation, b"ph.api::hisWrite") {
+                "write"
+            } else {
+                "read"
+            };
+        let command =
+            wire_equal(operation, b"pointWrite") || wire_equal(operation, b"ph.api::pointWrite");
+        if !(AuthManager::check_permission(&user, permission)
+            || (command && AuthManager::check_permission(&user, "write")))
+        {
+            return Err(ApiError::Permission);
+        }
+        let can_write_history = AuthManager::check_permission(&user, "write");
+        (
+            Principal::authenticated(user.username, user.permissions),
+            Some(session),
+            can_write_history,
+        )
+    } else {
+        (Principal::Anonymous, None, true)
+    };
+    let context = ReadContext::new(
+        principal,
+        started + service.limits().max_duration,
+        CancellationToken::new(),
+    );
+    let mut admission = match session {
+        Some(session) => {
+            service
+                .begin_admitted_session(context, guard, session)
+                .await?
+        }
+        None => service.begin_admitted(context, guard).await?,
+    };
+    admission.reserve_wire_input(raw_bytes)?;
+    if !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::POST
+    ) {
+        return Err(ApiError::NotImplemented);
+    }
+    let mut input = {
+        let copy_headers = |name| -> Result<Vec<String>, ApiError> {
+            request
+                .headers()
+                .get_all(name)
+                .iter()
+                .map(|v| {
+                    v.to_str()
+                        .map(str::to_owned)
+                        .map_err(|_| ApiError::InvalidArgs)
+                })
+                .collect()
+        };
+        TypedInvocationInput {
+            operation: request
+                .uri()
+                .path()
+                .strip_prefix("/api/")
+                .unwrap_or("")
+                .to_owned(),
+            post: request.method() == axum::http::Method::POST,
+            query: request.uri().query().unwrap_or("").to_owned(),
+            versions: copy_headers("xeto-version")?,
+            content_types: copy_headers("content-type")?,
+            accepts: copy_headers("accept")?,
+            accept_encodings: copy_headers("accept-encoding")?,
+            content_encoded: request.headers().contains_key(header::CONTENT_ENCODING),
+            body: Vec::new(),
+        }
+    };
+    let input_is_schema = input.operation == "rusty-haystack/openapi.json";
+    let command_attempt = request
+        .extensions()
+        .get::<haystack_app::CommandAttempt>()
+        .cloned()
+        .ok_or(ApiError::Unavailable)?;
+    let mut stream = request.into_body().into_data_stream();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = admission.cancelled() => return Err(ApiError::from(admission.check().err().unwrap_or(ReadError::Cancelled))),
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(admission.deadline())) => return Err(ApiError::Timeout),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|_| ApiError::InvalidArgs)?;
+        admission.reserve_wire_input(chunk.len())?;
+        let needed = input.body.len().saturating_add(chunk.len());
+        if needed > input.body.capacity() {
+            // Geometric growth bounds all old-buffer copies and cumulative
+            // allocations by the reservation made before this frame. Exact
+            // one-frame growth would permit quadratic copies on tiny frames.
+            let capacity = needed
+                .next_power_of_two()
+                .min(service.limits().max_input_bytes);
+            input
+                .body
+                .try_reserve_exact(capacity - input.body.len())
+                .map_err(|_| ApiError::Unavailable)?;
+        }
+        input.body.extend_from_slice(&chunk);
+    }
+    let response = admission
+        .invoke_wire_with_commands(
+            input,
+            state.history_service.clone(),
+            // Discovery and invocation share the authenticated transport's
+            // effective write permission. Trusted anonymous embeddings retain
+            // their selected service and its application mutation policy.
+            if can_write_history {
+                state.history_mutation_service.clone()
+            } else {
+                None
+            },
+            state.subscription_service.clone(),
+            state.command_service.clone(),
+            command_attempt,
+        )
+        .await?;
+    response.disclosure.check()?;
+    let gzip = response.gzip;
+    let schema = input_is_schema;
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        response.disclosure.check().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "invocation no longer valid",
+            )
+        })?;
+        Ok::<_, std::io::Error>(response.body)
+    }));
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, response.content_type),
+            (
+                header::HeaderName::from_static("xeto-version"),
+                response.version,
+            ),
+        ],
+        body,
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::VARY,
+        "Accept, Xeto-Version, Accept-Encoding"
+            .parse()
+            .expect("fixed header"),
+    );
+    if schema {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            "private, no-store".parse().expect("fixed cache control"),
+        );
+    }
+    if gzip {
+        response.headers_mut().insert(
+            header::CONTENT_ENCODING,
+            "gzip".parse().expect("fixed header"),
+        );
+    }
+    Ok(response)
+}
+// Layer only the original default fallback before adding routes. Keeping
+// Axum's default-fallback identity lets a trusted custom fallback take priority.
+pub(crate) async fn fallback(_request: Request<Body>, _next: axum::middleware::Next) -> Response {
+    error(ApiError::InvalidPath)
+}
+/// Built-in errors carry the current version, including errors raised by the
+/// existing H4 authentication and processing paths. Their bodies stay intact.
+pub(crate) async fn version_header(
+    request: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let builtin = selected(&request)
+        || crate::capabilities::CAPABILITIES
+            .iter()
+            .any(|c| c.path == request.uri().path());
+    let mut response = next.run(request).await;
+    if builtin && !response.headers().contains_key("xeto-version") {
+        let version = if response.status().is_success() {
+            "4"
+        } else {
+            "5"
+        };
+        response
+            .headers_mut()
+            .insert("xeto-version", version.parse().expect("fixed version"));
+    }
+    response
+}

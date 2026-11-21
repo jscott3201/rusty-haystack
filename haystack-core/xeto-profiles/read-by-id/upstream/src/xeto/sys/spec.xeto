@@ -1,0 +1,217 @@
+//
+// Copyright (c) 2022, Project-Haystack
+// Licensed under the Academic Free License version 3.0
+//
+// History:
+//   18 Jul 2022  Brian Frank  Creation
+//   24 Nov 2025  Brian Frank  New globals/mixin model
+//
+
+// Spec models a type specification and the metadata slots.
+Spec: Dict <sealed> {
+
+//////////////////////////////////////////////////////////////////////////
+// Reserved
+//////////////////////////////////////////////////////////////////////////
+
+  // Spec qname as ref identifier
+  id: Ref <sealed>
+
+  // Simple name of spec
+  name: Str <sealed>
+
+  // Qualified name of spec formatted as `lib::Type[.slot]`
+  qname: Str <sealed>
+
+  // Spec reference - always `sys::Lib`
+  spec: Ref <of:Spec, sealed>
+
+  // Parent library
+  lib: Ref <of:Lib, sealed>
+
+  // Parent spec for member specs
+  parent: Ref? <of:Spec, sealed>
+
+  // Base type of inheritance or null for `sys::Obj`
+  base: Ref? <of:Spec, sealed>
+
+  // Value type
+  type: Ref? <of:Spec, sealed>
+
+  // Map of children slot and global members
+  members: Dict <of:Spec, sealed>
+
+  // Map of children slot members
+  slots: Dict <of:Spec, sealed>
+
+  // Map of children global members
+  globals: Dict <of:Spec, sealed>
+
+  // File location of the spec definition
+  loc: Obj <sealed, nodoc>
+
+  // Reserved for future use
+  class: Obj <sealed, nodoc>
+
+  // Reserved for future use
+  is: Obj <sealed, nodoc>
+
+  // Reserved for future use
+  slot: Obj <sealed, nodoc>
+
+  // Reserved for future use
+  super: Obj <sealed, nodoc>
+
+  // Reserved for future use
+  supers: Obj <sealed, nodoc>
+
+//////////////////////////////////////////////////////////////////////////
+// Non-reserved
+//////////////////////////////////////////////////////////////////////////
+
+  // Abstract types cannot be implemented directly by instance data
+  abstract: Marker? <noInherit>
+
+  // Indicates an asynchronous operation or function call
+  async: Marker?
+
+  // Indicates an immutable value
+  const: Marker?
+
+  // Documentation formatted as [xetodoc](doc.xeto::Xetodoc)
+  doc: Str?
+
+  // Indicates a global slot that defines a shape for all types that might override
+  global: Marker? <noInherit>
+
+  // Annotates a slot as a fixed value that must be equal to `val`.
+  invariant: Marker?
+
+  // Inverse query to run against parent
+  inverse: Str?
+
+  // String key; used in enums to define normalized string identifier
+  key: Str?
+
+  // Applied to strings and lists to specify inclusive maximum length
+  maxSize: Int?
+
+  // Inclusive maximum value for numbers
+  maxVal: This?
+
+  // Indicates an optional type
+  maybe: Marker?
+
+  // Applied to strings and lists to specify inclusive minimum length
+  minSize: Int?
+
+  // Inclusive minimum value for numbers
+  minVal: This?
+
+  // Indicates a mixin that adds meta/slots to an existing type
+  mixin: Marker?
+
+  // Applied to Choices to allow multiple selections
+  multiChoice: Marker?
+
+  // Indicates a constructor function
+  new: Marker?
+
+  // Marks spec as undocumented and not officially supported
+  nodoc: Marker?
+
+  // Do not include source code in documentation
+  nosrc: Marker?
+
+  // Marks a function or operation as having no side effects. The function may
+  // or may not be pure in that calling it multiple times with the same arguments
+  // always evaluates to the same result. HTTP operations with this tag may be
+  // called with a GET, otherwise a POST is required.
+  noSideEffects: Marker?
+
+  // Indicates a meta tag that is not inherited into subtypes
+  noInherit: Marker?
+
+  // Applied to strings to require value is non-empty when trimmed of whitespace
+  nonEmpty: Marker?
+
+  // Item type for parameterized Collection/Query; target type for Ref/MultiRef
+  of: Ref? <of:Spec>
+
+  // Types used in compound types like And and Or
+  ofs: List? <of:Ref<of:Spec>>
+
+  // Marks a function as an operation published to the generated OpenAPI
+  // schema.  All functions are callable over HTTP; this marks the ones
+  // which are part of the documented API surface.
+  op: Marker?
+
+  // Marks an op whose request grid is passed whole as its single
+  // parameter when the request arrives as a grid, rather than mapping
+  // the first row's cells to arguments by name.  Used by batch and
+  // tabular ops which carry semantics in grid meta and multiple rows.
+  opGrid: Marker?
+
+  // Regex pattern for scalar string encoding
+  pattern: Str?
+
+  // Restrict number or unit enum to specific quantity
+  quantity: UnitQuantity?
+
+  // Indicates a readonly value that may not be written (but may mutate)
+  readonly: Marker?
+
+  // Sealed types cannot be extended outside of their own lib. If used
+  // on a interface slot, the slot cannot be overridden in a subtype.
+  sealed: Marker? <noInherit>
+
+  // Marks a function as having side effects that modify observable state
+  // or invoke external actions (writes, commits, notifications, etc).
+  // Agent harnesses use this marker to require confirmation before
+  // evaluation, or to raise an error in plan mode.  This marker is the
+  // dual of `noSideEffects`; unmarked functions are assumed to be safe.
+  sideEffects: Marker?
+
+  // Indicates a spec level slot versus an instance level slot
+  static: Marker?
+
+  // Sugar marks a spec as a convenience name for its nominal anchor type
+  // plus a set of structural tag constraints - see [docs](doc.xeto::Sugar).
+  sugar: Marker?
+
+  // Mark data as summary level for display in summarized tables and other views
+  summary: Marker?
+
+  // Indicates data which should not be persisted
+  transient: Marker?
+
+  // Restrict number or unit enum to specific unit
+  unit: Unit?
+
+  // Restrict a number to have no unit
+  unitless: Marker?
+
+  // Default value for this slot
+  val: Obj?
+
+  // Marks a func as the check for a `ValidateRule`.  The func is called
+  // as 'func(spec, val)' where val is the value at the position the rule
+  // fired on: the instance itself for a rule registered on a dict type,
+  // or the slot value for one registered on a value type.
+  //
+  // Return null or an empty list when the value is ok.  Otherwise return
+  // a dict per problem, or a list of them.  An empty dict reports the
+  // rule at its own position; a 'slot' tag reports it against that tag
+  // of the dict instead, and any other tags are `msg` template args.
+  //
+  //   // ok, or flag the min tag of the instance
+  //   if (val->min > val->max) {slot:"min"}
+  validateRule: Ref?<of:ValidateRule>
+
+  // Named path to traverse to execute query
+  via: Str?
+
+  // Used on a interface non-static slot to indicate it can be overridden subtypes
+  virtual: Marker?
+}
+

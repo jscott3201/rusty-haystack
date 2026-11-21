@@ -38,6 +38,7 @@ fn csv_quote(val: &str) -> String {
 
 /// Encode an HGrid to CSV format.
 fn encode_grid(grid: &HGrid) -> Result<String, CodecError> {
+    crate::kinds::projection::ensure_h4_grid(grid)?;
     let mut buf = String::new();
 
     // Header row: quoted column names

@@ -72,7 +72,14 @@ pub async fn handle(
                 Kind::Number(haystack_core::kinds::Number::unitless(level as f64)),
             );
             state
-                .graph
+                .native_graph
+                .as_ref()
+                .ok_or_else(|| {
+                    HaystackError::new(
+                        "native point writes are unavailable for durable storage",
+                        axum::http::StatusCode::NOT_IMPLEMENTED,
+                    )
+                })?
                 .update(&ref_val, changes)
                 .map_err(|e| HaystackError::bad_request(format!("write failed: {e}")))?;
         }

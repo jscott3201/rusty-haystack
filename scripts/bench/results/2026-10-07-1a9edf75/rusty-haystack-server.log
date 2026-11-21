@@ -1,0 +1,54 @@
+    Finished `bench` profile [optimized] target(s) in 0.10s
+     Running benches/baseline.rs (target/release/deps/baseline-b452b6ee73ad215d)
+Gnuplot not found, using plotters backend
+dataset=history_v1 items=1000 step_seconds=60 first_day_matches=1000 sha256=046d7d21934fe605768f22cfd88e9b13467ae4a2204163e488c16abd8b881d17
+Benchmarking history_baseline/direct_full/1000
+Benchmarking history_baseline/direct_full/1000: Warming up for 500.00 ms
+Benchmarking history_baseline/direct_full/1000: Collecting 30 samples in estimated 2.0004 s (255k iterations)
+Benchmarking history_baseline/direct_full/1000: Analyzing
+history_baseline/direct_full/1000
+                        time:   [6.7392 µs 6.7857 µs 6.8393 µs]
+Found 4 outliers among 30 measurements (13.33%)
+  2 (6.67%) high mild
+  2 (6.67%) high severe
+Benchmarking history_baseline/direct_first_day/1000
+Benchmarking history_baseline/direct_first_day/1000: Warming up for 500.00 ms
+Benchmarking history_baseline/direct_first_day/1000: Collecting 30 samples in estimated 2.0024 s (251k iterations)
+Benchmarking history_baseline/direct_first_day/1000: Analyzing
+history_baseline/direct_first_day/1000
+                        time:   [6.8851 µs 7.0536 µs 7.4534 µs]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high severe
+Benchmarking history_baseline/http_first_day/1000
+Benchmarking history_baseline/http_first_day/1000: Warming up for 500.00 ms
+Benchmarking history_baseline/http_first_day/1000: Collecting 30 samples in estimated 2.3223 s (1860 iterations)
+Benchmarking history_baseline/http_first_day/1000: Analyzing
+history_baseline/http_first_day/1000
+                        time:   [1.2119 ms 1.2140 ms 1.2159 ms]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) low mild
+  1 (3.33%) high severe
+dataset=history_v1 items=10000 step_seconds=60 first_day_matches=1440 sha256=5a18b20e704fa31125c9a21c08472c2c0248b6973d050d763c5b6baa534930db
+Benchmarking history_baseline/direct_full/10000
+Benchmarking history_baseline/direct_full/10000: Warming up for 500.00 ms
+Benchmarking history_baseline/direct_full/10000: Collecting 30 samples in estimated 2.0151 s (26k iterations)
+Benchmarking history_baseline/direct_full/10000: Analyzing
+history_baseline/direct_full/10000
+                        time:   [66.206 µs 66.273 µs 66.370 µs]
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high mild
+Benchmarking history_baseline/direct_first_day/10000
+Benchmarking history_baseline/direct_first_day/10000: Warming up for 500.00 ms
+Benchmarking history_baseline/direct_first_day/10000: Collecting 30 samples in estimated 2.0055 s (117k iterations)
+Benchmarking history_baseline/direct_first_day/10000: Analyzing
+history_baseline/direct_first_day/10000
+                        time:   [15.481 µs 15.503 µs 15.523 µs]
+Benchmarking history_baseline/http_first_day/10000
+Benchmarking history_baseline/http_first_day/10000: Warming up for 500.00 ms
+Benchmarking history_baseline/http_first_day/10000: Collecting 30 samples in estimated 2.4481 s (1395 iterations)
+Benchmarking history_baseline/http_first_day/10000: Analyzing
+history_baseline/http_first_day/10000
+                        time:   [1.7030 ms 1.7117 ms 1.7200 ms]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+

@@ -1,0 +1,13 @@
+pragma: Lib <version:"1.0.0", depends:{{lib:"sys",versions:"5.0.0"}}>
+Asset: sys::Dict { id:Ref dis:Str label:Str? }
+BaseCode: sys::Dict { code:Str <pattern:"[A-Z]+"> }
+RefinedCode: BaseCode { code:Str <pattern:"A[A-Za-z]*"> }
+CodeContainer: sys::Dict { id:Ref item:BaseCode items:List<of:BaseCode> }
+UnsupportedDigits: sys::Dict { code:Str <pattern:"\\d+"> }
+UnsupportedDot: sys::Dict { code:Str <pattern:"A.*"> }
+UnsupportedNestedClass: sys::Dict { code:Str <pattern:"[a[b]]"> }
+UnsupportedSpacedCount: sys::Dict { code:Str <pattern:"A{ 2 }"> }
+UnsupportedStackedCount: sys::Dict { code:Str <pattern:"A++"> }
+UnsupportedBareBrace: sys::Dict { code:Str <pattern:"A}"> }
+UnsupportedEscapedHyphen: sys::Dict { code:Str <pattern:"A\\-B"> }
+CountedCode: sys::Dict { code:Str <pattern:"(?:AB){0,2}?"> }

@@ -2,17 +2,53 @@
 
 ## Prerequisites
 
-- **Rust 1.97.1.** CI pins this exact toolchain (`.github/workflows/ci.yml`), and the
-  workspace declares `edition = "2024"` with `rust-version = "1.97"` (`Cargo.toml`).
-- **[uv](https://docs.astral.sh/uv/)** and **Python 3.12**, only if you touch the Python
-  bindings. CI pins the interpreter version deliberately — `pyo3` is configured without
+- **Rust 1.99.1.** The repository pins normal local commands to this exact toolchain in
+  `rust-toolchain.toml`. It is also the CI MSRV lane for the workspace's declared
+  `rust-version = "1.99"`. A separate Ubuntu lane pins current stable Rust 1.99.1; both
+  pins currently coincide and move only through reviewed changes.
+- **[uv](https://docs.astral.sh/uv/)** and **Python 3.11–3.14**, for the Python bindings; the full schema/client validation stage and local gate use **Python 3.12**. CI pins the interpreter version deliberately — `pyo3` is configured without
   `abi3`, so every build is interpreter-specific.
+
+## Dependency baseline
+
+The October 2026 refresh raises the supported Rust floor to 1.99 and selects
+[resolver 3](https://doc.rust-lang.org/edition-guide/rust-2024/cargo-resolver.html),
+which considers package Rust-version requirements when resolving dependencies.
+Workspace dependency versions live in the root manifest; members declare their own
+additional features. `Cargo.lock` records the tested resolution. Change that file
+intentionally with `cargo update`, then run the locked gate below.
+
+The refresh keeps the existing dependency families, including reqwest 0.13.5 and
+Tokio 1.54.1; PyO3 later moved to 0.30.1 (with pyo3-async-runtimes 0.30.0) and roaring
+to 0.12.0. The direct rustls requirement is at least 0.23.45 to address
+[GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc);
+its existing `ring`, `std` and `tls12` features are preserved. Older compatible
+transitive families, including base64 0.22 and tungstenite 0.29, remain where their
+owning dependencies require them. First-party public APIs are unchanged; the supported
+Rust floor increases.
+
+The core still has no default features, and `chrono-tz` remains optional. All direct
+base64 users, including the demo, now share 0.23 with only `std` requested. The core
+alone does not enable base64 SIMD; the full client/server graph now enables
+`simd-unsafe` through reqwest and hyper-util. The first-party `unsafe_code = "forbid"`
+policy is unchanged and does not apply to dependency internals. flate2 1.1.10 adds
+default runtime detection while retaining the miniz_oxide Rust backend. Its optional
+zlib-rs dependency appears in the lockfile but is not enabled in the workspace build.
+
+The refreshed dependency graph's highest declared Rust requirement is 1.90 (roaring
+0.12.0), below the workspace floor; some dependencies do not declare an MSRV. License
+policy is unchanged: the newly resolved optional zlib-rs package uses the already
+allowed Zlib license, two existing dependencies only normalize their MIT/Apache SPDX
+spelling, and roaring 0.12's new fearless_simd and libm dependencies are MIT/Apache-2.0
+and MIT. The refresh left Python's declared support range and the release interpreter
+matrix unchanged; CPython 3.14 joined the CI and release-wheel matrices later (#133).
+The existing build lanes now pin Rust 1.99.1 and Maturin 1.16.0.
 
 ## Build and test
 
 ```bash
-cargo build --workspace --exclude rusty-haystack
-cargo test  --workspace --exclude rusty-haystack
+cargo build --locked --workspace --exclude rusty-haystack
+cargo test --locked --workspace --exclude rusty-haystack
 ```
 
 ### Why `--exclude rusty-haystack`
@@ -39,8 +75,8 @@ tested by its own job, through `maturin`, which supplies the interpreter (see
 ### Single crate, single test
 
 ```bash
-cargo test -p rusty-haystack-core
-cargo test -p rusty-haystack-core -- test_name
+cargo test --locked -p rusty-haystack-core
+cargo test --locked -p rusty-haystack-core -- test_name
 ```
 
 ## The gate
@@ -49,29 +85,39 @@ Before opening a PR, run the repo gate. It exists so you do not have to remember
 crate is excluded from which command:
 
 ```bash
-./.agents/gate.sh          # everything except cargo-deny
-./.agents/gate.sh --full   # every CI check — this is the CI-equivalent run
+./.agents/gate.sh          # local checks except cargo-deny; exits 2 if otherwise green
+./.agents/gate.sh --full   # complete local profile on this host
 ```
 
-It runs CI's commands in CI's exact form, including the two `chrono-tz` feature
-invocations and clippy on the PyO3 crate.
+It runs the CI policy tests, isolated core minimal/default checks, and CI's Rust
+commands, including the `chrono-tz` feature surface in both the MSRV and current-stable
+lanes (currently Rust 1.99.1). It rebuilds the Python extension before testing it and
+lints the PyO3 crate. Builds, lints and tests use `--locked` to validate the checked-in
+graph. The policy tests require `python3` and only use its standard library.
+
+The gate also runs `uv run --locked --project scripts/schema-client --python 3.12
+python scripts/schema-client/validate.py`. This isolated, locked environment validates
+the complete schema export and an unedited generated Python client against a managed
+loopback fixture. It does not reuse the product PyO3 environment. Missing uv makes
+the gate incomplete; a failing install, validator, generator or HTTP assertion fails
+the gate. See [Schema export](docs/schema-export.md) for the exact qualification.
 
 **Read the exit status, not just the last line.** A check that could not run is never
 reported as one that passed:
 
 | Exit | Meaning |
 |---|---|
-| `0` | every CI check ran and passed — the only result that predicts CI |
+| `0` | every check in the full local profile ran and passed on this host |
 | `1` | something failed |
-| `2` | what ran was green, but the run was not CI-equivalent (something was skipped) |
+| `2` | what ran was green, but the local profile was incomplete (something was skipped) |
 
 So `--full` with a `.venv` present is the run that can exit `0`. Without the venv the
 Python bindings and their clippy pass cannot run, and the gate says so rather than
 implying they were fine.
 
-If the gate passes and CI fails, the gate is wrong and that is worth reporting — a gate
-that checks a different target set than CI is worse than no gate, because it reports
-green on what CI is about to reject.
+A local pass does not run hosted CodeQL, test another operating system, or validate
+release artifacts. CI can therefore find failures the local gate cannot observe.
+See the [support matrix](docs/support-matrix.md) for those evidence boundaries.
 
 ## What CI enforces
 
@@ -79,21 +125,36 @@ green on what CI is about to reject.
 
 | Job | Command |
 |---|---|
-| Rustfmt | `cargo fmt --all --check` |
-| Clippy | `cargo clippy --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo clippy -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
-| Test | `cargo test --workspace --exclude rusty-haystack`<br>`cargo test -p rusty-haystack-core --features chrono-tz` |
-| Python Bindings | clippy on the excluded crate, then `maturin develop` and `pytest` |
-| Cargo Deny | `EmbarkStudios/cargo-deny-action@v2`, configured by `deny.toml` — advisories, licenses, bans, sources |
+| CI policy | `python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v`, then the validated dev/main matrix plan |
+| Rustfmt (Rust 1.99.1) | `cargo +1.99.1 fmt --all --check` |
+| Clippy (MSRV, Rust 1.99.1) | `cargo +1.99.1 clippy --locked --workspace --exclude rusty-haystack --all-targets -- -D warnings`<br>`cargo +1.99.1 clippy --locked -p rusty-haystack-core --features chrono-tz --all-targets -- -D warnings` |
+| Test (MSRV, Rust 1.99.1) | `cargo +1.99.1 test --locked --workspace --exclude rusty-haystack --no-fail-fast`<br>`cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz`<br>on macOS and Windows only, the compile-only `cargo +1.99.1 check --locked -p rusty-haystack-analytics --features sql` |
+| Core minimal and default features (Ubuntu, Rust 1.99.1) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features`; then `cargo +1.99.1 clippy --locked -p rusty-haystack-analytics --features sql --all-targets -- -D warnings` and `cargo +1.99.1 test --locked -p rusty-haystack-analytics --features sql` for the optional snapshot SQL feature |
+| Current stable (Ubuntu, Rust 1.99.1) | The same two Clippy and two test commands above, using `cargo +1.99.1` |
+| Python Bindings (CPython 3.11–3.14, Rust 1.99.1) | One job per interpreter: clippy on the excluded crate, `maturin develop` and `pytest`; then `maturin build` of a wheel, `twine check`, and `pytest` against that wheel installed in a clean environment. On 3.12 only, the schema/generated-client and MCP qualification scripts |
+| Cargo Deny (Rust 1.99.1) | `cargo +1.99.1 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
+| CodeQL | Rust, Python, and Actions analyses through the reusable CodeQL workflow and existing query configuration |
+| CI OK | Always evaluates the independent required-job inventory; every required job must succeed |
 
-**The OS matrix is conditional.** Anything targeting `main` runs on Ubuntu, macOS and
-Windows. Everything else — including PRs into `dev` — runs Ubuntu only. So a PR showing a
-single green `Test (ubuntu-latest)` has not been checked on the other two; that happens
-when the change reaches `main`. Platform-sensitive work (paths, line endings, timing)
-deserves a local check on your own OS before you rely on the matrix.
+**The Rust test OS matrix is conditional.** Pushes to `main` and PRs targeting `main`
+run on Ubuntu, macOS and Windows. Pushes to `dev` and PRs targeting `dev` run Ubuntu
+only. Retargeting a PR triggers a new run for its current base branch. The other jobs
+run on Ubuntu. A green dev run does not qualify the other operating systems.
+
+`CI OK` requires the reusable CodeQL analysis and upload jobs to complete successfully.
+GitHub separately evaluates alert severity in `Code scanning results / CodeQL`, which
+can fail after those jobs succeed. Delivery must inspect that separate check when
+present; `CI OK` does not prove there are no blocking alerts. See
+[GitHub's code scanning results documentation](https://docs.github.com/en/code-security/how-tos/manage-security-alerts/manage-code-scanning-alerts/triage-alerts-in-pull-requests).
+
+Missing, failed, cancelled, or skipped required jobs fail the workflow-job aggregate. CodeQL retains
+its standalone weekly and manual runs; the separate Audit workflow retains its daily
+and manual checks. Those scheduled checks are outside a PR's aggregate. This workflow
+defines the canonical workflow-job result; repository branch-protection configuration is separate.
 
 The Clippy job excludes the PyO3 crate and the Python job lints it instead, so the
 exclusion is about *where* the lint runs, not *whether* it runs. Note that
-`cargo clippy --workspace` does lint that crate successfully on a normal developer machine
+`cargo clippy --locked --workspace` does lint that crate successfully on a normal developer machine
 — verified on macOS with no virtualenv active — so if you want a single lint command
 locally, drop the exclusion and use it.
 
@@ -101,9 +162,9 @@ locally, drop the exclusion and use it.
 
 ```bash
 uv venv --python 3.12
-uv pip install maturin pytest
+uv pip install maturin==1.16.0 pytest
 source .venv/bin/activate
-maturin develop --release -m rusty-haystack/Cargo.toml
+maturin develop --locked --release -m rusty-haystack/Cargo.toml
 pytest rusty-haystack/tests -q
 ```
 
@@ -119,14 +180,15 @@ Two traps, both of which CI works around explicitly:
 
 ```
 haystack-core          types, codecs, graph, filter, ontology, xeto, auth
-  ↑
-haystack-client        async HTTP/WebSocket client
-  ↑
-haystack-server        Axum HTTP API, WebSocket watches  (also depends on core)
-  ↑
-haystack-cli           the `haystack` binary            (depends on all three)
-
-rusty-haystack         PyO3 bindings, cdylib            (depends on core/client/server)
+haystack-client        async HTTP/WebSocket client      (depends on core)
+haystack-app           application owner: authorized reads, mutations, history,
+                       subscriptions; optional PostgreSQL/SQLite (depends on core)
+haystack-mcp           read-only MCP stdio/HTTP adapter (depends on core/app)
+haystack-analytics     Parquet history captures, optional snapshot SQL (depends on core/client)
+haystack-server        Axum HTTP API, WebSocket watches (depends on core/app/client)
+haystack-cli           the `haystack` binary            (depends on core/app/client/server;
+                                                         mcp with the mcp/mcp-http features)
+rusty-haystack         PyO3 bindings, cdylib            (depends on core/app/client/server)
 ```
 
 Directory names are unprefixed; crates.io names are not. `haystack-core/` publishes as
@@ -134,8 +196,9 @@ Directory names are unprefixed; crates.io names are not. `haystack-core/` publis
 
 ## Conventions
 
-- **No `unsafe`.** There is none in the codebase today. It is a convention rather than a
-  lint — there is no `forbid(unsafe_code)` — so it holds only if reviewers keep holding it.
+- **Project-authored Rust forbids `unsafe`.** Every workspace member inherits the root
+  `unsafe_code = "forbid"` lint, so the compiler rejects unsafe code in this workspace.
+  This policy makes no claim about code inside dependencies.
 - **Warning-free under `-D warnings`.** Do not reach for `#[allow]` to get there; fix the
   cause. If an allow is genuinely right, the comment must say why, and "renaming would
   break callers" is the kind of claim that needs checking before it is written down.
@@ -163,11 +226,14 @@ limit at all. Find them at their definitions:
 | Xeto file size | `haystack-core/src/xeto/loader.rs` |
 | SCRAM iteration ceiling | `haystack-core/src/auth.rs` |
 | Watches, watched IDs, encode cache | `haystack-server/src/ws.rs` |
-| History items and `hisWrite` rows | `haystack-server/src/his_store.rs`, `ops/his.rs` |
+| History items and `hisWrite` rows | `haystack-app/src/history_store.rs`, `haystack-server/src/ops/his.rs` |
 | `/api/changes` response rows | `haystack-server/src/ops/changes.rs` |
-| Request body size | `haystack-server/src/app.rs` |
+| Legacy request body size | `haystack-server/src/app.rs` |
+| Scoped read admission, traversal, output and cursor limits | `haystack-app/src/types.rs`, `service.rs`, `budget.rs`; HTTP collection in `haystack-server/src/ops/shared_read.rs` |
 | Graph changelog capacity | `haystack-core/src/graph/changelog.rs` |
 | Client in-flight requests, decompressed payload size | `haystack-client/src/transport/ws.rs` |
+| Parquet history export and readback | `haystack-analytics/src/format.rs` (`Limits::default`, `MIN_BATCH_BYTES`, `MIN_PART_BYTES`, the derived floors `min_part_bytes`/`min_footer_bytes`/`min_manifest_bytes` and their `*_BYTES` terms, `MAX_GROUPS_PER_PART`, `writer_reserve`/`encoded_ceiling`, `MAX_HEADER_BYTES`), `export.rs` (`MAX_CONCURRENT_EXPORTS`, `DEFAULT_EXPORT_TIMEOUT`), `writer.rs` (`DATA_PAGE_BYTES`), `reader.rs` (`COMPACT_*`, `MAX_ENCODINGS`, `MAX_KEY_VALUES`, `MAX_PAGE_HEADER_BYTES`, the `Wire` shapes); source and row ceilings reuse `MAX_GRID_BYTES`/`MAX_ROWS` from `haystack-core/src/codecs/history.rs` |
+| Snapshot SQL (analytics `sql` feature) | `haystack-analytics/src/sql/mod.rs` (`SQL_QUERIES`, `SQL_WORKER_THREADS`, `QUERY_MEMORY_BYTES`, `QUERY_TIMEOUT`, `CANCEL_GRACE`, `MAX_OUTPUT_ROWS`, `MAX_OUTPUT_BYTES`, `MAX_SQL_BYTES`, `MAX_SQL_TOKENS`, `MAX_SQL_RELATIONS`, `MAX_SQL_JOINS`, `MAX_SQL_SET_OPERATIONS`, `MAX_SQL_CTES`, `SQL_RECURSION_LIMIT`, `SQL_THREAD_STACK_BYTES`, `MAX_SNAPSHOTS`, `MAX_SNAPSHOT_BYTES`, `MAX_ENGINE_BYTES`, `SQL_BATCH_ROWS`, `MAX_BATCH_BYTES`, `MAX_PLAN_BYTES`, `MAX_JOIN_ROWS`, `MAX_TABLE_NAME_BYTES`, `ALLOWED_FUNCTIONS`, `ALLOWED_OPERATORS`) |
 
 If you change one, change it at the definition and let the test suite tell you who cared.
 

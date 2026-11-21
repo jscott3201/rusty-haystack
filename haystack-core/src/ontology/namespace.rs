@@ -71,6 +71,10 @@ pub struct DefNamespace {
     choice_index: HashMap<String, Vec<String>>,
     /// Xeto specs by qualified name (e.g. "ph::Ahu").
     specs: HashMap<String, Spec>,
+    /// Strict selection this namespace was derived from, when managed.
+    selected: Option<std::sync::Arc<crate::xeto::catalog::Catalog>>,
+    /// Compatibility specs displaced by `selected`, restored before re-deriving.
+    shadowed: HashMap<String, Option<Spec>>,
     /// Library name -> list of spec qnames belonging to that lib.
     spec_libs: HashMap<String, Vec<String>>,
     /// Library name -> how it was loaded.
@@ -89,16 +93,63 @@ impl DefNamespace {
             tag_on_index: HashMap::new(),
             choice_index: HashMap::new(),
             specs: HashMap::new(),
+            selected: None,
+            shadowed: HashMap::new(),
             spec_libs: HashMap::new(),
             lib_sources: HashMap::new(),
         }
+    }
+
+    /// Derive a namespace from this selected catalog while retaining the
+    /// compatibility definitions supplied by the owning graph. A namespace
+    /// already derived from another selection first restores exactly the
+    /// compatibility specs that selection displaced, so re-deriving never
+    /// deletes or duplicates unrelated definitions.
+    pub(crate) fn with_catalog(
+        mut self,
+        catalog: std::sync::Arc<crate::xeto::catalog::Catalog>,
+    ) -> Self {
+        if self.selected.take().is_some() {
+            for (qname, original) in std::mem::take(&mut self.shadowed) {
+                self.unindex_spec(&qname);
+                if let Some(spec) = original {
+                    self.register_spec(spec);
+                }
+            }
+        }
+        for entry in catalog.declarations() {
+            let qname = entry.spec.qname.clone();
+            let displaced = self.specs.get(&qname).cloned();
+            self.unindex_spec(&qname);
+            self.shadowed.insert(qname, displaced);
+            self.register_spec(entry.spec.clone());
+        }
+        self.selected = Some(catalog);
+        self
+    }
+
+    fn unindex_spec(&mut self, qname: &str) {
+        if let Some(spec) = self.specs.remove(qname)
+            && let Some(names) = self.spec_libs.get_mut(&spec.lib)
+        {
+            names.retain(|name| name != qname);
+            if names.is_empty() {
+                self.spec_libs.remove(&spec.lib);
+            }
+        }
+    }
+
+    /// The admitted strict selection this namespace was derived from, if any.
+    /// Selected declarations are matched by that catalog's controlled fitter.
+    pub fn selected_catalog(&self) -> Option<&crate::xeto::catalog::Catalog> {
+        self.selected.as_deref()
     }
 
     /// Load the bundled standard Haystack 4 defs.
     ///
     /// Loads ph, phScience, phIoT, and phIct libraries from the bundled
     /// `defs.trio` file.
-    pub fn load_standard() -> Result<Self, OntologyError> {
+    pub fn load_bundled_h4() -> Result<Self, OntologyError> {
         let source = include_str!("../../data/defs.trio");
         let mut ns = Self::new();
         let libs = load_trio(source)?;
@@ -108,6 +159,13 @@ impl DefNamespace {
             ns.set_lib_source(&lib_name, LibSource::Bundled);
         }
 
+        Ok(ns)
+    }
+
+    /// Load bundled H4 definitions and the historical best-effort Xeto overlay.
+    /// Use [`Self::load_bundled_h4`] when selecting only H4 semantic resources.
+    pub fn load_standard() -> Result<Self, OntologyError> {
+        let mut ns = Self::load_bundled_h4()?;
         // Load bundled Xeto libraries (best-effort).
         // Libraries are returned in dependency order so sequential loading works.
         for bundled in crate::xeto::bundled::bundled_libs() {
@@ -467,6 +525,13 @@ impl DefNamespace {
         term: &str,
         ctx: Option<crate::xeto::QueryContext<'_>>,
     ) -> bool {
+        if let Some(catalog) = self.selected_catalog()
+            && catalog.declaration(term).is_some()
+        {
+            // Selected declarations never fall back to permissive legacy
+            // fitting. References resolve only through the caller's store.
+            return catalog.fits_selected(term, entity, ctx.map(|ctx| ctx.forward));
+        }
         match self.resolve_spec_term(term) {
             Some(SpecTerm::Def(name)) => self.entity_is_a(entity, &name),
             Some(SpecTerm::Spec(spec)) => {
@@ -622,13 +687,8 @@ impl DefNamespace {
             .get(lib_name)
             .ok_or_else(|| format!("library '{}' not found", lib_name))?;
         let specs: Vec<&crate::xeto::Spec> = self.specs(Some(lib_name));
-        Ok(crate::xeto::export::export_lib(
-            lib_name,
-            &lib.version,
-            &lib.doc,
-            &lib.depends,
-            &specs,
-        ))
+        crate::xeto::export::export_lib(lib_name, &lib.version, &lib.doc, &lib.depends, &specs)
+            .map_err(|e| e.to_string())
     }
 
     /// Save a library to a file on disk as Xeto text.

@@ -24,24 +24,69 @@ use crate::kinds::Kind;
 pub enum FilterError {
     #[error("filter parse error at position {pos}: {message}")]
     Parse { pos: usize, message: String },
+    #[error("filter resource limit exceeded")]
+    Limit,
+    #[error("filter parsing interrupted")]
+    Interrupted,
 }
 
 /// Parse a filter expression string into a FilterNode AST.
 pub fn parse_filter(expr: &str) -> Result<FilterNode, FilterError> {
-    let mut parser = FilterParser::new(expr);
+    parse_filter_controlled(
+        expr,
+        FilterParseLimits {
+            max_bytes: usize::MAX,
+            max_nodes: usize::MAX,
+            max_depth: usize::MAX,
+        },
+        &mut || Ok(()),
+    )
+}
+
+/// Allocation limits for the filter AST. Depth counts the produced AST, including
+/// left-associated AND/OR chains, separately from the parser's recursion guard.
+#[derive(Debug, Clone, Copy)]
+pub struct FilterParseLimits {
+    pub max_bytes: usize,
+    pub max_nodes: usize,
+    pub max_depth: usize,
+}
+
+/// Parse with limits checked before AST allocation and caller checkpoints.
+/// The callback can return `Interrupted` without treating a stop as a predicate.
+pub fn parse_filter_controlled(
+    expr: &str,
+    limits: FilterParseLimits,
+    check: &mut dyn FnMut() -> Result<(), FilterError>,
+) -> Result<FilterNode, FilterError> {
+    check()?;
+    if expr.len() > limits.max_bytes || limits.max_nodes == 0 || limits.max_depth == 0 {
+        return Err(FilterError::Limit);
+    }
+    let mut parser = FilterParser {
+        src: expr,
+        pos: 0,
+        depth: 0,
+        nodes: 0,
+        limits,
+        check,
+    };
     parser.skip_spaces();
     if parser.at_end() {
         return Err(parser.err("empty filter expression"));
     }
     let node = parser.parse_cond_or()?;
     parser.skip_spaces();
+    (parser.check)()?;
     if !parser.at_end() {
-        return Err(parser.err(format!(
-            "unexpected trailing input: '{}'",
-            &parser.src[parser.pos..]
-        )));
+        return Err(parser.err("unexpected trailing input"));
     }
-    Ok(node)
+    Ok(node.ast)
+}
+
+struct ParsedNode {
+    ast: FilterNode,
+    depth: usize,
 }
 
 /// Maximum nesting depth for filter expressions to prevent stack overflow.
@@ -49,22 +94,27 @@ const MAX_DEPTH: usize = 100;
 
 // ── Internal parser state ──
 
-struct FilterParser<'a> {
+struct FilterParser<'a, 'c> {
     src: &'a str,
     pos: usize,
     depth: usize,
+    nodes: usize,
+    limits: FilterParseLimits,
+    check: &'c mut dyn FnMut() -> Result<(), FilterError>,
 }
 
-impl<'a> FilterParser<'a> {
-    fn new(src: &'a str) -> Self {
-        Self {
-            src,
-            pos: 0,
-            depth: 0,
+impl FilterParser<'_, '_> {
+    fn reserve_node(&mut self, depth: usize) -> Result<(), FilterError> {
+        (self.check)()?;
+        if self.nodes >= self.limits.max_nodes || depth > self.limits.max_depth {
+            return Err(FilterError::Limit);
         }
+        self.nodes += 1;
+        Ok(())
     }
 
     fn enter_depth(&mut self) -> Result<(), FilterError> {
+        (self.check)()?;
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             Err(self.err("filter expression exceeds maximum nesting depth"))
@@ -230,6 +280,7 @@ impl<'a> FilterParser<'a> {
 
     /// Read a Zinc scalar value using the ZincParser.
     fn read_val(&mut self) -> Result<Kind, FilterError> {
+        (self.check)()?;
         self.skip_spaces();
         // Use ZincParser to parse the value from the current position
         let remaining = &self.src[self.pos..];
@@ -240,13 +291,14 @@ impl<'a> FilterParser<'a> {
         })?;
         // Advance our position by however far the zinc parser consumed
         self.pos += zinc.pos();
+        (self.check)()?;
         Ok(val)
     }
 
     // ── Recursive descent productions ──
 
     /// condOr := condAnd ("or" condAnd)*
-    fn parse_cond_or(&mut self) -> Result<FilterNode, FilterError> {
+    fn parse_cond_or(&mut self) -> Result<ParsedNode, FilterError> {
         self.enter_depth()?;
         let mut left = self.parse_cond_and()?;
         loop {
@@ -254,7 +306,12 @@ impl<'a> FilterParser<'a> {
             if self.consume_keyword("or") {
                 self.skip_spaces();
                 let right = self.parse_cond_and()?;
-                left = FilterNode::Or(Box::new(left), Box::new(right));
+                let depth = 1 + left.depth.max(right.depth);
+                self.reserve_node(depth)?;
+                left = ParsedNode {
+                    ast: FilterNode::Or(Box::new(left.ast), Box::new(right.ast)),
+                    depth,
+                };
             } else {
                 break;
             }
@@ -264,7 +321,7 @@ impl<'a> FilterParser<'a> {
     }
 
     /// condAnd := term ("and" term)*
-    fn parse_cond_and(&mut self) -> Result<FilterNode, FilterError> {
+    fn parse_cond_and(&mut self) -> Result<ParsedNode, FilterError> {
         self.enter_depth()?;
         let mut left = self.parse_term()?;
         loop {
@@ -272,7 +329,12 @@ impl<'a> FilterParser<'a> {
             if self.consume_keyword("and") {
                 self.skip_spaces();
                 let right = self.parse_term()?;
-                left = FilterNode::And(Box::new(left), Box::new(right));
+                let depth = 1 + left.depth.max(right.depth);
+                self.reserve_node(depth)?;
+                left = ParsedNode {
+                    ast: FilterNode::And(Box::new(left.ast), Box::new(right.ast)),
+                    depth,
+                };
             } else {
                 break;
             }
@@ -282,7 +344,7 @@ impl<'a> FilterParser<'a> {
     }
 
     /// term := parens | missing | cmp_or_has | specMatch
-    fn parse_term(&mut self) -> Result<FilterNode, FilterError> {
+    fn parse_term(&mut self) -> Result<ParsedNode, FilterError> {
         self.skip_spaces();
 
         // Parenthesized expression
@@ -298,12 +360,16 @@ impl<'a> FilterParser<'a> {
             return Ok(inner);
         }
 
+        self.reserve_node(1)?;
         // "not" keyword → Missing
         if self.at_keyword("not") {
             self.consume_keyword("not");
             self.skip_spaces();
             let path = self.read_path()?;
-            return Ok(FilterNode::Missing(path));
+            return Ok(ParsedNode {
+                ast: FilterNode::Missing(path),
+                depth: 1,
+            });
         }
 
         // Try to read a name; might be Has, Cmp, or SpecMatch
@@ -319,7 +385,10 @@ impl<'a> FilterParser<'a> {
                     match self.read_spec_type_name() {
                         Some(type_name) => {
                             spec.push_str(&type_name);
-                            return Ok(FilterNode::SpecMatch(spec));
+                            return Ok(ParsedNode {
+                                ast: FilterNode::SpecMatch(spec),
+                                depth: 1,
+                            });
                         }
                         None => {
                             return Err(self.err("expected type name after '::'"));
@@ -351,7 +420,10 @@ impl<'a> FilterParser<'a> {
                         match self.read_spec_type_name() {
                             Some(type_name) => {
                                 spec.push_str(&type_name);
-                                return Ok(FilterNode::SpecMatch(spec));
+                                return Ok(ParsedNode {
+                                    ast: FilterNode::SpecMatch(spec),
+                                    depth: 1,
+                                });
                             }
                             None => {
                                 return Err(self.err("expected type name after '::'"));
@@ -379,11 +451,17 @@ impl<'a> FilterParser<'a> {
                 let pre_op_pos = self.pos;
                 if let Some(op) = self.read_cmp_op() {
                     let val = self.read_val()?;
-                    Ok(FilterNode::Cmp { path, op, val })
+                    Ok(ParsedNode {
+                        ast: FilterNode::Cmp { path, op, val },
+                        depth: 1,
+                    })
                 } else {
                     // No comparison operator → Has
                     self.pos = pre_op_pos;
-                    Ok(FilterNode::Has(path))
+                    Ok(ParsedNode {
+                        ast: FilterNode::Has(path),
+                        depth: 1,
+                    })
                 }
             }
             None => Err(self.err("expected tag name, 'not', or '('")),

@@ -6,7 +6,7 @@ mod parser;
 pub use encoder::{
     encode_grid, encode_grid_header, encode_grid_row, encode_meta, encode_scalar, escape_str,
 };
-pub use parser::{ZincParser, decode_grid, decode_scalar};
+pub use parser::{ZincParser, decode_grid, decode_grid_complete_rows, decode_scalar};
 
 use super::{Codec, CodecError};
 use crate::data::{HCol, HDict, HGrid};

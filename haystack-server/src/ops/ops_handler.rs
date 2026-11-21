@@ -11,41 +11,52 @@ use crate::content;
 use crate::state::SharedState;
 
 /// GET /api/ops — returns a grid listing all available operations.
-pub async fn handle(State(_state): State<SharedState>, headers: HeaderMap) -> Response {
+pub async fn handle(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     let accept = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let ops = vec![
-        ("about", "Summary information for server"),
-        ("ops", "Operations supported by this server"),
-        ("formats", "Grid data formats supported by this server"),
-        ("read", "Read entity records by id or filter"),
-        ("nav", "Navigate a project for discovery"),
-        ("defs", "Query the definitions namespace"),
-        ("libs", "Query the library namespace"),
-        ("watchSub", "Subscribe to entity changes"),
-        ("watchPoll", "Poll for entity changes"),
-        ("watchUnsub", "Unsubscribe from entity changes"),
-        ("pointWrite", "Write a value to a writable point"),
-        ("hisRead", "Read historical time-series data"),
-        ("hisWrite", "Write historical time-series data"),
-        ("invokeAction", "Invoke an action on an entity"),
-        ("close", "Close the current session"),
-    ];
+    let ops = crate::capabilities::CAPABILITIES
+        .iter()
+        .filter(|capability| {
+            capability.enabled(
+                state.profile,
+                state.mutation_service.is_some(),
+                state.history_service.is_some(),
+                state.history_mutation_service.is_some(),
+                state.subscription_service.is_some(),
+            )
+        });
 
     let cols = vec![HCol::new("name"), HCol::new("summary")];
-    let rows: Vec<HDict> = ops
-        .into_iter()
-        .map(|(name, summary)| {
+    let mut rows: Vec<HDict> = ops
+        .map(|capability| {
             let mut row = HDict::new();
-            row.set("name", Kind::Str(name.to_string()));
-            row.set("summary", Kind::Str(summary.to_string()));
+            row.set("name", Kind::Str(capability.name.to_string()));
+            row.set("summary", Kind::Str(capability.summary.to_string()));
             row
         })
         .collect();
 
+    if let Some(application) = &state.application {
+        let functions = application.read_service().typed_functions();
+        for function in functions.iter() {
+            if crate::capabilities::CAPABILITIES
+                .iter()
+                .any(|capability| capability.name == function.name)
+            {
+                continue;
+            }
+            let mut row = HDict::new();
+            row.set("name", Kind::Str(function.name.to_owned()));
+            row.set(
+                "summary",
+                Kind::Str(function.doc.unwrap_or(function.signature).to_owned()),
+            );
+            rows.push(row);
+        }
+    }
     let grid = HGrid::from_parts(HDict::new(), cols, rows);
     match content::encode_response_grid(&grid, accept) {
         Ok((body, ct)) => ([(axum::http::header::CONTENT_TYPE, ct)], body).into_response(),

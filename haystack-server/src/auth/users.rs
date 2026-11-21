@@ -104,6 +104,9 @@ pub struct UserRecord {
 ///
 /// Format: `"base64(salt):iterations:base64(stored_key):base64(server_key)"`.
 pub fn parse_password_hash(hash: &str) -> Result<ScramCredentials, String> {
+    if hash.len() > 2048 {
+        return Err("password hash exceeds limit".into());
+    }
     let parts: Vec<&str> = hash.split(':').collect();
     if parts.len() != 4 {
         return Err(format!(
@@ -125,12 +128,15 @@ pub fn parse_password_hash(hash: &str) -> Result<ScramCredentials, String> {
         .decode(parts[3])
         .map_err(|e| format!("invalid base64 server_key: {e}"))?;
 
-    Ok(ScramCredentials {
+    let credentials = ScramCredentials {
         salt,
         iterations,
         stored_key,
         server_key,
-    })
+    };
+    haystack_core::auth::validate_credentials(&credentials)
+        .map_err(|_| "invalid SCRAM credential structure".to_string())?;
+    Ok(credentials)
 }
 
 /// Create a password hash string from a plaintext password.
@@ -190,6 +196,20 @@ mod tests {
         assert_eq!(creds.iterations, DEFAULT_ITERATIONS);
         assert_eq!(creds.stored_key.len(), 32);
         assert_eq!(creds.server_key.len(), 32);
+    }
+
+    #[test]
+    fn malformed_stored_credentials_are_rejected_at_loading() {
+        let key = BASE64.encode([0; 32]);
+        for hash in [
+            format!("c2FsdA==:0:{key}:{key}"),
+            format!("c2FsdA==:1000001:{key}:{key}"),
+            format!(":4096:{key}:{key}"),
+            format!("c2FsdA==:4096:YQ==:{key}"),
+            format!("c2FsdA==:4096:{key}:YQ=="),
+        ] {
+            assert!(parse_password_hash(&hash).is_err());
+        }
     }
 
     #[test]

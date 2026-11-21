@@ -4,14 +4,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 name = "rusty_haystack"
 crate-type = ["cdylib"]
 
 [dependencies]
-haystack-core = { package = "rusty-haystack-core", version = "0.9.0", path = "../haystack-core" }
-haystack-client = { package = "rusty-haystack-client", version = "0.9.0", path = "../haystack-client" }
-haystack-server = { package = "rusty-haystack-server", version = "0.9.0", path = "../haystack-server" }
-pyo3 = { version = "0.29", features = ["extension-module"] }
-chrono = "0.4"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+haystack-core.workspace = true
+haystack-app.workspace = true
+haystack-client.workspace = true
+haystack-server.workspace = true
+pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
+parking_lot.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+zeroize.workspace = true
+chrono.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+url.workspace = true

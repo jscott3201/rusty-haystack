@@ -48,7 +48,11 @@ impl Codec for Json3Codec {
 
 /// Encode a Kind value to a serde_json Value in v3 format.
 pub fn encode_kind(val: &Kind) -> Result<Value, CodecError> {
+    crate::kinds::projection::ensure_h4(val)?;
     match val {
+        Kind::Int(_) | Kind::Float(_) | Kind::None | Kind::Buf(_) | Kind::Nominal(_) => {
+            Err(CodecError::UnsupportedKind)
+        }
         Kind::Null => Ok(Value::Null),
         Kind::Bool(b) => Ok(Value::Bool(*b)),
         Kind::Marker => Ok(Value::String("m:".into())),
@@ -121,6 +125,7 @@ fn encode_dict(d: &HDict) -> Result<Value, CodecError> {
 
 /// Encode an HGrid as a v3 JSON object.
 fn encode_grid_value(grid: &HGrid) -> Result<Map<String, Value>, CodecError> {
+    crate::kinds::projection::ensure_h4_grid(grid)?;
     let mut m = Map::new();
 
     // meta — always includes ver
@@ -202,8 +207,7 @@ fn decode_kind_depth(val: &Value, depth: usize) -> Result<Kind, CodecError> {
 /// Decode a type-prefixed string (e.g., `"m:"`, `"n:72 °F"`, `"s:text"`).
 fn decode_prefixed_string(s: &str) -> Result<Kind, CodecError> {
     // Check for 2-char prefix patterns (x:)
-    if s.len() >= 2 {
-        let prefix = &s[..2];
+    if let Some(prefix) = s.get(..2) {
         let rest = &s[2..];
         match prefix {
             "m:" if rest.is_empty() => return Ok(Kind::Marker),
@@ -512,6 +516,16 @@ mod tests {
         let codec = Json3Codec;
         let encoded = codec.encode_scalar(&kind).unwrap();
         codec.decode_scalar(&encoded).unwrap()
+    }
+
+    #[test]
+    fn unprefixed_multibyte_strings_preserve_plain_string_fallback() {
+        for text in ["工程", "😀value", "é", "", "x"] {
+            assert_eq!(
+                decode_kind(&Value::String(text.into())).unwrap(),
+                Kind::Str(text.into())
+            );
+        }
     }
 
     // ── Null ──

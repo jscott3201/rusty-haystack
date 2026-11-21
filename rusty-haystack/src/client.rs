@@ -4,6 +4,7 @@
 
 use pyo3::prelude::*;
 
+use haystack_client::ClientConfig;
 use haystack_client::client::HaystackClient;
 use haystack_client::tls::TlsConfig;
 use haystack_client::transport::http::HttpTransport;
@@ -44,6 +45,14 @@ pub struct PyTlsConfig {
 
 #[pymethods]
 impl PyTlsConfig {
+    /// Trust an additional PEM CA without requiring a client identity.
+    #[staticmethod]
+    fn with_ca(ca_pem: &[u8]) -> Self {
+        Self {
+            inner: TlsConfig::with_ca(ca_pem.to_vec()),
+        }
+    }
+
     /// Load TLS client certificate, key, and optional CA from file paths.
     #[staticmethod]
     #[pyo3(signature = (cert_path, key_path, ca_path = None))]
@@ -86,14 +95,37 @@ pub struct PyHaystackClient {
 #[pymethods]
 impl PyHaystackClient {
     /// Connect to a Haystack server over HTTP with SCRAM auth.
+    ///
+    /// ``tls_verify`` defaults to true (certificate chain + hostname).
+    /// Set ``tls_verify=False`` only for controlled lab/development HTTPS
+    /// (for example local FIN Stack with a self-signed cert). That opt-out
+    /// disables certificate-chain **and** hostname verification for SCRAM
+    /// and subsequent HTTPS ops; it does not configure WebSocket TLS or
+    /// enable redirects. Prefer ``connect_tls`` / a custom CA when practical.
     #[staticmethod]
-    fn connect(py: Python<'_>, url: &str, username: &str, password: &str) -> PyResult<Self> {
+    #[pyo3(signature = (url, username, password, *, tls_verify=true))]
+    fn connect(
+        py: Python<'_>,
+        url: &str,
+        username: &str,
+        password: &str,
+        tls_verify: bool,
+    ) -> PyResult<Self> {
         let rt = get_runtime()?;
         let url = url.to_string();
         let username = username.to_string();
         let password = password.to_string();
+        let config = if tls_verify {
+            ClientConfig::default()
+        } else {
+            ClientConfig::scram_insecure_tls()
+        };
         let client = py
-            .detach(|| rt.block_on(HaystackClient::connect(&url, &username, &password)))
+            .detach(|| {
+                rt.block_on(HaystackClient::connect_with_config(
+                    &url, &username, &password, &config,
+                ))
+            })
             .map_err(client_err)?;
         Ok(Self { inner: client })
     }
@@ -133,7 +165,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.about()))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Query the list of operations supported by the server.
@@ -144,7 +176,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.ops()))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Query the wire formats supported by the server.
@@ -155,7 +187,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.formats()))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Query the ontology libraries loaded on the server.
@@ -164,7 +196,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.libs()))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Read entities matching a Haystack filter expression.
@@ -178,7 +210,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.read(filter, limit)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Read entities by their ref ID strings.
@@ -191,7 +223,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.read_by_ids(&id_refs)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Navigate the entity tree.
@@ -204,7 +236,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.nav(nav_id)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Query ontology definitions.
@@ -217,7 +249,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.defs(filter)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     // -- Watch ops --
@@ -239,7 +271,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.watch_sub(&id_refs, lease)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Poll a watch for changed entities since last poll.
@@ -251,7 +283,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.watch_poll(watch_id)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Unsubscribe from a watch.
@@ -272,7 +304,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.watch_unsub(watch_id, &id_refs)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     // -- Point write --
@@ -295,7 +327,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.point_write(id, level, kind)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     // -- History --
@@ -310,10 +342,11 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.his_read(id, range)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
-    /// Write historical time-series data for a point.
+    /// Write historical time-series data through the legacy grid API.
+    /// This helper does not provide scoped history mutation receipts.
     ///
     /// Args:
     ///     id: Point entity ref value.
@@ -330,7 +363,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.his_write(id, dicts)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     // -- Actions --
@@ -354,7 +387,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.invoke_action(id, action, args_dict)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     // -- Library management --
@@ -369,7 +402,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.specs(lib)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Get a single ontology spec by qualified name.
@@ -381,7 +414,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.spec(qname)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Load an ontology library from Trio source.
@@ -394,7 +427,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.load_lib(name, source)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Unload an ontology library by name.
@@ -403,7 +436,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.unload_lib(name)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Export an ontology library as Trio source.
@@ -412,7 +445,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.export_lib(name)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Validate entities against the server's ontology namespace.
@@ -426,7 +459,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.validate(dicts)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     // -- Session management --
@@ -444,7 +477,7 @@ impl PyHaystackClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.call(op, &req.inner)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     fn __repr__(&self) -> String {
@@ -495,7 +528,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.about()))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Query supported operations over WebSocket.
@@ -504,7 +537,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.ops()))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Read entities matching a Haystack filter expression.
@@ -518,7 +551,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.read(filter, limit)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Read entities by their ref ID strings.
@@ -531,7 +564,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.read_by_ids(&id_refs)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Navigate the entity tree.
@@ -544,7 +577,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.nav(nav_id)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Subscribe to entity watches for real-time updates.
@@ -564,7 +597,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.watch_sub(&id_refs, lease)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Poll a watch for changed entities since last poll.
@@ -576,7 +609,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.watch_poll(watch_id)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Read historical time-series data for a point.
@@ -589,7 +622,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.his_read(id, range)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Write a value to a writable point at a priority level.
@@ -610,7 +643,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.point_write(id, level, kind)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Send a raw op request over WebSocket. Returns the response grid.
@@ -619,7 +652,7 @@ impl PyWsClient {
         let grid = py
             .detach(|| rt.block_on(self.inner.call(op, &req.inner)))
             .map_err(client_err)?;
-        Ok(PyHGrid::from_core(&grid))
+        PyHGrid::from_core(&grid)
     }
 
     /// Close the WebSocket connection.

@@ -14,7 +14,7 @@ class TestAuthManager:
     def test_from_toml_str(self):
         toml_content = """
 [users.admin]
-password_hash = "dGVzdA==:100000:dGVzdA==:dGVzdA=="
+password_hash = "W22ZaJ0SNY7soEsUEjb6gQ==:4096:WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU="
 role = "admin"
 """
         auth = rh.server.AuthManager.from_toml_str(toml_content)
@@ -23,7 +23,7 @@ role = "admin"
     def test_from_toml_file(self):
         toml_content = """
 [users.viewer]
-password_hash = "dGVzdA==:100000:dGVzdA==:dGVzdA=="
+password_hash = "W22ZaJ0SNY7soEsUEjb6gQ==:4096:WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU="
 role = "viewer"
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:

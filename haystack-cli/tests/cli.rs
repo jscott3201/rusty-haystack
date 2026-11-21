@@ -495,3 +495,34 @@ fn successive_lib_mutations_leave_the_graph_in_step() {
         b.body
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn serve_signals_await_application_shutdown_and_release_owned_runtime() {
+    for signal in ["-INT", "-TERM"] {
+        let mut server = ServeChild::spawn(&[]);
+        assert_eq!(server.read("site").status, 200);
+        assert!(
+            Command::new("kill")
+                .args([signal, &server.child.id().to_string()])
+                .status()
+                .expect("signal test-owned server")
+                .success()
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = server.child.try_wait().expect("observe server exit") {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server did not finish shutdown"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success(), "signal caused abrupt exit: {status}");
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", server.port))
+            .expect("application released its listener before process exit");
+        assert_eq!(rebound.local_addr().unwrap().port(), server.port);
+    }
+}

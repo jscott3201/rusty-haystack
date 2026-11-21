@@ -1,0 +1,44 @@
+[package]
+name = "rusty-haystack-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Authorized bounded application reads for embedded and HTTP Haystack consumers"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "haystack_app"
+
+[features]
+default = []
+postgres = ["dep:sqlx", "dep:serde"]
+sqlite = ["dep:rusqlite", "dep:serde"]
+
+[dependencies]
+haystack-core = { workspace = true, features = ["chrono-tz"] }
+chrono.workspace = true
+base64.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+sqlx = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+rusqlite = { workspace = true, features = ["bundled", "hooks"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tempfile.workspace = true

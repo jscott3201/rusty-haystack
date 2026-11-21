@@ -4,12 +4,26 @@ use std::fmt;
 ///
 /// This is the Haystack `Coord` scalar kind. Latitude must be in the range
 /// −90 to 90 and longitude in −180 to 180. Displayed in Zinc as `C(lat,lng)`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Coord {
     /// Latitude in decimal degrees (−90 … 90).
     pub lat: f64,
     /// Longitude in decimal degrees (−180 … 180).
     pub lng: f64,
+}
+
+// Representation identity, including signed zero and NaN payloads.
+impl PartialEq for Coord {
+    fn eq(&self, other: &Self) -> bool {
+        self.lat.to_bits() == other.lat.to_bits() && self.lng.to_bits() == other.lng.to_bits()
+    }
+}
+impl Eq for Coord {}
+impl std::hash::Hash for Coord {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.lat.to_bits().hash(state);
+        self.lng.to_bits().hash(state);
+    }
 }
 
 impl Coord {

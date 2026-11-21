@@ -1,20 +1,105 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "haystack-core",
+    "haystack-app",
+    "haystack-mcp",
     "rusty-haystack",
     "haystack-cli",
     "haystack-server",
     "haystack-client",
+    "haystack-analytics",
     "demo/niagara_sample/niagara-rusty-scrape",
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/jscott3201/rusty-haystack"
 homepage = "https://github.com/jscott3201/rusty-haystack"
 keywords = ["haystack", "iot", "building-automation", "smart-buildings"]
 categories = ["encoding", "network-programming"]
+
+# Own versions here; members opt into only the features they need.
+[workspace.dependencies]
+haystack-core = { package = "rusty-haystack-core", version = "0.10.0", path = "haystack-core" }
+haystack-client = { package = "rusty-haystack-client", version = "0.10.0", path = "haystack-client" }
+haystack-app = { package = "rusty-haystack-app", version = "0.10.0", path = "haystack-app" }
+haystack-mcp = { package = "rusty-haystack-mcp", version = "0.10.0", path = "haystack-mcp" }
+haystack-server = { package = "rusty-haystack-server", version = "0.10.0", path = "haystack-server" }
+# One Arrow/Parquet family. DataFusion 55.2 requires Arrow ^59.2; move together.
+# Exact pins: the analytics reader's typed Compact Thrift preflight (the `Wire`
+# shapes in haystack-analytics/src/reader.rs) mirrors parquet 59.3.2's
+# decode-by-field-id behaviour. Re-audit those shapes on any arrow/parquet bump.
+arrow = { version = "=59.3.2", default-features = false }
+arrow-array = "=59.3.2"
+arrow-schema = "=59.3.2"
+parquet = { version = "=59.3.2", default-features = false, features = ["arrow"] }
+async-trait = "0.1"
+axum = "0.8"
+# Direct consumers request only std; transitive consumers may enable SIMD.
+bytes = "1"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+chrono = "0.4"
+chrono-tz = "0.10.4"
+clap = "4"
+criterion = "0.8"
+dashmap = "6"
+# Optional snapshot SQL only; not DataFusion's `parquet` feature.
+datafusion = { version = "=55.2.0", default-features = false, features = ["sql", "recursive_protection"] }
+env_logger = "0.11"
+flate2 = "1"
+crc32fast = "1.5.2"
+futures-util = "0.3"
+hmac = "0.13"
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = "0.1"
+ring = "0.17.14"
+indexmap = "2"
+libc = "0.2"
+log = "0.4"
+parking_lot = "0.12"
+pbkdf2 = "0.13"
+pyo3 = "0.30"
+pyo3-async-runtimes = "=0.30.0"
+rand = "0.10"
+regex = "1"
+regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "unicode", "dfa-build", "dfa-search"] }
+rmcp = { version = "=3.9.0", default-features = false }
+reqwest = { version = "0.13", default-features = false }
+rcgen = { version = "0.14.10", default-features = false }
+roaring = "0.12"
+rusqlite = { version = "=0.41.1", default-features = false }
+rustc-hash = "2"
+# Security floor: RUSTSEC-2026-0346/0347/0348/0349 are fixed in 0.23.46.
+rustls = { version = "0.23.46", default-features = false }
+serde = "1.0"
+# H4 Number decoding must preserve the original finite f64 bit pattern.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+sha2 = "0.11"
+slotmap = "1.1"
+socket2 = "0.6"
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+smallvec = "1.15"
+subtle = "2"
+tempfile = "3"
+test-case = "3"
+thiserror = "2"
+time = "0.3"
+tokio = "1"
+tokio-tungstenite = "0.30"
+tokio-rustls = { version = "0.26.6", default-features = false }
+tokio-util = "0.7"
+toml = "1.0"
+tower = "0.5"
+tower-http = "0.7"
+url = "2"
+uuid = "1"
+zeroize = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

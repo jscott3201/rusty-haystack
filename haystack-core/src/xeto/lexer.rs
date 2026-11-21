@@ -26,6 +26,8 @@ pub enum TokenType {
     Question,
     /// `*`
     Star,
+    /// `+` (type augmentation).
+    Plus,
 
     // Literals
     /// Identifier (letters, digits, underscores; starts with letter or underscore).
@@ -182,6 +184,10 @@ impl XetoLexer {
                 '?' => {
                     self.advance();
                     (TokenType::Question, "?".to_string())
+                }
+                '+' => {
+                    self.advance();
+                    (TokenType::Plus, "+".to_string())
                 }
                 '*' => {
                     self.advance();

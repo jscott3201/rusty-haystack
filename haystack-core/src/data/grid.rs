@@ -7,7 +7,7 @@ use std::sync::Arc;
 /// A single column in a Haystack Grid.
 ///
 /// Each column has a name and optional metadata dict.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HCol {
     pub name: String,
     pub meta: HDict,
@@ -37,7 +37,7 @@ impl HCol {
 /// - `meta`: grid-level metadata (an `HDict`)
 /// - `cols`: ordered list of columns (`HCol`)
 /// - `rows`: ordered list of row dicts (`HDict`)
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct HGrid {
     pub meta: HDict,
     pub cols: Vec<HCol>,

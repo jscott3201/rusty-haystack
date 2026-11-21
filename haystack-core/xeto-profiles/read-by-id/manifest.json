@@ -1,0 +1,176 @@
+{
+  "profile": "pinned-xeto-readById",
+  "repository": "https://github.com/Project-Haystack/xeto",
+  "commit": "873b922451d3ef4c0c9c08ef3daa542f352d69f3",
+  "license": "AFL-3.0",
+  "complete_libraries": false,
+  "extraction": "Concatenate inclusive 1-based line ranges in order, adding a blank line between ranges. Expand BuildVar quoted names using the pinned xeto-build.props; unknown variables are errors. Metadata is a bootstrap subset of Spec, never an admitted complete Spec declaration. Preserve +Funcs membership.",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "f75c46802a91d13e060f6ea50390353ba44640a4d0709d0a4ba38a9d1c820aa0",
+      "role": "license",
+      "library": "",
+      "lines": []
+    },
+    {
+      "path": "src/xeto/xeto-build.props",
+      "sha256": "4052a489e858e225644aa93fc5807b93063c6957cfb586f4c8ffa647f57279f8",
+      "role": "build",
+      "library": "",
+      "lines": []
+    },
+    {
+      "path": "src/xeto/sys/lib.xeto",
+      "sha256": "850161d4f59f8dde029db961e4697782dba36a3e3bdb475a6bb47b1b820f27a2",
+      "role": "library",
+      "library": "sys",
+      "lines": [
+        [
+          1,
+          24
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys.api/lib.xeto",
+      "sha256": "d2c68736334d4e085f72f418d486b6e1e96393154ebd4b717696342e97bbe224",
+      "role": "library",
+      "library": "sys.api",
+      "lines": [
+        [
+          1,
+          27
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys/types.xeto",
+      "sha256": "9ddb122ce44545ceb5b5f576f73b90b20c84ac24f00089da2f345f542086cad0",
+      "role": "types",
+      "library": "sys",
+      "lines": [
+        [
+          9,
+          10
+        ],
+        [
+          15,
+          16
+        ],
+        [
+          21,
+          22
+        ],
+        [
+          27,
+          28
+        ],
+        [
+          30,
+          31
+        ],
+        [
+          61,
+          77
+        ],
+        [
+          136,
+          137
+        ],
+        [
+          139,
+          140
+        ],
+        [
+          167,
+          173
+        ],
+        [
+          175,
+          176
+        ],
+        [
+          184,
+          186
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys/spec.xeto",
+      "sha256": "d06322bec6c72026ea2abfd0f9204fcc8948b6cd154aedcedb073de93f1b75b9",
+      "role": "metadata",
+      "library": "sys",
+      "lines": [
+        [
+          1,
+          11
+        ],
+        [
+          72,
+          73
+        ],
+        [
+          81,
+          82
+        ],
+        [
+          102,
+          103
+        ],
+        [
+          111,
+          112
+        ],
+        [
+          126,
+          130
+        ],
+        [
+          132,
+          133
+        ],
+        [
+          144,
+          147
+        ],
+        [
+          155,
+          156
+        ],
+        [
+          164,
+          166
+        ],
+        [
+          194,
+          195
+        ],
+        [
+          216,
+          216
+        ]
+      ]
+    },
+    {
+      "path": "src/xeto/sys.api/funcs.xeto",
+      "sha256": "e1930a35a9a9c5e15d2ad04456a396319ac88b16d3902ac432a500d2505bba0e",
+      "role": "functions",
+      "library": "sys.api",
+      "lines": [
+        [
+          1,
+          10
+        ],
+        [
+          16,
+          24
+        ],
+        [
+          110,
+          110
+        ]
+      ]
+    }
+  ]
+}

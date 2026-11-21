@@ -5,7 +5,22 @@ no-default-features = false
 exclude = ["rusty-haystack"]
 
 [advisories]
-ignore = []
+# zstd 0.13 reaches the graph only through arrow-ipc under the optional
+# analytics `sql` feature (DataFusion 55 requires Arrow 59; the fixes need
+# zstd >= 0.14.3, i.e. Arrow 60). The SQL path never reads or writes Arrow
+# IPC: spill is disabled and file-backed tables are refused. Remove all three
+# together with the DataFusion/Arrow 60 move.
+ignore = [
+    { id = "RUSTSEC-2026-0391", reason = "zstd via arrow-ipc only; no IPC (de)compression is reachable (spill disabled, no file tables). Tracked: https://github.com/jscott3201/rusty-haystack/issues/131" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd Seekable is never used; zstd via arrow-ipc only, unreachable (spill disabled, no file tables). Tracked: https://github.com/jscott3201/rusty-haystack/issues/131" },
+    { id = "RUSTSEC-2026-0403", reason = "no streaming zstd decompression is reachable: no IPC reads, spill disabled. Tracked: https://github.com/jscott3201/rusty-haystack/issues/131" },
+    # chrono and chrono-tz were declared unmaintained with no patched version.
+    # Neither notice is a vulnerability. Kind::DateTime/Date/Time carry chrono
+    # types in the public API, so replacing them is a breaking migration.
+    # Remove both when it lands.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable; no patched version exists and it is in the public API. Migration tracked: https://github.com/jscott3201/rusty-haystack/issues/134" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained, not vulnerable; no patched version exists. Migration tracked: https://github.com/jscott3201/rusty-haystack/issues/134" },
+]
 unmaintained = "workspace"
 
 [licenses]

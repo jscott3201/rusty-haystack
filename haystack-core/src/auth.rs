@@ -1,35 +1,28 @@
-//! SCRAM SHA-256 authentication primitives for the Haystack auth protocol.
-//!
-//! This module implements the cryptographic operations needed for SCRAM
-//! (Salted Challenge Response Authentication Mechanism) with SHA-256 as
-//! specified by the [Project Haystack auth spec](https://project-haystack.org/doc/docHaystack/Auth).
-//!
-//! It provides functions shared by both server and client implementations
-//! for the three-phase handshake: HELLO, SCRAM challenge/response, and
-//! BEARER token issuance.
-
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
+//! SCRAM SHA-256 for the published Haystack HTTP authentication exchange.
+//! Outer username/data use unpadded base64url; inner salt/proof/verifier use
+//! padded standard Base64. Received SCRAM transcripts are never normalized.
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as OUTER},
+};
 use hmac::{Hmac, KeyInit, Mac};
 use pbkdf2::pbkdf2_hmac;
 use rand::RngExt;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use subtle::ConstantTimeEq;
-use zeroize::Zeroize;
-
+use zeroize::{Zeroize, Zeroizing};
 type HmacSha256 = Hmac<Sha256>;
 
-/// Default PBKDF2 iteration count for SCRAM SHA-256.
 pub const DEFAULT_ITERATIONS: u32 = 100_000;
-
-/// Maximum PBKDF2 iteration count accepted from a server during client auth.
 pub const MAX_CLIENT_ITERATIONS: u32 = 1_000_000;
+pub const MAX_AUTH_HEADER_BYTES: usize = 8192;
+/// Bound tolerated empty HTTP list members; decoded SCRAM remains strict.
+pub const MAX_AUTH_EMPTY_MEMBERS: usize = 16;
+pub const MAX_AUTH_DATA_BYTES: usize = 4096;
+pub const MAX_USERNAME_BYTES: usize = 1024;
+const MAX_NONCE_BYTES: usize = 1024;
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur during SCRAM authentication.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("invalid credentials")]
@@ -43,20 +36,22 @@ pub enum AuthError {
     #[error("base64 decode error: {0}")]
     Base64Error(String),
 }
+fn invalid(message: &str) -> AuthError {
+    AuthError::InvalidMessage(message.into())
+}
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Pre-computed SCRAM credentials for a user (stored server-side).
-#[derive(Debug)]
+/// Pre-computed credentials. Stored salt/key encodings remain standard Base64.
 pub struct ScramCredentials {
     pub salt: Vec<u8>,
     pub iterations: u32,
     pub stored_key: Vec<u8>,
     pub server_key: Vec<u8>,
 }
-
+impl std::fmt::Debug for ScramCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScramCredentials { [REDACTED] }")
+    }
+}
 impl Drop for ScramCredentials {
     fn drop(&mut self) {
         self.stored_key.zeroize();
@@ -64,8 +59,7 @@ impl Drop for ScramCredentials {
     }
 }
 
-/// In-flight SCRAM handshake state held by the server between the
-/// server-first-message and client-final-message exchanges.
+/// Server proof state, preserving the exact client-first-bare transcript.
 pub struct ScramHandshake {
     pub username: String,
     pub client_nonce: String,
@@ -74,50 +68,38 @@ pub struct ScramHandshake {
     pub iterations: u32,
     pub auth_message: String,
     pub server_signature: Vec<u8>,
-    /// Stored key from credentials, needed to verify the client proof.
     stored_key: Vec<u8>,
 }
-
 impl std::fmt::Debug for ScramHandshake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ScramHandshake")
-            .field("username", &self.username)
-            .field("stored_key", &"[REDACTED]")
-            .field("server_signature", &"[REDACTED]")
-            .finish()
+        f.write_str("ScramHandshake { [REDACTED] }")
     }
 }
-
 impl Drop for ScramHandshake {
     fn drop(&mut self) {
-        // Zeroize sensitive derived material when the in-flight handshake is
-        // dropped, mirroring ScramCredentials. (ScramHandshake previously had
-        // no Drop impl, so its stored_key lingered in memory.)
         self.stored_key.zeroize();
         self.server_signature.zeroize();
     }
 }
 
-/// Parsed Haystack `Authorization` header.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AuthHeader {
     Hello {
         username: String,
-        /// Base64-encoded client-first-message (contains the client nonce).
-        data: Option<String>,
     },
     Scram {
-        handshake_token: String,
+        handshake_token: Option<String>,
         data: String,
     },
     Bearer {
         auth_token: String,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
+impl std::fmt::Debug for AuthHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthHeader { [REDACTED] }")
+    }
+}
 
 /// Compute HMAC-SHA-256(key, msg).
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
@@ -158,38 +140,7 @@ fn derive_keys(salted_password: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (client_key, stored_key, server_key)
 }
 
-/// Parse a `key=value` parameter from a SCRAM message segment.
-fn parse_scram_param<'a>(segment: &'a str, prefix: &str) -> Result<&'a str, AuthError> {
-    let trimmed = segment.trim();
-    trimmed.strip_prefix(prefix).ok_or_else(|| {
-        AuthError::HandshakeFailed(format!(
-            "expected prefix '{}' but got '{}'",
-            prefix, trimmed
-        ))
-    })
-}
-
-/// Escape a username for the SCRAM `n=` attribute per RFC 5802 section 5.1:
-/// `=` becomes `=3D` and `,` becomes `=2C`. The `=` substitution runs first so
-/// the `=` introduced by `=2C` is not itself re-escaped. Without this, a
-/// username containing `,` or `=` would corrupt the client-first-message and
-/// could hijack nonce parsing in [`extract_client_nonce`].
-fn escape_scram_username(username: &str) -> String {
-    username.replace('=', "=3D").replace(',', "=2C")
-}
-
-/// Build the client-first-message-bare: `n=<username>,r=<client_nonce>`.
-fn make_client_first_bare(username: &str, client_nonce: &str) -> String {
-    format!("n={},r={}", escape_scram_username(username), client_nonce)
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Derive SCRAM credentials from a password (for user creation/storage).
-///
-/// Uses PBKDF2-HMAC-SHA-256 with the given salt and iteration count.
+/// Derive stored credentials during explicit user provisioning.
 pub fn derive_credentials(password: &str, salt: &[u8], iterations: u32) -> ScramCredentials {
     let mut salted_password = pbkdf2_sha256(password.as_bytes(), salt, iterations);
     let (mut _client_key, stored_key, server_key) = derive_keys(&salted_password);
@@ -203,342 +154,389 @@ pub fn derive_credentials(password: &str, salt: &[u8], iterations: u32) -> Scram
     }
 }
 
-/// Generate a random nonce string (base64-encoded 18 random bytes).
+/// Generate 144 bits of random nonce entropy (printable SCRAM nonce bytes).
 pub fn generate_nonce() -> String {
-    let bytes: [u8; 18] = rand::rng().random();
-    BASE64.encode(bytes)
+    BASE64.encode(rand::rng().random::<[u8; 18]>())
+}
+fn escape_scram_username(username: &str) -> String {
+    username.replace('=', "=3D").replace(',', "=2C")
+}
+fn make_client_first_bare(username: &str, nonce: &str) -> String {
+    format!("n={},r={nonce}", escape_scram_username(username))
 }
 
-/// Client-side: Create the client-first-message data (base64-encoded).
-///
-/// Returns `(client_nonce, client_first_data_base64)`.
-///
-/// The client-first-message-bare is `n=<username>,r=<client_nonce>`.
-/// The full message prepends the GS2 header `n,,` (no channel binding).
+/// Create `(client_nonce, client_first_data)` with unpadded base64url data.
+/// The exact returned data must be passed to `client_final_message`.
 pub fn client_first_message(username: &str) -> (String, String) {
-    let client_nonce = generate_nonce();
-    let bare = make_client_first_bare(username, &client_nonce);
-    let full = format!("n,,{}", bare);
-    let encoded = BASE64.encode(full.as_bytes());
-    (client_nonce, encoded)
+    let nonce = generate_nonce();
+    let data = OUTER.encode(format!("n,,{}", make_client_first_bare(username, &nonce)));
+    (nonce, data)
 }
 
-/// Server-side: Create the server-first-message data and handshake state.
-///
-/// `username` is taken from the HELLO phase. `client_nonce_b64` is the raw
-/// client nonce (as returned by [`client_first_message`]). `credentials` are
-/// the pre-computed SCRAM credentials for this user.
-///
-/// Returns `(handshake_state, server_first_data_base64)`.
-pub fn server_first_message(
-    username: &str,
-    client_nonce_b64: &str,
-    credentials: &ScramCredentials,
-) -> (ScramHandshake, String) {
-    let server_nonce = generate_nonce();
-    let combined_nonce = format!("{}{}", client_nonce_b64, server_nonce);
-    let salt_b64 = BASE64.encode(&credentials.salt);
-
-    // server-first-message: r=<combined>,s=<salt_b64>,i=<iterations>
-    let server_first_msg = format!(
-        "r={},s={},i={}",
-        combined_nonce, salt_b64, credentials.iterations
-    );
-
-    // client-first-message-bare (includes username per SCRAM spec)
-    let cfmb = make_client_first_bare(username, client_nonce_b64);
-
-    // client-final-message-without-proof (anticipated)
-    let client_final_without_proof = format!("c=biws,r={}", combined_nonce);
-
-    // AuthMessage = client-first-bare "," server-first-msg "," client-final-without-proof
-    let auth_message = format!(
-        "{},{},{}",
-        cfmb, server_first_msg, client_final_without_proof
-    );
-
-    // Pre-compute server signature
-    let server_signature = hmac_sha256(&credentials.server_key, auth_message.as_bytes());
-
-    let server_first_b64 = BASE64.encode(server_first_msg.as_bytes());
-
-    let handshake = ScramHandshake {
-        username: username.to_string(),
-        client_nonce: client_nonce_b64.to_string(),
-        server_nonce,
-        salt: credentials.salt.clone(),
-        iterations: credentials.iterations,
-        auth_message,
-        server_signature,
-        stored_key: credentials.stored_key.clone(),
-    };
-
-    (handshake, server_first_b64)
-}
-
-/// Client-side: Process server-first-message, produce client-final-message.
-///
-/// `username` is the same value originally passed to [`client_first_message`].
-/// `password` is the user's plaintext password. `client_nonce` is the nonce
-/// returned by [`client_first_message`]. `server_first_b64` is the base64
-/// server-first-message data received from the server.
-///
-/// Returns `(client_final_data_base64, expected_server_signature)`.
-pub fn client_final_message(
-    password: &str,
-    client_nonce: &str,
-    server_first_b64: &str,
-    username: &str,
-) -> Result<(String, Vec<u8>), AuthError> {
-    // Decode and parse server-first-message
-    let server_first_bytes = BASE64
-        .decode(server_first_b64)
-        .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-    let server_first_msg = String::from_utf8(server_first_bytes)
-        .map_err(|e| AuthError::HandshakeFailed(e.to_string()))?;
-
-    // Expected format: r=<combined_nonce>,s=<salt_b64>,i=<iterations>
-    let parts: Vec<&str> = server_first_msg.splitn(3, ',').collect();
-    if parts.len() != 3 {
-        return Err(AuthError::HandshakeFailed(
-            "invalid server-first-message format".to_string(),
-        ));
-    }
-
-    let combined_nonce = parse_scram_param(parts[0], "r=")?;
-    let salt_b64 = parse_scram_param(parts[1], "s=")?;
-    let iterations_str = parse_scram_param(parts[2], "i=")?;
-
-    // The combined nonce must start with our client nonce
-    if !combined_nonce.starts_with(client_nonce) {
-        return Err(AuthError::HandshakeFailed(
-            "combined nonce does not start with client nonce".to_string(),
-        ));
-    }
-
-    let salt = BASE64
-        .decode(salt_b64)
-        .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-    let iterations: u32 = iterations_str
-        .parse()
-        .map_err(|e: std::num::ParseIntError| AuthError::HandshakeFailed(e.to_string()))?;
-
-    if iterations > MAX_CLIENT_ITERATIONS {
-        return Err(AuthError::InvalidMessage(format!(
-            "server requested {} PBKDF2 iterations, maximum allowed is {}",
-            iterations, MAX_CLIENT_ITERATIONS
-        )));
-    }
-
-    // Key derivation
-    let mut salted_password = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
-    let (mut client_key, stored_key, server_key) = derive_keys(&salted_password);
-    salted_password.zeroize();
-
-    // Build AuthMessage
-    let cfmb = make_client_first_bare(username, client_nonce);
-    let client_final_without_proof = format!("c=biws,r={}", combined_nonce);
-    let auth_message = format!(
-        "{},{},{}",
-        cfmb, server_first_msg, client_final_without_proof
-    );
-
-    // ClientSignature = HMAC(StoredKey, AuthMessage)
-    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
-    // ClientProof = ClientKey XOR ClientSignature
-    let client_proof = xor_bytes(&client_key, &client_signature);
-    // ServerSignature = HMAC(ServerKey, AuthMessage)
-    let server_signature = hmac_sha256(&server_key, auth_message.as_bytes());
-
-    // Zeroize intermediate key material
-    client_key.zeroize();
-
-    // client-final-message: c=biws,r=<combined>,p=<proof_b64>
-    let proof_b64 = BASE64.encode(&client_proof);
-    let client_final_msg = format!("{},p={}", client_final_without_proof, proof_b64);
-    let client_final_b64 = BASE64.encode(client_final_msg.as_bytes());
-
-    Ok((client_final_b64, server_signature))
-}
-
-/// Server-side: Verify client-final-message and produce server signature.
-///
-/// Decodes the client-final-message, verifies the client proof against the
-/// stored key in the handshake state, and returns the server signature for
-/// the client to verify (sent as the `v=` field in server-final-message).
-pub fn server_verify_final(
-    handshake: &ScramHandshake,
-    client_final_b64: &str,
-) -> Result<Vec<u8>, AuthError> {
-    // Decode client-final-message
-    let client_final_bytes = BASE64
-        .decode(client_final_b64)
-        .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-    let client_final_msg = String::from_utf8(client_final_bytes)
-        .map_err(|e| AuthError::HandshakeFailed(e.to_string()))?;
-
-    // Expected format: c=biws,r=<combined_nonce>,p=<proof_b64>
-    let parts: Vec<&str> = client_final_msg.splitn(3, ',').collect();
-    if parts.len() != 3 {
-        return Err(AuthError::HandshakeFailed(
-            "invalid client-final-message format".to_string(),
-        ));
-    }
-
-    // Validate channel binding
-    let channel_binding = parse_scram_param(parts[0], "c=")?;
-    if channel_binding != "biws" {
-        return Err(AuthError::HandshakeFailed(
-            "unexpected channel binding".to_string(),
-        ));
-    }
-
-    // Validate combined nonce
-    let combined_nonce = parse_scram_param(parts[1], "r=")?;
-    let expected_combined = format!("{}{}", handshake.client_nonce, handshake.server_nonce);
-    if !bool::from(
-        combined_nonce
-            .as_bytes()
-            .ct_eq(expected_combined.as_bytes()),
-    ) {
-        return Err(AuthError::HandshakeFailed("nonce mismatch".to_string()));
-    }
-
-    // Extract and decode client proof
-    let proof_b64 = parse_scram_param(parts[2], "p=")?;
-    let client_proof = BASE64
-        .decode(proof_b64)
-        .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-
-    // Verify the proof per RFC 5802:
-    //   ClientSignature = HMAC(StoredKey, AuthMessage)
-    //   RecoveredClientKey = ClientProof XOR ClientSignature
-    //   Check: SHA-256(RecoveredClientKey) == StoredKey
-    let client_signature = hmac_sha256(&handshake.stored_key, handshake.auth_message.as_bytes());
-    let recovered_client_key = xor_bytes(&client_proof, &client_signature);
-    let recovered_stored_key = sha256(&recovered_client_key);
-
-    if recovered_stored_key
-        .ct_eq(&handshake.stored_key)
-        .unwrap_u8()
-        == 0
+pub fn validate_username(username: &str) -> Result<(), AuthError> {
+    if username.is_empty()
+        || username.len() > MAX_USERNAME_BYTES
+        || username.chars().any(char::is_control)
     {
-        return Err(AuthError::InvalidCredentials);
+        return Err(invalid("invalid username"));
     }
-
-    // Proof verified -- return server signature for the client to verify
-    Ok(handshake.server_signature.clone())
+    Ok(())
 }
-
-/// Extract the client nonce from a base64-encoded client-first-message.
-///
-/// The client-first-message format is `n,,n=<username>,r=<client_nonce>`.
-/// Returns the raw nonce string.
-pub fn extract_client_nonce(client_first_b64: &str) -> Result<String, AuthError> {
-    let bytes = BASE64
-        .decode(client_first_b64)
-        .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-    let msg = String::from_utf8(bytes).map_err(|e| AuthError::HandshakeFailed(e.to_string()))?;
-    // Strip GS2 header "n,," prefix
-    let bare = msg
+/// Decode bounded outer data without accepting padding, whitespace or another alphabet.
+pub fn decode_auth_data(data: &str) -> Result<String, AuthError> {
+    if data.len() > MAX_AUTH_DATA_BYTES * 4 / 3 + 4 {
+        return Err(invalid("auth data exceeds limit"));
+    }
+    let bytes = OUTER
+        .decode(data)
+        .map_err(|_| invalid("invalid base64url data"))?;
+    if bytes.len() > MAX_AUTH_DATA_BYTES {
+        return Err(invalid("decoded auth data exceeds limit"));
+    }
+    String::from_utf8(bytes).map_err(|_| invalid("invalid auth UTF-8"))
+}
+fn nonce_valid(nonce: &str) -> bool {
+    !nonce.is_empty()
+        && nonce.len() <= MAX_NONCE_BYTES
+        && nonce
+            .bytes()
+            .all(|b| (0x21..=0x7e).contains(&b) && b != b',')
+}
+struct ClientFirst {
+    username: String,
+    nonce: String,
+    bare: String,
+}
+fn parse_client_first(data: &str) -> Result<ClientFirst, AuthError> {
+    let full = decode_auth_data(data)?;
+    let bare = full
         .strip_prefix("n,,")
-        .ok_or_else(|| AuthError::HandshakeFailed("missing GS2 header in client-first".into()))?;
-    // Parse n=<user>,r=<nonce>
-    for part in bare.split(',') {
-        if let Some(nonce) = part.strip_prefix("r=") {
-            return Ok(nonce.to_string());
+        .ok_or_else(|| invalid("unsupported GS2 header"))?;
+    let (name, nonce) = bare
+        .split_once(",r=")
+        .ok_or_else(|| invalid("invalid client-first fields"))?;
+    let escaped = name
+        .strip_prefix("n=")
+        .ok_or_else(|| invalid("invalid client-first username"))?;
+    if !nonce_valid(nonce) || escaped.contains(',') {
+        return Err(invalid("invalid client-first fields"));
+    }
+    let mut username = String::new();
+    let mut rest = escaped;
+    while let Some(index) = rest.find('=') {
+        username.push_str(&rest[..index]);
+        rest = &rest[index..];
+        if let Some(tail) = rest.strip_prefix("=2C") {
+            username.push(',');
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("=3D") {
+            username.push('=');
+            rest = tail;
+        } else {
+            return Err(invalid("invalid SCRAM username escape"));
         }
     }
-    Err(AuthError::HandshakeFailed(
-        "missing r= nonce in client-first-message".into(),
+    username.push_str(rest);
+    validate_username(&username)?;
+    Ok(ClientFirst {
+        username,
+        nonce: nonce.into(),
+        bare: bare.into(),
+    })
+}
+
+/// Verify a client-first message's exact username and retain its original bytes.
+pub fn server_first_message(
+    username: &str,
+    client_first_data: &str,
+    credentials: &ScramCredentials,
+) -> Result<(ScramHandshake, String), AuthError> {
+    validate_credentials(credentials)?;
+    let first = parse_client_first(client_first_data)?;
+    if first.username != username {
+        return Err(AuthError::InvalidCredentials);
+    }
+    let server_nonce = generate_nonce();
+    if first.nonce.len() + server_nonce.len() > MAX_NONCE_BYTES {
+        return Err(invalid("nonce exceeds limit"));
+    }
+    let combined = format!("{}{server_nonce}", first.nonce);
+    let message = format!(
+        "r={combined},s={},i={}",
+        BASE64.encode(&credentials.salt),
+        credentials.iterations
+    );
+    let auth_message = format!("{},{message},c=biws,r={combined}", first.bare);
+    let server_signature = hmac_sha256(&credentials.server_key, auth_message.as_bytes());
+    Ok((
+        ScramHandshake {
+            username: username.into(),
+            client_nonce: first.nonce,
+            server_nonce,
+            salt: credentials.salt.clone(),
+            iterations: credentials.iterations,
+            auth_message,
+            server_signature,
+            stored_key: credentials.stored_key.clone(),
+        },
+        OUTER.encode(message),
     ))
 }
 
-/// Parse a Haystack `Authorization` header value.
-///
-/// Supported formats:
-/// - `HELLO username=<base64(username)>`
-/// - `SCRAM handshakeToken=<token>, data=<data>`
-/// - `BEARER authToken=<token>`
-pub fn parse_auth_header(header: &str) -> Result<AuthHeader, AuthError> {
-    let header = header.trim();
+/// Validate stored credential structure without deriving a password.
+pub fn validate_credentials(credentials: &ScramCredentials) -> Result<(), AuthError> {
+    if credentials.salt.is_empty()
+        || credentials.salt.len() > 1024
+        || !(1..=MAX_CLIENT_ITERATIONS).contains(&credentials.iterations)
+        || credentials.stored_key.len() != 32
+        || credentials.server_key.len() != 32
+    {
+        return Err(invalid("invalid SCRAM credentials"));
+    }
+    Ok(())
+}
+struct ServerFirst {
+    message: String,
+    nonce: String,
+    salt: Vec<u8>,
+    iterations: u32,
+}
+fn parse_server_first(client_nonce: &str, data: &str) -> Result<ServerFirst, AuthError> {
+    let message = decode_auth_data(data)?;
+    let parts: Vec<_> = message.split(',').collect();
+    if parts.len() != 3 {
+        return Err(invalid("invalid server-first fields"));
+    }
+    let nonce = parts[0]
+        .strip_prefix("r=")
+        .ok_or_else(|| invalid("missing server nonce"))?;
+    if !nonce_valid(nonce) || !nonce.starts_with(client_nonce) || nonce.len() <= client_nonce.len()
+    {
+        return Err(invalid("server nonce does not extend client nonce"));
+    }
+    let salt = parts[1]
+        .strip_prefix("s=")
+        .ok_or_else(|| invalid("missing salt"))?;
+    if salt.len() > 1368 {
+        return Err(invalid("salt exceeds limit"));
+    }
+    let salt = BASE64
+        .decode(salt)
+        .map_err(|_| invalid("invalid salt base64"))?;
+    if salt.is_empty() || salt.len() > 1024 {
+        return Err(invalid("invalid salt length"));
+    }
+    let iterations = parts[2]
+        .strip_prefix("i=")
+        .ok_or_else(|| invalid("missing iterations"))?;
+    if !iterations.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid("invalid iterations"));
+    }
+    let iterations: u32 = iterations
+        .parse()
+        .map_err(|_| invalid("invalid iterations"))?;
+    if !(1..=MAX_CLIENT_ITERATIONS).contains(&iterations) {
+        return Err(invalid("iterations exceed bounds"));
+    }
+    Ok(ServerFirst {
+        nonce: nonce.into(),
+        message,
+        salt,
+        iterations,
+    })
+}
+/// Validate a received challenge before scheduling bounded PBKDF2 work.
+pub fn validate_server_first(
+    client_first_data: &str,
+    server_first_data: &str,
+) -> Result<(), AuthError> {
+    let first = parse_client_first(client_first_data)?;
+    parse_server_first(&first.nonce, server_first_data).map(|_| ())
+}
+/// Derive the final proof from the exact client-first and server-first data.
+pub fn client_final_message(
+    password: &str,
+    client_first_data: &str,
+    server_first_data: &str,
+) -> Result<(String, Vec<u8>), AuthError> {
+    let first = parse_client_first(client_first_data)?;
+    let server = parse_server_first(&first.nonce, server_first_data)?;
+    let salted = Zeroizing::new(pbkdf2_sha256(
+        password.as_bytes(),
+        &server.salt,
+        server.iterations,
+    ));
+    let (client_key, stored_key, server_key) = derive_keys(&salted);
+    let client_key = Zeroizing::new(client_key);
+    let stored_key = Zeroizing::new(stored_key);
+    let server_key = Zeroizing::new(server_key);
+    let without_proof = format!("c=biws,r={}", server.nonce);
+    let message = format!("{},{},{without_proof}", first.bare, server.message);
+    let signature = hmac_sha256(&stored_key, message.as_bytes());
+    let proof = Zeroizing::new(xor_bytes(&client_key, &signature));
+    let server_signature = hmac_sha256(&server_key, message.as_bytes());
+    Ok((
+        OUTER.encode(format!("{without_proof},p={}", BASE64.encode(&*proof))),
+        server_signature,
+    ))
+}
+/// Reject malformed proofs before XOR, then verify using constant-time comparison.
+pub fn server_verify_final(handshake: &ScramHandshake, data: &str) -> Result<Vec<u8>, AuthError> {
+    let message = decode_auth_data(data)?;
+    let parts: Vec<_> = message.split(',').collect();
+    if parts.len() != 3 || parts[0] != "c=biws" {
+        return Err(invalid("invalid client-final fields"));
+    }
+    let nonce = parts[1]
+        .strip_prefix("r=")
+        .ok_or_else(|| invalid("missing final nonce"))?;
+    if !bool::from(
+        nonce
+            .as_bytes()
+            .ct_eq(format!("{}{}", handshake.client_nonce, handshake.server_nonce).as_bytes()),
+    ) {
+        return Err(invalid("nonce mismatch"));
+    }
+    let proof = parts[2]
+        .strip_prefix("p=")
+        .ok_or_else(|| invalid("missing proof"))?;
+    if proof.len() != 44 {
+        return Err(invalid("invalid proof length"));
+    }
+    let proof = BASE64
+        .decode(proof)
+        .map_err(|_| invalid("invalid proof base64"))?;
+    if proof.len() != 32 {
+        return Err(invalid("invalid proof length"));
+    }
+    let signature = hmac_sha256(&handshake.stored_key, handshake.auth_message.as_bytes());
+    let recovered = Zeroizing::new(xor_bytes(&proof, &signature));
+    if !bool::from(sha256(&recovered).ct_eq(&handshake.stored_key)) {
+        return Err(AuthError::InvalidCredentials);
+    }
+    Ok(handshake.server_signature.clone())
+}
+/// Authenticate the final server verifier without accepting extensions or short signatures.
+pub fn verify_server_final(data: &str, expected_signature: &[u8]) -> Result<(), AuthError> {
+    let message = decode_auth_data(data)?;
+    let signature = message
+        .strip_prefix("v=")
+        .ok_or_else(|| invalid("missing server verifier"))?;
+    if signature.len() != 44 || expected_signature.len() != 32 {
+        return Err(invalid("invalid verifier length"));
+    }
+    let signature = BASE64
+        .decode(signature)
+        .map_err(|_| invalid("invalid verifier base64"))?;
+    if signature.len() != 32 || !bool::from(signature.ct_eq(expected_signature)) {
+        return Err(AuthError::InvalidCredentials);
+    }
+    Ok(())
+}
+pub fn extract_client_nonce(data: &str) -> Result<String, AuthError> {
+    Ok(parse_client_first(data)?.nonce)
+}
 
-    if let Some(rest) = header.strip_prefix("HELLO ") {
-        let mut username_b64_val = None;
-        let mut data_val = None;
-        for part in rest.split(',') {
-            let part = part.trim();
-            if let Some(val) = part.strip_prefix("username=") {
-                username_b64_val = Some(val.trim().to_string());
-            } else if let Some(val) = part.strip_prefix("data=") {
-                data_val = Some(val.trim().to_string());
+/// RFC HTTP token syntax (used for opaque auth tokens, not decoded SCRAM fields).
+pub fn is_auth_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+/// Parse bounded case-insensitive HTTP auth parameter names. Values remain exact.
+pub fn parse_auth_parameters(input: &str) -> Result<HashMap<String, &str>, AuthError> {
+    if input.len() > MAX_AUTH_HEADER_BYTES {
+        return Err(invalid("auth header exceeds limit"));
+    }
+    let mut values = HashMap::new();
+    let mut empty_members = 0;
+    for part in input.split(',').map(str::trim) {
+        // HTTP #auth-param recipients tolerate reasonable empty list members.
+        // This parser is never used for decoded SCRAM transcripts.
+        if part.is_empty() {
+            empty_members += 1;
+            if empty_members > MAX_AUTH_EMPTY_MEMBERS {
+                return Err(invalid("too many empty auth list members"));
             }
+            continue;
         }
-        let username_b64 = username_b64_val
-            .ok_or_else(|| AuthError::InvalidHeader("missing username= in HELLO".into()))?;
-        let username_bytes = BASE64
-            .decode(&username_b64)
-            .map_err(|e| AuthError::Base64Error(e.to_string()))?;
-        let username = String::from_utf8(username_bytes)
-            .map_err(|e| AuthError::InvalidHeader(e.to_string()))?;
-        Ok(AuthHeader::Hello {
-            username,
-            data: data_val,
-        })
-    } else if let Some(rest) = header.strip_prefix("SCRAM ") {
-        let mut handshake_token = None;
-        let mut data = None;
-        for part in rest.split(',') {
-            let part = part.trim();
-            if let Some(val) = part.strip_prefix("handshakeToken=") {
-                handshake_token = Some(val.trim().to_string());
-            } else if let Some(val) = part.strip_prefix("data=") {
-                data = Some(val.trim().to_string());
-            }
+        let (key, value) = part
+            .split_once('=')
+            .ok_or_else(|| invalid("malformed auth parameter"))?;
+        let key = key.trim();
+        let value = value.trim();
+        if !is_auth_token(key)
+            || !is_auth_token(value)
+            || values.insert(key.to_ascii_lowercase(), value).is_some()
+        {
+            return Err(invalid("invalid or duplicate auth parameter"));
         }
-        let handshake_token = handshake_token
-            .ok_or_else(|| AuthError::InvalidHeader("missing handshakeToken= in SCRAM".into()))?;
-        let data = data.ok_or_else(|| AuthError::InvalidHeader("missing data= in SCRAM".into()))?;
+    }
+    Ok(values)
+}
+/// Parse credentials only; challenges are handled by the HTTP client's negotiation.
+pub fn parse_auth_header(header: &str) -> Result<AuthHeader, AuthError> {
+    if header.len() > MAX_AUTH_HEADER_BYTES {
+        return Err(invalid("auth header exceeds limit"));
+    }
+    let (scheme, parameters) = header
+        .trim()
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| invalid("missing auth scheme"))?;
+    let fields = parse_auth_parameters(parameters)?;
+    let get = |name| {
+        fields
+            .get(name)
+            .copied()
+            .ok_or_else(|| invalid("missing auth parameter"))
+    };
+    if scheme.eq_ignore_ascii_case("HELLO") {
+        if fields.len() != 1 {
+            return Err(invalid("unexpected HELLO parameters"));
+        }
+        let username = decode_auth_data(get("username")?)?;
+        validate_username(&username)?;
+        Ok(AuthHeader::Hello { username })
+    } else if scheme.eq_ignore_ascii_case("SCRAM") {
+        if fields
+            .keys()
+            .any(|k| !["handshaketoken", "data", "hash"].contains(&k.as_str()))
+            || fields.get("hash").is_some_and(|v| *v != "SHA-256")
+        {
+            return Err(invalid("unsupported SCRAM parameters"));
+        }
+        let data = get("data")?;
+        decode_auth_data(data)?;
         Ok(AuthHeader::Scram {
-            handshake_token,
-            data,
+            handshake_token: fields.get("handshaketoken").map(|v| (*v).into()),
+            data: data.into(),
         })
-    } else if let Some(rest) = header.strip_prefix("BEARER ") {
-        let token = rest
-            .trim()
-            .strip_prefix("authToken=")
-            .ok_or_else(|| AuthError::InvalidHeader("missing authToken= in BEARER".into()))?;
+    } else if scheme.eq_ignore_ascii_case("BEARER") {
+        if fields.len() != 1 {
+            return Err(invalid("unexpected BEARER parameters"));
+        }
         Ok(AuthHeader::Bearer {
-            auth_token: token.trim().to_string(),
+            auth_token: get("authtoken")?.into(),
         })
     } else {
-        Err(AuthError::InvalidHeader(format!(
-            "unrecognized auth scheme: {}",
-            header
-        )))
+        Err(invalid("unsupported auth scheme"))
     }
 }
-
-/// Format a Haystack `WWW-Authenticate` header for a SCRAM challenge.
-///
-/// Produces: `SCRAM handshakeToken=<token>, hash=<hash>, data=<data_b64>`
-pub fn format_www_authenticate(handshake_token: &str, hash: &str, data_b64: &str) -> String {
-    format!(
-        "SCRAM handshakeToken={}, hash={}, data={}",
-        handshake_token, hash, data_b64
-    )
+/// Format a SHA-256 discovery or server-first challenge. Tokens are response-scoped.
+pub fn format_www_authenticate(handshake_token: Option<&str>, data: Option<&str>) -> String {
+    let mut value = String::from("SCRAM hash=SHA-256");
+    if let Some(token) = handshake_token {
+        value.push_str(&format!(", handshakeToken={token}"));
+    }
+    if let Some(data) = data {
+        value.push_str(&format!(", data={data}"));
+    }
+    value
 }
-
-/// Format a Haystack `Authentication-Info` header with the auth token.
-///
-/// Produces: `authToken=<token>, data=<data_b64>`
-pub fn format_auth_info(auth_token: &str, data_b64: &str) -> String {
-    format!("authToken={}, data={}", auth_token, data_b64)
+pub fn format_auth_info(auth_token: &str, data: &str) -> String {
+    format!("authToken={auth_token}, hash=SHA-256, data={data}")
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -588,7 +586,7 @@ mod tests {
     #[test]
     fn test_parse_auth_header_hello() {
         let username = "user";
-        let username_b64 = BASE64.encode(username.as_bytes());
+        let username_b64 = OUTER.encode(username.as_bytes());
         let header = format!("HELLO username={}", username_b64);
 
         let parsed = parse_auth_header(&header).unwrap();
@@ -596,20 +594,19 @@ mod tests {
             parsed,
             AuthHeader::Hello {
                 username: "user".to_string(),
-                data: None,
             }
         );
     }
 
     #[test]
     fn test_parse_auth_header_scram() {
-        let header = "SCRAM handshakeToken=abc123, data=c29tZWRhdGE=";
+        let header = "SCRAM handshakeToken=abc123, data=c29tZWRhdGE";
         let parsed = parse_auth_header(header).unwrap();
         assert_eq!(
             parsed,
             AuthHeader::Scram {
-                handshake_token: "abc123".to_string(),
-                data: "c29tZWRhdGE=".to_string(),
+                handshake_token: Some("abc123".to_string()),
+                data: "c29tZWRhdGE".to_string(),
             }
         );
     }
@@ -668,11 +665,11 @@ mod tests {
         let iterations = 4096;
 
         let credentials = derive_credentials(password, salt, iterations);
-        let (client_nonce, _client_first_b64) = client_first_message(username);
+        let (_client_nonce, client_first_b64) = client_first_message(username);
         let (handshake, server_first_b64) =
-            server_first_message(username, &client_nonce, &credentials);
+            server_first_message(username, &client_first_b64, &credentials).unwrap();
         let (client_final_b64, expected_server_sig) =
-            client_final_message(password, &client_nonce, &server_first_b64, username).unwrap();
+            client_final_message(password, &client_first_b64, &server_first_b64).unwrap();
         let server_sig = server_verify_final(&handshake, &client_final_b64).unwrap();
         assert_eq!(server_sig, expected_server_sig);
     }
@@ -689,7 +686,7 @@ mod tests {
         let credentials = derive_credentials(password, salt, iterations);
 
         // --- Client: HELLO phase ---
-        let username_b64 = BASE64.encode(username.as_bytes());
+        let username_b64 = OUTER.encode(username.as_bytes());
         let hello_header = format!("HELLO username={}", username_b64);
         let parsed = parse_auth_header(&hello_header).unwrap();
         match &parsed {
@@ -698,21 +695,22 @@ mod tests {
         }
 
         // --- Client: generate client-first-message ---
-        let (client_nonce, _client_first_b64) = client_first_message(username);
+        let (_client_nonce, client_first_b64) = client_first_message(username);
 
         // --- Server: generate server-first-message ---
         let (handshake, server_first_b64) =
-            server_first_message(username, &client_nonce, &credentials);
+            server_first_message(username, &client_first_b64, &credentials).unwrap();
 
         // --- Server: format WWW-Authenticate header ---
-        let www_auth = format_www_authenticate("handshake-token-xyz", "SHA-256", &server_first_b64);
+        let www_auth =
+            format_www_authenticate(Some("handshake-token-xyz"), Some(&server_first_b64));
         assert!(www_auth.contains("SCRAM"));
         assert!(www_auth.contains("SHA-256"));
         assert!(www_auth.contains("handshake-token-xyz"));
 
         // --- Client: process server-first, produce client-final ---
         let (client_final_b64, expected_server_sig) =
-            client_final_message(password, &client_nonce, &server_first_b64, username).unwrap();
+            client_final_message(password, &client_first_b64, &server_first_b64).unwrap();
 
         // --- Server: verify client-final ---
         let server_sig = server_verify_final(&handshake, &client_final_b64).unwrap();
@@ -722,12 +720,12 @@ mod tests {
 
         // --- Server: format Authentication-Info header ---
         let server_final_msg = format!("v={}", BASE64.encode(&server_sig));
-        let server_final_b64 = BASE64.encode(server_final_msg.as_bytes());
+        let server_final_b64 = OUTER.encode(server_final_msg.as_bytes());
         let auth_info = format_auth_info("auth-token-abc", &server_final_b64);
         assert!(auth_info.contains("authToken=auth-token-abc"));
 
         // --- Client: verify server signature from server-final ---
-        let server_final_decoded = BASE64.decode(&server_final_b64).unwrap();
+        let server_final_decoded = OUTER.decode(&server_final_b64).unwrap();
         let server_final_str = String::from_utf8(server_final_decoded).unwrap();
         let sig_b64 = server_final_str.strip_prefix("v=").unwrap();
         let received_server_sig = BASE64.decode(sig_b64).unwrap();
@@ -749,17 +747,17 @@ mod tests {
         let (client_nonce, client_first_b64) = client_first_message(username);
 
         // Verify client-first is valid base64 and well-formed
-        let client_first_decoded = BASE64.decode(&client_first_b64).unwrap();
+        let client_first_decoded = OUTER.decode(&client_first_b64).unwrap();
         let client_first_str = String::from_utf8(client_first_decoded).unwrap();
         assert!(client_first_str.starts_with("n,,"));
         assert!(client_first_str.contains(&format!("r={}", client_nonce)));
 
         // 3. Server: create server-first-message
         let (handshake, server_first_b64) =
-            server_first_message(username, &client_nonce, &credentials);
+            server_first_message(username, &client_first_b64, &credentials).unwrap();
 
         // Verify server-first contains expected SCRAM fields
-        let server_first_decoded = BASE64.decode(&server_first_b64).unwrap();
+        let server_first_decoded = OUTER.decode(&server_first_b64).unwrap();
         let server_first_str = String::from_utf8(server_first_decoded).unwrap();
         assert!(server_first_str.starts_with("r="));
         assert!(server_first_str.contains(",s="));
@@ -768,10 +766,10 @@ mod tests {
 
         // 4. Client: create client-final-message
         let (client_final_b64, expected_server_sig) =
-            client_final_message(password, &client_nonce, &server_first_b64, username).unwrap();
+            client_final_message(password, &client_first_b64, &server_first_b64).unwrap();
 
         // Verify client-final structure
-        let client_final_decoded = BASE64.decode(&client_final_b64).unwrap();
+        let client_final_decoded = OUTER.decode(&client_final_b64).unwrap();
         let client_final_str = String::from_utf8(client_final_decoded).unwrap();
         assert!(client_final_str.starts_with("c=biws,"));
         assert!(client_final_str.contains(",p="));
@@ -782,8 +780,7 @@ mod tests {
 
         // 6. Wrong password: server rejects the proof
         let (wrong_final_b64, _) =
-            client_final_message("wrongpassword", &client_nonce, &server_first_b64, username)
-                .unwrap();
+            client_final_message("wrongpassword", &client_first_b64, &server_first_b64).unwrap();
         let result = server_verify_final(&handshake, &wrong_final_b64);
         assert!(result.is_err());
         match result {
@@ -794,16 +791,16 @@ mod tests {
 
     #[test]
     fn test_format_www_authenticate() {
-        let result = format_www_authenticate("tok123", "SHA-256", "c29tZQ==");
+        let result = format_www_authenticate(Some("tok123"), Some("c29tZQ"));
         assert_eq!(
             result,
-            "SCRAM handshakeToken=tok123, hash=SHA-256, data=c29tZQ=="
+            "SCRAM hash=SHA-256, handshakeToken=tok123, data=c29tZQ"
         );
     }
 
     #[test]
     fn test_format_auth_info() {
-        let result = format_auth_info("auth-tok", "ZGF0YQ==");
-        assert_eq!(result, "authToken=auth-tok, data=ZGF0YQ==");
+        let result = format_auth_info("auth-tok", "ZGF0YQ");
+        assert_eq!(result, "authToken=auth-tok, hash=SHA-256, data=ZGF0YQ");
     }
 }

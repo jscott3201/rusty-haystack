@@ -1,12 +1,13 @@
 // SharedGraph — thread-safe wrapper around EntityGraph using parking_lot RwLock.
 
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::data::{HDict, HGrid};
 use crate::ontology::{DefNamespace, ValidationIssue};
 
+use super::changelog::{GraphState, GraphWake};
 use super::entity_graph::{EntityGraph, GraphError, HierarchyNode};
 
 /// Default broadcast channel capacity.
@@ -24,22 +25,225 @@ const BROADCAST_CAPACITY: usize = 256;
 pub struct SharedGraph {
     inner: Arc<RwLock<EntityGraph>>,
     tx: broadcast::Sender<u64>,
+    wakes: broadcast::Sender<GraphWake>,
+}
+
+/// Cloneable observation capability. It exposes no mutation or conversion back
+/// to a writer. Durable adapters retain the separate `SharedGraph` privately.
+#[derive(Clone)]
+pub struct GraphView {
+    graph: SharedGraph,
+}
+impl GraphView {
+    pub fn read<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&EntityGraph) -> R,
+    {
+        self.graph.read(f)
+    }
+    pub fn read_for<F, R>(&self, wait: std::time::Duration, f: F) -> Option<R>
+    where
+        F: FnOnce(&EntityGraph) -> R,
+    {
+        self.graph.read_for(wait, f)
+    }
+    pub fn shares_storage(&self, other: &Self) -> bool {
+        self.graph.shares_storage(&other.graph)
+    }
+    pub fn state(&self) -> GraphState {
+        self.graph.state()
+    }
+    pub fn subscribe(&self) -> broadcast::Receiver<u64> {
+        self.graph.subscribe()
+    }
+    pub fn subscribe_with_version(&self) -> (broadcast::Receiver<u64>, u64) {
+        self.graph.subscribe_with_version()
+    }
+    pub fn subscribe_wakes(&self) -> broadcast::Receiver<GraphWake> {
+        self.graph.subscribe_wakes()
+    }
+    pub fn subscribe_wakes_with_state(&self) -> (broadcast::Receiver<GraphWake>, GraphState) {
+        self.graph.subscribe_wakes_with_state()
+    }
+    pub fn subscriber_count(&self) -> usize {
+        self.graph.subscriber_count()
+    }
+    pub fn get(&self, id: &str) -> Option<HDict> {
+        self.graph.get(id)
+    }
+    pub fn contains(&self, id: &str) -> bool {
+        self.graph.contains(id)
+    }
+    pub fn len(&self) -> usize {
+        self.graph.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.graph.is_empty()
+    }
+    pub fn version(&self) -> u64 {
+        self.graph.version()
+    }
+    pub fn all_entities(&self) -> Vec<HDict> {
+        self.graph.all_entities()
+    }
+    pub fn read_filter(&self, filter: &str, limit: usize) -> Result<HGrid, GraphError> {
+        self.graph.read_filter(filter, limit)
+    }
+    pub fn read_all(&self, filter: &str, limit: usize) -> Result<Vec<HDict>, GraphError> {
+        self.graph.read_all(filter, limit)
+    }
+    pub fn refs_from(&self, id: &str, tag: Option<&str>) -> Vec<String> {
+        self.graph.refs_from(id, tag)
+    }
+    pub fn refs_to(&self, id: &str, tag: Option<&str>) -> Vec<String> {
+        self.graph.refs_to(id, tag)
+    }
+    pub fn changes_since(
+        &self,
+        version: u64,
+    ) -> Result<Vec<super::changelog::GraphDiff>, super::changelog::ChangelogGap> {
+        self.graph.changes_since(version)
+    }
+    pub fn validate(&self) -> Vec<ValidationIssue> {
+        self.graph.validate()
+    }
+    pub fn ref_chain(&self, id: &str, tags: &[&str]) -> Vec<HDict> {
+        self.graph.ref_chain(id, tags)
+    }
+    pub fn site_for(&self, id: &str) -> Option<HDict> {
+        self.graph.site_for(id)
+    }
+    pub fn children(&self, id: &str) -> Vec<HDict> {
+        self.graph.children(id)
+    }
+    pub fn equip_points(&self, id: &str, filter: Option<&str>) -> Result<Vec<HDict>, GraphError> {
+        self.graph.equip_points(id, filter)
+    }
+    pub fn hierarchy_tree(&self, id: &str, depth: usize) -> Option<HierarchyNode> {
+        self.graph.hierarchy_tree(id, depth)
+    }
+    pub fn classify(&self, id: &str) -> Option<String> {
+        self.graph.classify(id)
+    }
+}
+
+/// Own the write lock until the closure finishes, including during unwinding.
+/// `Option` lets Drop release it before broadcasting to potentially reentrant
+/// receiver wakers. Accepted mutations are observable even if the closure fails.
+struct WriteNotification<'a> {
+    guard: Option<RwLockWriteGuard<'a, EntityGraph>>,
+    before: GraphState,
+    tx: &'a broadcast::Sender<u64>,
+    wakes: &'a broadcast::Sender<GraphWake>,
+}
+
+impl Drop for WriteNotification<'_> {
+    fn drop(&mut self) {
+        if let Some(mut guard) = self.guard.take() {
+            let reset = guard.incarnation() != self.before.incarnation;
+            if reset {
+                // A detached graph can be reinserted later. Never revive its
+                // previous incarnation when it becomes authoritative again.
+                guard.renew_incarnation();
+            }
+            let after = guard.state();
+            drop(guard);
+            if reset || after.revision != self.before.revision {
+                let _ = self.tx.send(after.revision);
+                let _ = self.wakes.send(if reset {
+                    GraphWake::Reset(after)
+                } else {
+                    GraphWake::Entities(after)
+                });
+            }
+            if !reset && after.catalog_generation != self.before.catalog_generation {
+                let _ = self.wakes.send(GraphWake::Catalog(after));
+            }
+        }
+    }
 }
 
 impl SharedGraph {
+    /// Derive a read-only capability for this exact storage.
+    pub fn view(&self) -> GraphView {
+        GraphView {
+            graph: self.clone(),
+        }
+    }
+
     /// Wrap an `EntityGraph` in a thread-safe handle.
-    pub fn new(graph: EntityGraph) -> Self {
+    pub fn new(mut graph: EntityGraph) -> Self {
+        graph.renew_incarnation();
+        Self::from_restored(graph)
+    }
+
+    /// Wrap a checked restored graph without changing its durable incarnation.
+    /// This is explicit: ordinary `new` still mints a fresh live identity.
+    pub fn from_restored(graph: EntityGraph) -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (wakes, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             inner: Arc::new(RwLock::new(graph)),
             tx,
+            wakes,
         }
+    }
+
+    /// Publish a fully built durable projection with no allocation under its
+    /// graph lock. The adapter must commit durable state before invoking this.
+    /// A conflict is a projection failure, never proof of database rollback.
+    pub fn publish_restored(
+        &self,
+        expected: GraphState,
+        next: EntityGraph,
+        wait: std::time::Duration,
+    ) -> Result<(), super::RecoveryError> {
+        self.publish_restored_with(expected, next, wait, || {})
+    }
+
+    /// Publish related projections under the graph capture fence. The callback
+    /// must perform only a short, prebuilt memory transition: no IO or waits on
+    /// client work. It runs only after graph identity and monotonicity checks.
+    pub fn publish_restored_with(
+        &self,
+        expected: GraphState,
+        next: EntityGraph,
+        wait: std::time::Duration,
+        publish_related: impl FnOnce(),
+    ) -> Result<(), super::RecoveryError> {
+        let mut graph = self
+            .inner
+            .try_write_for(wait)
+            .ok_or(super::RecoveryError::Limit)?;
+        if graph.state() != expected
+            || next.incarnation() != expected.incarnation
+            || next.catalog_generation() != expected.catalog_generation
+            || next.version() < expected.revision
+        {
+            return Err(super::RecoveryError::Invalid);
+        }
+        let after = next.state();
+        publish_related();
+        *graph = next;
+        drop(graph);
+        if after.revision != expected.revision {
+            let _ = self.tx.send(after.revision);
+            let _ = self.wakes.send(GraphWake::Entities(after));
+        }
+        Ok(())
+    }
+
+    /// Whether both handles refer to the same graph storage, including after
+    /// graph replacement. This compares ownership, not entity contents.
+    pub fn shares_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Subscribe to graph change notifications.
     ///
     /// Returns a receiver that yields the new graph version after each
-    /// write operation (add, update, remove).
+    /// write operation that changes the revision. A batch passed to
+    /// [`write`](Self::write) sends one notification for its final revision.
     pub fn subscribe(&self) -> broadcast::Receiver<u64> {
         self.tx.subscribe()
     }
@@ -55,7 +259,22 @@ impl SharedGraph {
         (rx, version)
     }
 
-    /// Number of active subscribers.
+    /// Subscribe to distinct entity, replacement and catalog wakeup hints.
+    /// Notifications may be dropped; retained feed traversal supplies truth.
+    pub fn subscribe_wakes(&self) -> broadcast::Receiver<GraphWake> {
+        self.wakes.subscribe()
+    }
+
+    pub fn subscribe_wakes_with_state(&self) -> (broadcast::Receiver<GraphWake>, GraphState) {
+        let graph = self.inner.read();
+        (self.wakes.subscribe(), graph.state())
+    }
+
+    pub fn state(&self) -> GraphState {
+        self.read(EntityGraph::state)
+    }
+
+    /// Number of active legacy revision subscribers.
     pub fn subscriber_count(&self) -> usize {
         self.tx.receiver_count()
     }
@@ -69,55 +288,211 @@ impl SharedGraph {
         f(&guard)
     }
 
+    /// Attempt one bounded read-lock acquisition, then run `f` under that guard.
+    /// Applications can include repeated short attempts in their absolute
+    /// deadline and cancellation policy without detaching a blocked lock waiter.
+    pub fn read_for<F, R>(&self, wait: std::time::Duration, f: F) -> Option<R>
+    where
+        F: FnOnce(&EntityGraph) -> R,
+    {
+        let guard = self.inner.try_read_for(wait)?;
+        Some(f(&guard))
+    }
+
     /// Execute a closure with exclusive (write) access to the graph.
+    ///
+    /// If its revision changes, broadcast the final version once after releasing
+    /// the lock, including when the closure returns an error or unwinds. This is
+    /// not a transaction: earlier accepted mutations are not rolled back when
+    /// a later operation in the closure fails. A closure that does not change
+    /// the revision sends no notification.
     pub fn write<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut EntityGraph) -> R,
     {
-        let mut guard = self.inner.write();
-        f(&mut guard)
+        let guard = self.inner.write();
+        let mut write = WriteNotification {
+            before: guard.state(),
+            guard: Some(guard),
+            tx: &self.tx,
+            wakes: &self.wakes,
+        };
+        f(write
+            .guard
+            .as_deref_mut()
+            .expect("write guard exists until drop"))
     }
 
-    /// Execute a write closure and broadcast the new version if it changed.
-    fn write_and_notify<F, R>(&self, f: F) -> R
+    /// Bounded write-lock acquisition with the same accepted-prefix and
+    /// notification semantics as `write`. No callback executes while waiting.
+    pub fn write_for<F, R>(&self, wait: std::time::Duration, f: F) -> Option<R>
     where
         F: FnOnce(&mut EntityGraph) -> R,
     {
-        let (result, version) = {
-            let mut guard = self.inner.write();
-            let v_before = guard.version();
-            let result = f(&mut guard);
-            let v_after = guard.version();
-            (
-                result,
-                if v_after != v_before {
-                    Some(v_after)
-                } else {
-                    None
-                },
-            )
+        let guard = self.inner.try_write_for(wait)?;
+        let mut write = WriteNotification {
+            before: guard.state(),
+            guard: Some(guard),
+            tx: &self.tx,
+            wakes: &self.wakes,
         };
-        // Send outside the lock to avoid holding it during broadcast.
-        if let Some(v) = version {
-            let _ = self.tx.send(v);
+        Some(f(write
+            .guard
+            .as_deref_mut()
+            .expect("write guard exists until drop")))
+    }
+
+    /// Atomically replace the managed observation `expected` with one derived
+    /// from `catalog` (reject-on-invalid-affected-data).
+    ///
+    /// The candidate is compiled and admitted without any graph lock. The union
+    /// of old and candidate associations is then validated over borrowed
+    /// records in bounded chunks, each under its own read guard; writers are
+    /// not starved between chunks, and every chunk must observe the same
+    /// [`GraphState`], so the chunks together form one coherent observation.
+    /// Publication takes the write lock within the caller's bounded waits,
+    /// compares the full state and observation identity, then calls
+    /// [`ActivationControl::publish`] as the commit point and replaces the
+    /// handles. An entity-only change restarts validation at most
+    /// [`ActivationControl::max_revalidations`] times, then reports `Conflict`;
+    /// any catalog, replacement or observation change is a conflict at once.
+    /// Failure leaves every handle, generation, cache and wake unchanged.
+    /// Success bumps the catalog generation once and emits one catalog wake
+    /// after unlocking.
+    ///
+    /// Validation cost is proportional to the whole graph on every attempt;
+    /// incremental revalidation is not implemented.
+    pub fn activate_catalog<C: crate::xeto::catalog::ActivationControl>(
+        &self,
+        expected: &Arc<crate::xeto::catalog::ActivatedCatalog>,
+        catalog: crate::xeto::catalog::Catalog,
+        control: &mut C,
+    ) -> Result<
+        (Arc<crate::xeto::catalog::ActivatedCatalog>, GraphState),
+        crate::xeto::catalog::ActivationError<C::Error>,
+    > {
+        use crate::xeto::catalog::{ActivatedCatalog, ActivationError as E};
+        let current = |graph: &EntityGraph| -> Result<(), E<C::Error>> {
+            match graph.activated_catalog() {
+                None => Err(E::Unmanaged),
+                Some(current) if Arc::ptr_eq(current, expected) => Ok(()),
+                Some(_) => Err(E::Conflict),
+            }
+        };
+        let (origin, base) = loop {
+            let wait = control.wait().map_err(E::Control)?;
+            if let Some(captured) = self.read_for(wait, |graph| {
+                current(graph)?;
+                Ok::<_, E<C::Error>>((graph.state(), graph.namespace_arc().cloned()))
+            }) {
+                break captured?;
+            }
+        };
+        // Off-lock: clone the derived namespace base, compile, admit.
+        let candidate = Arc::new(
+            ActivatedCatalog::new(catalog, base.as_deref())
+                .map_err(|error| E::Catalog(Box::new(error)))?,
+        );
+        candidate
+            .check_provenance(expected)
+            .map_err(|error| E::Catalog(Box::new(error)))?;
+        control.admit(&candidate)?;
+        let same_catalog = |state: GraphState| {
+            state.incarnation == origin.incarnation
+                && state.catalog_generation == origin.catalog_generation
+        };
+        let chunk = control.chunk_records().max(1);
+        let mut restarts = 0usize;
+        let mut restart = |control: &mut C| {
+            restarts += 1;
+            if restarts > control.max_revalidations() {
+                Err(E::Conflict)
+            } else {
+                Ok(())
+            }
+        };
+        loop {
+            control.work(1).map_err(E::Control)?;
+            // Chunked validation; `None` asks for a restart.
+            let mut observed: Option<GraphState> = None;
+            let mut after: Option<String> = None;
+            let validated = loop {
+                let wait = control.wait().map_err(E::Control)?;
+                let Some(result) = self.read_for(wait, |graph| {
+                    let state = graph.state();
+                    if !same_catalog(state) {
+                        return Err(E::Conflict);
+                    }
+                    current(graph)?;
+                    if observed.is_some_and(|observed| observed != state) {
+                        return Ok(None);
+                    }
+                    let next = candidate.validate_chunk(
+                        Some(expected),
+                        graph,
+                        after.as_deref(),
+                        chunk,
+                        control,
+                    )?;
+                    Ok(Some((state, next)))
+                }) else {
+                    continue;
+                };
+                match result? {
+                    None => break None,
+                    Some((state, Some(last))) => {
+                        observed = Some(state);
+                        after = Some(last);
+                    }
+                    Some((state, None)) => break Some(state),
+                }
+            };
+            let Some(validated) = validated else {
+                restart(control)?;
+                continue;
+            };
+            let published = loop {
+                let wait = control.wait().map_err(E::Control)?;
+                if let Some(result) = self.write_for(wait, |graph| {
+                    let state = graph.state();
+                    if !same_catalog(state) {
+                        return Err(E::Conflict);
+                    }
+                    current(graph)?;
+                    if state != validated {
+                        // Only entities moved: revalidate under the same control.
+                        return Ok(None);
+                    }
+                    // Commit point; nothing fallible follows a successful return.
+                    control.publish().map_err(E::Control)?;
+                    graph
+                        .compare_activate_catalog(validated, expected, candidate.clone())
+                        .map(|_| Some(graph.state()))
+                        .map_err(|_| E::Conflict)
+                }) {
+                    break result?;
+                }
+            };
+            match published {
+                Some(state) => return Ok((candidate, state)),
+                None => restart(control)?,
+            }
         }
-        result
     }
 
     // ── Convenience methods ──
 
     /// Swap in a newer ontology. See [`EntityGraph::set_namespace`].
     ///
-    /// Deliberately does not bump the version or notify watchers: no entity
-    /// changed. A watcher that woke on this would see an identical entity set and
-    /// have nothing to do.
+    /// Does not bump entity revision or emit a legacy entity notification.
+    /// Typed wake subscribers receive a distinct catalog wakeup.
     pub fn set_namespace(&self, ns: impl Into<Arc<DefNamespace>>) {
         self.write(|g| g.set_namespace(ns));
     }
 
     /// Add an entity. See [`EntityGraph::add`].
     pub fn add(&self, entity: HDict) -> Result<String, GraphError> {
-        self.write_and_notify(|g| g.add(entity))
+        self.write(|g| g.add(entity))
     }
 
     /// Get an entity by ref value.
@@ -130,12 +505,12 @@ impl SharedGraph {
 
     /// Update an entity. See [`EntityGraph::update`].
     pub fn update(&self, ref_val: &str, changes: HDict) -> Result<(), GraphError> {
-        self.write_and_notify(|g| g.update(ref_val, changes))
+        self.write(|g| g.update(ref_val, changes))
     }
 
     /// Remove an entity. See [`EntityGraph::remove`].
     pub fn remove(&self, ref_val: &str) -> Result<HDict, GraphError> {
-        self.write_and_notify(|g| g.remove(ref_val))
+        self.write(|g| g.remove(ref_val))
     }
 
     /// Run a filter expression and return a grid.
@@ -260,6 +635,7 @@ impl Clone for SharedGraph {
         Self {
             inner: Arc::clone(&self.inner),
             tx: self.tx.clone(),
+            wakes: self.wakes.clone(),
         }
     }
 }
@@ -538,5 +914,62 @@ mod tests {
         // No subscribers — write should still succeed.
         sg.add(make_site("site-1")).unwrap();
         assert_eq!(sg.len(), 1);
+    }
+
+    #[test]
+    fn write_releases_lock_before_waking_receivers_even_on_unwind() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct LockWitness {
+            graph: SharedGraph,
+            woke: AtomicBool,
+        }
+        impl Wake for LockWitness {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                // A nonblocking check makes an incorrect lock order fail instead
+                // of hanging the test by reentering read() from the waker.
+                assert!(self.graph.inner.try_write().is_some());
+                self.woke.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for unwind in [false, true] {
+            let graph = SharedGraph::default();
+            let mut receiver = graph.subscribe();
+            let witness = Arc::new(LockWitness {
+                graph: graph.clone(),
+                woke: AtomicBool::new(false),
+            });
+            let waker = Waker::from(Arc::clone(&witness));
+            let mut context = Context::from_waker(&waker);
+            let mut receive = std::pin::pin!(receiver.recv());
+            assert!(receive.as_mut().poll(&mut context).is_pending());
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                graph.write(|g| {
+                    g.add(make_site("site")).unwrap();
+                    if unwind {
+                        panic!("original closure panic");
+                    }
+                });
+            }));
+            if unwind {
+                assert_eq!(
+                    result.unwrap_err().downcast_ref::<&str>(),
+                    Some(&"original closure panic")
+                );
+            } else {
+                result.unwrap();
+            }
+            assert!(witness.woke.load(Ordering::SeqCst));
+            assert_eq!(receive.as_mut().poll(&mut context), Poll::Ready(Ok(1)));
+            assert!(graph.contains("site"));
+        }
     }
 }

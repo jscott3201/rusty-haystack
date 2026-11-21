@@ -2,7 +2,7 @@
 
 use pyo3::class::basic::CompareOp;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateTime, PyTzInfo};
+use pyo3::types::{PyDateTime, PyInt, PyTzInfo};
 use std::hash::{Hash, Hasher};
 
 use haystack_core::kinds;
@@ -172,8 +172,11 @@ impl PyNumber {
     /// Create a Number with a float value and optional unit string.
     #[new]
     #[pyo3(signature = (val, unit = None))]
-    pub fn new(val: f64, unit: Option<String>) -> Self {
-        Self { val, unit }
+    pub fn new(val: &Bound<'_, PyAny>, unit: Option<String>) -> PyResult<Self> {
+        Ok(Self {
+            val: crate::convert::exact_number(val)?,
+            unit,
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -190,15 +193,14 @@ impl PyNumber {
 
     fn __hash__(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.val.to_bits().hash(&mut hasher);
-        self.unit.hash(&mut hasher);
+        self.to_core().hash(&mut hasher);
         hasher.finish()
     }
 
     fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
         match op {
-            CompareOp::Eq => Ok(self.val == other.val && self.unit == other.unit),
-            CompareOp::Ne => Ok(self.val != other.val || self.unit != other.unit),
+            CompareOp::Eq => Ok(self.to_core() == other.to_core()),
+            CompareOp::Ne => Ok(self.to_core() != other.to_core()),
             CompareOp::Lt => {
                 if self.unit != other.unit {
                     return Ok(false);
@@ -231,7 +233,7 @@ impl PyNumber {
     }
 
     fn __int__(&self) -> PyResult<i64> {
-        if !self.val.is_finite() || self.val > i64::MAX as f64 || self.val < i64::MIN as f64 {
+        if !self.val.is_finite() || self.val >= -(i64::MIN as f64) || self.val < i64::MIN as f64 {
             return Err(pyo3::exceptions::PyOverflowError::new_err(
                 "Number value out of range for integer conversion",
             ));
@@ -498,8 +500,11 @@ pub struct PyCoord {
 impl PyCoord {
     /// Create a geographic Coordinate from latitude and longitude in degrees.
     #[new]
-    pub fn new(lat: f64, lng: f64) -> Self {
-        Self { lat, lng }
+    pub fn new(lat: &Bound<'_, PyAny>, lng: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            lat: crate::convert::exact_number(lat)?,
+            lng: crate::convert::exact_number(lng)?,
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -512,15 +517,14 @@ impl PyCoord {
 
     fn __hash__(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.lat.to_bits().hash(&mut hasher);
-        self.lng.to_bits().hash(&mut hasher);
+        self.to_core().hash(&mut hasher);
         hasher.finish()
     }
 
     fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
         match op {
-            CompareOp::Eq => Ok(self.lat == other.lat && self.lng == other.lng),
-            CompareOp::Ne => Ok(self.lat != other.lat || self.lng != other.lng),
+            CompareOp::Eq => Ok(self.to_core() == other.to_core()),
+            CompareOp::Ne => Ok(self.to_core() != other.to_core()),
             _ => Ok(false),
         }
     }
@@ -560,16 +564,36 @@ impl PyHDateTime {
     #[pyo3(signature = (year, month, day, hour, minute, second, offset_seconds, tz_name))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        year: i32,
-        month: u32,
-        day: u32,
-        hour: u32,
-        minute: u32,
-        second: u32,
-        offset_seconds: i32,
+        year: &Bound<'_, PyAny>,
+        month: &Bound<'_, PyAny>,
+        day: &Bound<'_, PyAny>,
+        hour: &Bound<'_, PyAny>,
+        minute: &Bound<'_, PyAny>,
+        second: &Bound<'_, PyAny>,
+        offset_seconds: &Bound<'_, PyAny>,
         tz_name: String,
     ) -> PyResult<Self> {
         use chrono::{FixedOffset, TimeZone};
+        // Preserve primitive range errors and bool-as-int, without admitting
+        // arbitrary __index__ implementations for calendar components.
+        macro_rules! integer {
+            ($value:ident, $ty:ty) => {{
+                if !$value.is_instance_of::<PyInt>() {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(concat!(
+                        stringify!($value),
+                        " must be a Python int"
+                    )));
+                }
+                $value.extract::<$ty>()?
+            }};
+        }
+        let year = integer!(year, i32);
+        let month = integer!(month, u32);
+        let day = integer!(day, u32);
+        let hour = integer!(hour, u32);
+        let minute = integer!(minute, u32);
+        let second = integer!(second, u32);
+        let offset_seconds = integer!(offset_seconds, i32);
         let offset = FixedOffset::east_opt(offset_seconds).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>("invalid timezone offset")
         })?;
@@ -585,6 +609,14 @@ impl PyHDateTime {
     /// Return a Python datetime.datetime object.
     fn dt<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDateTime>> {
         let dt = &self.inner.dt;
+        let local = dt
+            .naive_utc()
+            .checked_add_offset(*dt.offset())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("local datetime is outside calendar range")
+            })?;
+        crate::convert::ensure_date(&local.date())?;
+        crate::convert::ensure_time(&local.time())?;
         let offset_secs = dt.offset().local_minus_utc();
         // Use datetime module to create timezone
         let datetime_mod = py.import("datetime")?;
@@ -595,13 +627,13 @@ impl PyHDateTime {
 
         PyDateTime::new(
             py,
-            chrono::Datelike::year(dt),
-            chrono::Datelike::month(dt) as u8,
-            chrono::Datelike::day(dt) as u8,
-            chrono::Timelike::hour(dt) as u8,
-            chrono::Timelike::minute(dt) as u8,
-            chrono::Timelike::second(dt) as u8,
-            chrono::Timelike::nanosecond(dt) / 1000,
+            chrono::Datelike::year(&local),
+            chrono::Datelike::month(&local) as u8,
+            chrono::Datelike::day(&local) as u8,
+            chrono::Timelike::hour(&local) as u8,
+            chrono::Timelike::minute(&local) as u8,
+            chrono::Timelike::second(&local) as u8,
+            chrono::Timelike::nanosecond(&local) / 1000,
             Some(&tz_obj),
         )
     }

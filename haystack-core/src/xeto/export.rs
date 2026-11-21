@@ -1,10 +1,16 @@
 //! Xeto export — serialize Specs back to .xeto text format.
 
+use crate::codecs::CodecError;
 use crate::kinds::Kind;
+use crate::kinds::projection::ensure_h4;
 use crate::xeto::spec::{Slot, Spec};
 
 /// Export a single Spec to Xeto source text.
-pub fn export_spec(spec: &Spec) -> String {
+pub fn export_spec(spec: &Spec) -> Result<String, CodecError> {
+    for value in spec.meta.values() {
+        ensure_h4(value)?;
+    }
+    check_slots(&spec.slots, 0)?;
     let mut out = String::new();
 
     // Doc comment
@@ -54,7 +60,7 @@ pub fn export_spec(spec: &Spec) -> String {
         out.push_str("}\n");
     }
 
-    out
+    Ok(out)
 }
 
 /// Export a library pragma + all its specs to Xeto source text.
@@ -64,7 +70,7 @@ pub fn export_lib(
     doc: &str,
     depends: &[String],
     specs: &[&Spec],
-) -> String {
+) -> Result<String, CodecError> {
     let mut out = String::new();
 
     // Pragma
@@ -84,11 +90,27 @@ pub fn export_lib(
 
     // Specs
     for spec in specs {
-        out.push_str(&export_spec(spec));
+        out.push_str(&export_spec(spec)?);
         out.push('\n');
     }
 
-    out
+    Ok(out)
+}
+
+fn check_slots(slots: &[Slot], depth: usize) -> Result<(), CodecError> {
+    if depth > 64 {
+        return Err(CodecError::Encode("Xeto slot nesting exceeds 64".into()));
+    }
+    for slot in slots {
+        for value in slot.meta.values() {
+            ensure_h4(value)?;
+        }
+        if let Some(value) = &slot.default {
+            ensure_h4(value)?;
+        }
+        check_slots(&slot.children, depth + 1)?;
+    }
+    Ok(())
 }
 
 fn export_slot(out: &mut String, slot: &Slot, indent: usize) {
@@ -206,7 +228,7 @@ mod tests {
             is_query: false,
             children: vec![],
         });
-        let output = export_spec(&spec);
+        let output = export_spec(&spec).unwrap();
         assert!(output.contains("Foo: Obj"));
         assert!(output.contains("active"));
     }
@@ -215,7 +237,7 @@ mod tests {
     fn export_abstract_spec() {
         let mut spec = Spec::new("test::Base", "test", "Base");
         spec.is_abstract = true;
-        let output = export_spec(&spec);
+        let output = export_spec(&spec).unwrap();
         assert!(output.contains("<abstract>"));
     }
 
@@ -231,7 +253,7 @@ mod tests {
             is_query: false,
             children: vec![],
         });
-        let output = export_spec(&spec);
+        let output = export_spec(&spec).unwrap();
         assert!(output.contains("dis: Str"));
     }
 
@@ -250,7 +272,7 @@ mod tests {
             is_query: true,
             children: vec![],
         });
-        let output = export_spec(&spec);
+        let output = export_spec(&spec).unwrap();
         assert!(output.contains("Query"));
         assert!(output.contains("of:Point"));
         assert!(output.contains("via:\"equipRef+\""));
@@ -259,7 +281,7 @@ mod tests {
     #[test]
     fn export_lib_with_pragma() {
         let spec = Spec::new("mylib::Thing", "mylib", "Thing");
-        let output = export_lib("mylib", "2.0.0", "My library", &["sys".into()], &[&spec]);
+        let output = export_lib("mylib", "2.0.0", "My library", &["sys".into()], &[&spec]).unwrap();
         assert!(output.contains("pragma: Lib"));
         assert!(output.contains("version: \"2.0.0\""));
         assert!(output.contains("doc: \"My library\""));
@@ -274,7 +296,7 @@ mod tests {
         let source = "Foo: Obj {\n  active\n  dis: Str\n}\n";
         let xf = parse_xeto(source).unwrap();
         let spec = crate::xeto::spec::spec_from_def(&xf.specs[0], "test");
-        let exported = export_spec(&spec);
+        let exported = export_spec(&spec).unwrap();
         // Re-parse the exported text
         let xf2 = parse_xeto(&exported).unwrap();
         assert_eq!(xf2.specs[0].name, "Foo");
@@ -285,7 +307,7 @@ mod tests {
     fn export_spec_with_doc() {
         let mut spec = Spec::new("test::Foo", "test", "Foo");
         spec.doc = "A foo thing\nWith multiple lines".into();
-        let output = export_spec(&spec);
+        let output = export_spec(&spec).unwrap();
         assert!(output.contains("// A foo thing"));
         assert!(output.contains("// With multiple lines"));
     }
@@ -313,7 +335,7 @@ mod tests {
             is_query: false,
             children: vec![],
         });
-        let output = export_spec(&spec);
+        let output = export_spec(&spec).unwrap();
         assert!(output.contains("optional?"));
         assert!(output.contains("optStr: Str?"));
     }
@@ -345,7 +367,7 @@ mod tests {
             is_query: false,
             children: vec![],
         });
-        let output = export_spec(&spec);
+        let output = export_spec(&spec).unwrap();
         assert!(
             output.contains(r#""say \"hello\"""#),
             "default value string should be escaped, got: {}",
