@@ -41,6 +41,7 @@ class WorkflowContracts(unittest.TestCase):
         for job,prerequisite in ((release['publish-crates'],'qualify-binaries'),(release['github-release'],'qualify-binaries'),(python['publish-pypi'],'qualify-python')):
             self.assertIn('\n'+GUARD+'\n',job)
             self.assertIn(prerequisite,self.needs(job))
+        self.assertIn('publish-crates',self.needs(release['github-release']))
         self.assertIn('Crates are separately packaged from source',release['publish-crates'])
         for job,action,path in ((release['github-release'],'softprops/action-gh-release@v3','files: ${{ runner.temp }}/publication/*'),(python['publish-pypi'],'pypa/gh-action-pypi-publish@release/v1','packages-dir: ${{ runner.temp }}/publication')):
             self.assertIn('artifacts.py check-staged',job)
@@ -127,16 +128,53 @@ class WorkflowContracts(unittest.TestCase):
         publication=steps(jobs(self.workflows['release.yml'])['publish-crates'])
         published=[]
         for index,step in enumerate(publication):
-            match=re.search(r'run: cargo publish -p ([a-z-]+)',step)
+            match=re.search(r'run: cargo publish (?:--[a-z-]+ )*-p ([a-z-]+)',step)
             if match:
                 published.append(match[1])
                 if match[1] != 'rusty-haystack-cli':
                     self.assertIn('run: sleep 30',publication[index+1])
         self.assertEqual(published,[
             'rusty-haystack-core','rusty-haystack-client','rusty-haystack-app',
+            'rusty-haystack-mcp','rusty-haystack-analytics',
             'rusty-haystack-server','rusty-haystack-cli',
         ])
-        self.assertIn('COPY haystack-app/ haystack-app/',(ROOT/'Dockerfile').read_text())
+        commands=[step for step in publication if 'cargo publish' in step]
+        self.assertEqual(len(commands),len(published))
+        for step in commands:
+            self.assertRegex(step,r'run: cargo publish --locked -p [a-z-]+\n')
+            self.assertIn('CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}',step)
+            crate=re.search(r'-p rusty-haystack-([a-z]+)\n',step)[1]
+            self.assertIn(f"if: steps.published.outputs.{crate} != 'true'\n",step)
+            self.assertIn(f' {crate}',re.search(r'for crate in ([a-z ]+); do',''.join(publication))[0])
+        dockerfile=(ROOT/'Dockerfile').read_text()
+        for member in ('haystack-app','haystack-mcp','haystack-analytics'):
+            self.assertIn(f'COPY {member}/ {member}/',dockerfile)
+
+    def test_crate_publication_order_is_topological(self):
+        # cargo resolves every dependency carrying a version, optional or dev, from
+        # the registry at publish time, so each must already have been published.
+        publication=steps(jobs(self.workflows['release.yml'])['publish-crates'])
+        published=[match[1] for step in publication if (match:=re.search(r'run: cargo publish (?:--[a-z-]+ )*-p ([a-z-]+)',step))]
+        self.assertTrue(published)
+        aliases={}
+        for line in (ROOT/'Cargo.toml').read_text().splitlines():
+            if (alias:=re.match(r'^(haystack-[a-z]+) = \{ package = "(rusty-haystack-[a-z]+)"',line)):
+                aliases[alias[1]]=alias[2]
+        manifests={}
+        for path in ROOT.glob('*/Cargo.toml'):
+            name=re.search(r'(?m)^name = "([a-z-]+)"$',path.read_text())
+            if name: manifests[name[1]]=path.read_text()
+        for index,crate in enumerate(published):
+            internal={aliases[dep] for dep in re.findall(r'(?m)^(haystack-[a-z]+)[ .=]',manifests[crate])}
+            self.assertLessEqual(internal,set(published[:index]),crate)
+        self.assertEqual(set(published),{name for name,text in manifests.items() if name!='rusty-haystack' and 'publish = false' not in text})
+
+    def test_github_release_waits_for_crates_publication(self):
+        release=jobs(self.workflows['release.yml'])
+        self.assertEqual(self.needs(release['github-release']),{'validate','qualify-binaries','publish-crates'})
+        self.assertIn('--profile publish-binaries',release['github-release'])
+        # The publish-binaries profile expects this producer with no outputs.
+        self.assertNotIn('\n    outputs:\n',release['publish-crates'])
 
     def test_live_authority_and_producer_identity_contract(self):
         self.check(self.workflows)
@@ -163,6 +201,7 @@ class WorkflowContracts(unittest.TestCase):
             ('release.yml','artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}','artifact-ids: ${{ steps.inventory.outputs.artifact-ids }}\n          run-id: 123'),
             ('python.yml','proof: ${{ steps.proof.outputs.artifact-id }}','proof: ${{ steps.qualified.outputs.artifact-id }}'),
             ('python.yml','wheel_linux_x86_64_cp311: ${{ steps.identity.outputs.wheel_linux_x86_64_cp311 }}','wheel_linux_x86_64_cp312: ${{ steps.identity.outputs.wheel_linux_x86_64_cp311 }}'),
+            ('release.yml','needs: [validate, qualify-binaries, publish-crates]','needs: [validate, qualify-binaries]'),
         ]
         for file,before,after in mutations:
             with self.subTest(file=file,mutation=before):

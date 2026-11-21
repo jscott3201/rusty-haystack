@@ -41,11 +41,25 @@ class DownloadIdentityTests(unittest.TestCase):
         wheels={key:str(index+201) for index,key in enumerate(WHEEL_KEYS)}
         result=self.invoke('python',{'build-wheels':{'result':'success','outputs':wheels},'build-sdist':{'result':'success','outputs':{'sdist':'300'}}})
         self.assertEqual(len(result['artifact-ids'].split(',')),17)
-        needs={'validate':{'result':'success','outputs':{}},'qualify-binaries':{'result':'success','outputs':{'packages':'401','proof':'402'}}}
+        needs={'validate':{'result':'success','outputs':{}},'qualify-binaries':{'result':'success','outputs':{'packages':'401','proof':'402'}},'publish-crates':{'result':'success','outputs':{}}}
         result=self.invoke('publish-binaries',needs)
         self.assertEqual((result['packages'],result['proof']),('401','402'))
-        needs['qualify-binaries']['outputs']['proof']='not-an-id'
-        self.invoke('publish-binaries',needs,success=False)
+        self.assertEqual(result['artifact-ids'],'401,402')
+        bad=needs['qualify-binaries']|{'outputs':{'packages':'401','proof':'not-an-id'}}
+        self.invoke('publish-binaries',needs|{'qualify-binaries':bad},success=False)
+
+    def test_github_release_requires_a_successful_crates_publication(self):
+        base={'validate':{'result':'success','outputs':{}},'qualify-binaries':{'result':'success','outputs':{'packages':'401','proof':'402'}}}
+        crates={'result':'success','outputs':{}}
+        self.invoke('publish-binaries',base|{'publish-crates':crates})
+        # Missing, failed, cancelled or skipped crates publication never cuts a release.
+        self.invoke('publish-binaries',base,success=False)
+        for result in ('failure','cancelled','skipped'):
+            self.invoke('publish-binaries',base|{'publish-crates':crates|{'result':result}},success=False)
+        # The crates job produces no artifacts; an output there is unexpected.
+        self.invoke('publish-binaries',base|{'publish-crates':crates|{'outputs':{'packages':'403'}}},success=False)
+        # Unexpected producer jobs remain rejected.
+        self.invoke('publish-binaries',base|{'publish-crates':crates,'publish-pypi':crates},success=False)
 
 
 if __name__=='__main__':

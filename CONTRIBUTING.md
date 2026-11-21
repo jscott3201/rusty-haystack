@@ -40,8 +40,9 @@ The refreshed dependency graph's highest declared Rust requirement is 1.90 (roar
 policy is unchanged: the newly resolved optional zlib-rs package uses the already
 allowed Zlib license, two existing dependencies only normalize their MIT/Apache SPDX
 spelling, and roaring 0.12's new fearless_simd and libm dependencies are MIT/Apache-2.0
-and MIT. Python's declared support range and the release interpreter matrix are
-unchanged; the existing build lanes now pin Rust 1.99.1 and Maturin 1.16.0.
+and MIT. The refresh left Python's declared support range and the release interpreter
+matrix unchanged; CPython 3.14 joined the CI and release-wheel matrices later (#133).
+The existing build lanes now pin Rust 1.99.1 and Maturin 1.16.0.
 
 ## Build and test
 
@@ -130,7 +131,7 @@ See the [support matrix](docs/support-matrix.md) for those evidence boundaries.
 | Test (MSRV, Rust 1.99.1) | `cargo +1.99.1 test --locked --workspace --exclude rusty-haystack`<br>`cargo +1.99.1 test --locked -p rusty-haystack-core --features chrono-tz`<br>on macOS and Windows only, the compile-only `cargo +1.99.1 check --locked -p rusty-haystack-analytics --features sql` |
 | Core minimal and default features (Ubuntu, Rust 1.99.1) | Separate package-only Clippy and test invocations for `rusty-haystack-core`, with and without `--no-default-features`; then `cargo +1.99.1 clippy --locked -p rusty-haystack-analytics --features sql --all-targets -- -D warnings` and `cargo +1.99.1 test --locked -p rusty-haystack-analytics --features sql` for the optional snapshot SQL feature |
 | Current stable (Ubuntu, Rust 1.99.1) | The same two Clippy and two test commands above, using `cargo +1.99.1` |
-| Python Bindings (Rust 1.99.1) | clippy on the excluded crate, then `maturin develop` and `pytest` |
+| Python Bindings (CPython 3.11–3.14, Rust 1.99.1) | One job per interpreter: clippy on the excluded crate, `maturin develop` and `pytest`; then `maturin build` of a wheel, `twine check`, and `pytest` against that wheel installed in a clean environment. On 3.12 only, the schema/generated-client and MCP qualification scripts |
 | Cargo Deny (Rust 1.99.1) | `cargo +1.99.1 deny --locked --all-features --manifest-path ./Cargo.toml check`, configured by `deny.toml` — advisories, licenses, bans, sources |
 | CodeQL | Rust, Python, and Actions analyses through the reusable CodeQL workflow and existing query configuration |
 | CI OK | Always evaluates the independent required-job inventory; every required job must succeed |
@@ -179,12 +180,15 @@ Two traps, both of which CI works around explicitly:
 
 ```
 haystack-core          types, codecs, graph, filter, ontology, xeto, auth
-haystack-app           authorized bounded reads         (depends on core)
 haystack-client        async HTTP/WebSocket client      (depends on core)
+haystack-app           application owner: authorized reads, mutations, history,
+                       subscriptions; optional PostgreSQL/SQLite (depends on core)
+haystack-mcp           read-only MCP stdio/HTTP adapter (depends on core/app)
 haystack-analytics     Parquet history captures, optional snapshot SQL (depends on core/client)
 haystack-server        Axum HTTP API, WebSocket watches (depends on core/app/client)
-haystack-cli           the `haystack` binary            (depends on core/client/server)
-rusty-haystack         PyO3 bindings, cdylib            (depends on core/client/server)
+haystack-cli           the `haystack` binary            (depends on core/app/client/server;
+                                                         mcp with the mcp/mcp-http features)
+rusty-haystack         PyO3 bindings, cdylib            (depends on core/app/client/server)
 ```
 
 Directory names are unprefixed; crates.io names are not. `haystack-core/` publishes as

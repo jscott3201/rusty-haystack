@@ -17,7 +17,7 @@ DataFusion's `parquet` feature) and the `arrow` umbrella crate from that same
 family. No other workspace crate gains a dependency.
 
 ```toml
-rusty-haystack-analytics = { version = "0.9", features = ["sql"] }
+rusty-haystack-analytics = { version = "0.10", features = ["sql"] }
 ```
 
 ## Register and query
