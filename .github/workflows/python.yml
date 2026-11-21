@@ -148,11 +148,21 @@ jobs:
           TARGET: ${{ matrix.target }}
           PYTHON_TAG: ${{ matrix.python.tag }}
         run: python scripts/release/artifacts.py seal --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --bundle target/release-candidate --kind wheel --tools target/builder.json --target "$TARGET" --python-tag "$PYTHON_TAG"
+      - uses: dtolnay/rust-toolchain@master
+        if: matrix.python.tag == 'cp314' && ((runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')))
+        with:
+          toolchain: "1.99.1"
       - uses: astral-sh/setup-uv@v10.3.3
         if: matrix.python.tag == 'cp314' && ((runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')))
       - name: Test the sealed cp314 wheel on its native host
         if: matrix.python.tag == 'cp314' && ((runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')))
         run: |
+          # Tests use a real Rust watch server. Build it with the pinned compiler
+          # before pytest: macOS retains actual tool binaries in PATH, whereas
+          # the fixture's default cargo +toolchain command needs rustup proxies.
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          "$(rustup which --toolchain 1.99.1 cargo)" build --locked -p rusty-haystack-server --example python_watch_fixture
+          export HAYSTACK_WATCH_FIXTURE="$CARGO_TARGET_DIR/debug/examples/python_watch_fixture"
           uv venv --python "$(command -v python)" "$RUNNER_TEMP/cp314-wheel-test"
           uv pip install --python "$RUNNER_TEMP/cp314-wheel-test/bin/python" target/release-candidate/files/*.whl pytest
           "$RUNNER_TEMP/cp314-wheel-test/bin/python" -I -c "import rusty_haystack; print(rusty_haystack.__file__)"
