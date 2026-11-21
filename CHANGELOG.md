@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0
 
 ### Security
 
@@ -51,6 +51,13 @@
 
 ### Added
 
+- CPython 3.14. CI now tests the bindings on CPython 3.11–3.14 (Linux x86_64), for each
+  interpreter both in place and as a wheel installed into a clean environment, and release
+  wheels add `cp314` for Linux and macOS on x86_64 and aarch64: 16 wheels plus the
+  sdist. Each `cp314` release wheel runs the full Python suite on a runner of its own
+  architecture, except macOS x86_64, which is cross-built and not runtime-tested.
+  Free-threaded `cp314t` wheels are not published. `requires-python` stays `>=3.11`.
+  (#133)
 - `haystack serve --cors-origin <ORIGIN>` (repeatable) and `HaystackServer::with_cors`,
   for dashboards served from an origin other than the server's. Off by default: without
   the flag no CORS headers are sent and browsers apply the same-origin policy unchanged.
@@ -128,7 +135,6 @@
   fixes; nothing in either release changes WAL, `synchronous`, journal, checkpoint, busy
   or progress-handler behaviour. Durability verification now rejects engines older than
   3.54.1, and native qualification pins the 3.54.1 version and source ID. (#125)
-
 - Salts, nonces and the server secret are generated directly instead of by overwriting a
   zeroed buffer. Behaviour is identical; the old shape tripped a CodeQL
   `hard-coded-cryptographic-value` alert on the salt in `hash_password`, which was a false
@@ -144,6 +150,13 @@
 - `roaring` 0.11.5 → 0.12.0 for the tag bitmap index. Behaviour is unchanged; 0.12 adds
   stable-Rust SIMD kernels through two new dependencies, `fearless_simd` (MIT/Apache-2.0)
   and `libm` (MIT). (#124)
+- crates.io publication now includes `rusty-haystack-mcp` and `rusty-haystack-analytics`,
+  in the order core, client, app, mcp, analytics, server, CLI. Without mcp on the
+  registry the CLI could not publish, because cargo requires optional dependencies to
+  exist there too. Every `cargo publish` runs with `--locked`. (#61)
+- The GitHub release now waits for crates.io publication, so a failed crate upload no
+  longer produces a GitHub release; crates uploaded before the failure stay published.
+  PyPI publication is a separate workflow and does not wait for it. (#61)
 
 ### Fixed
 
@@ -171,6 +184,9 @@
   around its numbers, such as U+00A0; it now trims ASCII whitespace only.
 
 ## 0.9.0
+
+0.9.0 was merged to `main` but never tagged or published; 0.10.0 is the first published
+release that contains it.
 
 Spec-match filters (`ph::Ahu`) did not work. `DefNamespace::fits` returned `true` for any
 type name it had never heard of, so every such filter matched every entity — which meant

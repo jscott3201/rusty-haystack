@@ -4,7 +4,7 @@ Rust libraries, a CLI and Python bindings for [Project Haystack](https://project
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-This README describes the **0.9.0 source on `dev`**. Build this checkout to use the capabilities below; a previously published crate, wheel or executable may have a different API. Haystack 4 interfaces and a selected Xeto/typed HTTP profile are available. The selected typed profile does not claim complete Haystack 5 or upstream runtime interoperability.
+This README describes the **0.10.0 source on `dev`**. Build this checkout to use the capabilities below; a previously published crate, wheel or executable may have a different API. Haystack 4 interfaces and a selected Xeto/typed HTTP profile are available. The selected typed profile does not claim complete Haystack 5 or upstream runtime interoperability.
 
 ## What you can build
 
