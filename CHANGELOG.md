@@ -24,6 +24,13 @@
     requests, `x-mcp-header` parameter headers, the SDK's own stdio transport and
     generated output schemas; `haystack-mcp` uses none of them (stateless HTTP, no
     outbound requests, its own bounded stdio transport and fixed schemas).
+- `chrono` and `chrono-tz` were declared unmaintained
+  ([RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543.html),
+  [RUSTSEC-2026-0555](https://rustsec.org/advisories/RUSTSEC-2026-0555.html)); no
+  patched version exists and neither notice reports a vulnerability. Both are ignored
+  in `deny.toml` while the migration is tracked in
+  [#134](https://github.com/jscott3201/rusty-haystack/issues/134). Date and time kinds
+  carry chrono types in the public API, so that migration will be a breaking change.
 - Bump `rmcp` from 3.5.1 to 3.8.0 for
   [GHSA-4432-vg92-fqh6](https://github.com/advisories/GHSA-4432-vg92-fqh6) (high): the
   SDK's `StreamableHttpService` cached tool schemas without bound, so a remote client
