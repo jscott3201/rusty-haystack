@@ -4,7 +4,7 @@ The `rusty_haystack` Python package provides access to the Haystack core library
 
 ## Installation
 
-Requires Python 3.8+ and [maturin](https://www.maturin.rs/):
+Requires Python 3.11 or newer (CI and release wheels cover CPython 3.11–3.14) and [maturin](https://www.maturin.rs/):
 
 ```sh
 python -m venv .venv
@@ -681,5 +681,5 @@ Note: Python `datetime.datetime` is not supported directly. Use `HDateTime` inst
 ## Version
 
 ```python
-rh.__version__  # -> "0.1.0"
+rh.__version__  # -> "0.10.0"
 ```

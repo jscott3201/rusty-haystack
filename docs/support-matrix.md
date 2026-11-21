@@ -117,7 +117,7 @@ Release publication remains a separate operation from PR validation.
 | Python wheels | CPython 3.11, 3.12, 3.13, 3.14 × Linux/macOS × x86_64/aarch64: 16 combinations | The release workflow verifies every wheel's metadata/provenance and requires an installed Linux x86_64/CPython 3.12 consumer before staging. Standard CPython 3.14 candidates also run the complete Python suite when the runner architecture matches the wheel; cross-built macOS x86_64 wheels still require separate runtime evidence. Pull requests touching Python packaging also build and qualify this inventory without publication; the bindings CI separately installs and tests Linux x86_64 wheels for all four interpreters |
 | Python source distribution | One archive built with Maturin 1.16.0 | The final archive contains a checked pruned lock; qualification requires full offline locked metadata and a fresh PEP 517 installation outside the checkout before staging |
 | CLI archives | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` | All five archives require metadata/provenance checks; the release workflow executes the downloaded Linux x86_64 archive before staging. Other targets require separate runtime evidence |
-| Rust crates | Core, client, server and CLI | Publication waits for CLI qualification, but cargo publish packages source separately; the tested CLI archive does not qualify the exact crate upload bytes |
+| Rust crates | Core, client, app, MCP, analytics, server and CLI, published in that dependency order | Publication waits for CLI qualification, but cargo publish packages source separately; the tested CLI archive does not qualify the exact crate upload bytes. The GitHub release waits for every crate to publish |
 
 The manual `Artifact Qualification` workflow rehearses one native Linux x86_64
 CLI, CPython 3.12 wheel and source archive through build, GitHub upload/download,
@@ -138,7 +138,7 @@ Each capability process must retain unforced disabled GIL observations for the
 free-threaded cell. PostgreSQL, SQLite, MCP, analytics and free-threaded source
 installation remain explicitly unselected by this wheel profile.
 
-The tag/publication matrix remains the twelve ordinary wheel tuples above. There
+The tag/publication matrix remains the sixteen ordinary wheel tuples above. There
 is no Windows wheel or Python 3.15 selection. Other interpreter, feature, backend
 and platform combinations require separate execution evidence. PyO3 is not built
 with `abi3`; `cp314-cp314t` is a version-specific free-threaded ABI. One interpreter's
