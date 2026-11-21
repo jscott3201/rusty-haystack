@@ -143,6 +143,9 @@ class WorkflowContracts(unittest.TestCase):
         for step in commands:
             self.assertRegex(step,r'run: cargo publish --locked -p [a-z-]+\n')
             self.assertIn('CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}',step)
+            crate=re.search(r'-p rusty-haystack-([a-z]+)\n',step)[1]
+            self.assertIn(f"if: steps.published.outputs.{crate} != 'true'\n",step)
+            self.assertIn(f' {crate}',re.search(r'for crate in ([a-z ]+); do',''.join(publication))[0])
         dockerfile=(ROOT/'Dockerfile').read_text()
         for member in ('haystack-app','haystack-mcp','haystack-analytics'):
             self.assertIn(f'COPY {member}/ {member}/',dockerfile)

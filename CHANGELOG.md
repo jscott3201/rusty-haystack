@@ -40,6 +40,9 @@ what each one is and is not qualified for.
   subscription owner. `AppState` changes shape: `graph` is a `GraphView`, `namespace` is a
   method, `his` is optional, application services are new fields, and `ws::ws_handler`
   takes different extractors. (#74, #79) See `docs/state-subscriptions.md`.
+- Smaller source breaks from the same work: `ClientError` gains an `H5` variant, the
+  `handshake_token` field in `AuthHeader` is now `Option<String>`, and
+  `format_www_authenticate` drops its `hash` parameter.
 - The Rust HTTP client no longer follows redirects, and reqwest retries are off, so an
   operation whose outcome is uncertain is never replayed. (#67) See `docs/client.md`.
 

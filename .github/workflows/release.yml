@@ -175,8 +175,25 @@ jobs:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
 
+      # A re-run after a partial failure must not stop at the first crate that
+      # already exists. Only a definite 200 skips; any other answer publishes.
+      - name: Find crates already published at this version
+        id: published
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          for crate in core client app mcp analytics server cli; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -A 'release-workflow' "https://crates.io/api/v1/crates/rusty-haystack-$crate/$version" || true)"
+            if [ "$code" = "200" ]; then
+              echo "rusty-haystack-$crate $version is already on crates.io; skipping"
+              echo "$crate=true" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
       # Crates are separately packaged from source, not the qualified CLI archive.
       - name: Publish rusty-haystack-core
+        if: steps.published.outputs.core != 'true'
         run: cargo publish --locked -p rusty-haystack-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -185,6 +202,7 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-client
+        if: steps.published.outputs.client != 'true'
         run: cargo publish --locked -p rusty-haystack-client
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -193,6 +211,7 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-app
+        if: steps.published.outputs.app != 'true'
         run: cargo publish --locked -p rusty-haystack-app
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -201,6 +220,7 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-mcp
+        if: steps.published.outputs.mcp != 'true'
         run: cargo publish --locked -p rusty-haystack-mcp
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -209,6 +229,7 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-analytics
+        if: steps.published.outputs.analytics != 'true'
         run: cargo publish --locked -p rusty-haystack-analytics
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -217,6 +238,7 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-server
+        if: steps.published.outputs.server != 'true'
         run: cargo publish --locked -p rusty-haystack-server
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -225,6 +247,7 @@ jobs:
         run: sleep 30
 
       - name: Publish rusty-haystack-cli
+        if: steps.published.outputs.cli != 'true'
         run: cargo publish --locked -p rusty-haystack-cli
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

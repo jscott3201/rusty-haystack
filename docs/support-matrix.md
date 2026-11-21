@@ -155,7 +155,8 @@ policy masking, cursor invalidation, and unavailable routes. These are local
 behavior checks, not production authorization-policy certification or artifact
 publication qualification. See [shared read contracts](shared-reads.md).
 
-The CLI container copies `haystack-app` as a workspace member. Crates.io publication
+The CLI container copies `haystack-app`, `haystack-mcp` and `haystack-analytics` as
+workspace members. Crates.io publication
 orders core, client, app, MCP, analytics, server, then CLI, with the existing index
 wait between packages. The CLI/wheel/sdist artifact matrix and receipt identity remain separate
 from this source-package ordering.
