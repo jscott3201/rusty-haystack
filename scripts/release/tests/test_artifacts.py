@@ -211,6 +211,21 @@ class ArtifactCLI(unittest.TestCase):
             after.write_text(changed)
             self.invoke("check-lock-prune", "--before", before, "--after", after, success=False)
 
+    def test_lock_pruning_compares_resolved_edges_after_version_disambiguation(self):
+        before = self.root / "before.lock"; after = self.root / "after.lock"
+        app = 'version = 4\n[[package]]\nname="app"\nversion="1.0.0"\ndependencies=["lib 2.0.0"]\n'
+        old = '[[package]]\nname="lib"\nversion="1.0.0"\n'
+        kept = '[[package]]\nname="lib"\nversion="2.0.0"\nchecksum="same"\n'
+        before.write_text(app + old + kept)
+        after.write_text(app.replace('"lib 2.0.0"', '"lib"') + kept)
+        self.assertEqual(self.invoke("check-lock-prune", "--before", before, "--after", after)["removed"], [["lib", "1.0.0", ""]])
+        # An unqualified edge that silently switches to the other version is
+        # still a changed dependency, even though that package already existed.
+        after.write_text(app.replace('"lib 2.0.0"', '"lib"') + old)
+        self.invoke("check-lock-prune", "--before", before, "--after", after, success=False)
+        after.write_text(app.replace('"lib 2.0.0"', '"lib"') + old + kept)
+        self.invoke("check-lock-prune", "--before", before, "--after", after, success=False)
+
     def test_lock_pruning_allows_only_unreferenced_removal(self):
         before = self.root / "before.lock"; after = self.root / "after.lock"
         keep = 'version = 4\n[[package]]\nname="app"\nversion="1.0.0"\ndependencies=["lib"]\n[[package]]\nname="lib"\nversion="1.0.0"\nchecksum="old"\n'

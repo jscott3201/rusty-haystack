@@ -77,9 +77,9 @@ jobs:
             image: quay.io/pypa/manylinux2014_x86_64:latest
           - platform: linux-aarch64
             output_prefix: wheel_linux_aarch64
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            image: ghcr.io/rust-cross/manylinux2014-cross:aarch64
+            image: quay.io/pypa/manylinux2014_aarch64:latest
           - platform: macos-x86_64
             output_prefix: wheel_macos_x86_64
             os: macos-latest
@@ -119,6 +119,7 @@ jobs:
           cat target/builder.env >> "$GITHUB_ENV"
           python -c 'import json,pathlib; print(pathlib.Path(json.load(open("target/builder.json"))["executables"]["cargo"]["path"]).parent)' >> "$GITHUB_PATH"
       - name: Build one wheel and capture actual Linux builder versions
+        if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
         with:
           rust-toolchain: "1.99.1"
@@ -134,6 +135,14 @@ jobs:
             export PATH="$CARGO_BIN:$PATH"
         env:
           CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
+      # The bound PATH contains actual compiler binaries, not rustup proxies;
+      # maturin-action's `rustc +toolchain` setup cannot run in that environment.
+      - name: Build with the bound macOS compiler
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+          PYTHON: ${{ matrix.python.version }}
+        run: maturin build --locked --release --target "$TARGET" --out target/release-candidate/files -m rusty-haystack/Cargo.toml -i "$PYTHON"
       - name: Seal final wheel bytes
         env:
           SOURCE: ${{ github.sha }}

@@ -105,6 +105,11 @@ class WorkflowContracts(unittest.TestCase):
         for tag in ('cp311', 'cp312', 'cp313', 'cp314'):
             self.assertIn(f'            tag: {tag}', build)
             self.assertIn(f'            directory: {tag}-{tag}', build)
+        self.assertIn('os: ubuntu-24.04-arm', build)
+        self.assertIn('image: quay.io/pypa/manylinux2014_aarch64:latest', build)
+        mac = next(step for step in steps(build) if 'name: Build with the bound macOS compiler' in step)
+        self.assertIn("if: runner.os == 'macOS'", mac)
+        self.assertIn('maturin build --locked --release --target "$TARGET"', mac)
         self.assertIn('manylinux: auto', build)
         self.assertIn('--locked --release', build)
 
