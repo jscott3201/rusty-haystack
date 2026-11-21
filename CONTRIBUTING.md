@@ -6,7 +6,7 @@
   `rust-toolchain.toml`. It is also the CI MSRV lane for the workspace's declared
   `rust-version = "1.99"`. A separate Ubuntu lane pins current stable Rust 1.99.1; both
   pins currently coincide and move only through reviewed changes.
-- **[uv](https://docs.astral.sh/uv/)** and **Python 3.12**, for the Python bindings and the full schema/client validation stage. CI pins the interpreter version deliberately — `pyo3` is configured without
+- **[uv](https://docs.astral.sh/uv/)** and **Python 3.11–3.14**, for the Python bindings; the full schema/client validation stage and local gate use **Python 3.12**. CI pins the interpreter version deliberately — `pyo3` is configured without
   `abi3`, so every build is interpreter-specific.
 
 ## Dependency baseline

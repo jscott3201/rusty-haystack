@@ -9,7 +9,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[3]
 HELPER = REPO / "scripts/release/artifacts.py"
 BINARY_KEYS = ('cli_linux_x86_64', 'cli_linux_aarch64', 'cli_macos_x86_64', 'cli_macos_aarch64', 'cli_windows_x86_64')
-WHEEL_KEYS = tuple('wheel_'+platform+'_'+py for platform in ('linux_x86_64','linux_aarch64','macos_x86_64','macos_aarch64') for py in ('cp311','cp312','cp313'))
+WHEEL_KEYS = tuple('wheel_'+platform+'_'+py for platform in ('linux_x86_64','linux_aarch64','macos_x86_64','macos_aarch64') for py in ('cp311','cp312','cp313','cp314'))
 
 
 class DownloadIdentityTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class DownloadIdentityTests(unittest.TestCase):
     def test_python_and_publication_ids_bind_the_required_successful_jobs(self):
         wheels={key:str(index+201) for index,key in enumerate(WHEEL_KEYS)}
         result=self.invoke('python',{'build-wheels':{'result':'success','outputs':wheels},'build-sdist':{'result':'success','outputs':{'sdist':'300'}}})
-        self.assertEqual(len(result['artifact-ids'].split(',')),13)
+        self.assertEqual(len(result['artifact-ids'].split(',')),17)
         needs={'validate':{'result':'success','outputs':{}},'qualify-binaries':{'result':'success','outputs':{'packages':'401','proof':'402'}}}
         result=self.invoke('publish-binaries',needs)
         self.assertEqual((result['packages'],result['proof']),('401','402'))

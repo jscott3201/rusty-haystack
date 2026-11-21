@@ -204,8 +204,13 @@ jobs:
   # covers it. Without this job the Python suite rots unnoticed — 11 of its tests
   # spent four months failing against APIs removed in v0.8.0.
   python:
-    name: Python Bindings
+    name: Python Bindings (${{ matrix.python }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -214,14 +219,15 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: pyo3
+          key: pyo3-${{ matrix.python }}
       # Exact version: setup-uv stopped publishing floating major tags after v7,
       # so `@v10` does not resolve.
       - uses: astral-sh/setup-uv@v10.3.3
       # Pinned rather than inherited from the runner image, so the interpreter
       # the extension is built against does not drift. pyo3 is configured
       # without abi3, making every build interpreter-specific.
-      - run: uv venv --python 3.12
+      - run: uv python install ${{ matrix.python }}
+      - run: uv venv --python ${{ matrix.python }}
       - run: uv pip install maturin==1.16.0 pytest
       # The Clippy job above excludes this crate because `cargo clippy --locked --workspace`
       # needs an interpreter to resolve the pyo3 build script. This job has one, so
@@ -240,13 +246,34 @@ jobs:
       - name: Run Python tests
         run: |
           source .venv/bin/activate
+          python -c "import rusty_haystack; print(rusty_haystack.__file__)"
           pytest rusty-haystack/tests -q
+      - name: Build and validate wheel metadata
+        run: |
+          source .venv/bin/activate
+          maturin build --locked --release -m rusty-haystack/Cargo.toml --out "$RUNNER_TEMP/python-wheels" -i python
+          uv pip install twine
+          python -m twine check "$RUNNER_TEMP"/python-wheels/*.whl
+      - name: Test wheel in a clean environment
+        run: |
+          uv venv --python ${{ matrix.python }} "$RUNNER_TEMP/wheel-venv"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" "$RUNNER_TEMP"/python-wheels/*.whl pytest
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I -c "import rusty_haystack; print(rusty_haystack.__file__)"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I -m pytest --import-mode=importlib rusty-haystack/tests -q
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-wheel-${{ matrix.python }}
+          path: ${{ runner.temp }}/python-wheels/*.whl
+          if-no-files-found: error
       # Isolated locked tooling; no product PyO3 environment or generated code is reused.
       - name: Validate schemas and generated client over loopback HTTP
+        if: matrix.python == '3.12'
         run: uv run --locked --project scripts/schema-client --python 3.12 python scripts/schema-client/validate.py
       - name: Qualify installed MCP schemas, scope, signals and pipe cleanup
+        if: matrix.python == '3.12'
         run: uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify.py
       - name: Qualify installed authenticated MCP HTTP and combined profiles
+        if: matrix.python == '3.12'
         run: |
           uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py
           uv run --locked --project scripts/schema-client --python 3.12 python scripts/mcp/qualify_http.py --features mcp,mcp-http

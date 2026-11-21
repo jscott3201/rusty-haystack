@@ -22,7 +22,7 @@ RUST = "1.99.1"
 MATURIN = "1.16.0"
 BINARY_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc")
 WHEEL_TARGETS = BINARY_TARGETS[:4]
-PYTHONS = ("cp311", "cp312", "cp313")
+PYTHONS = ("cp311", "cp312", "cp313", "cp314")
 SELECTED_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-apple-darwin")
 MAX_BYTES = 512 * 1024 * 1024
 TYPING_FILES = ("__init__.pyi", "auth.pyi", "client.pyi", "codecs.pyi", "data.pyi", "filter.pyi", "graph.pyi", "kinds.pyi", "ontology.pyi", "server.pyi", "units.pyi", "py.typed")
@@ -348,17 +348,24 @@ def lock_prune(before, after):
         return result
     prior, final = packages(old), packages(new)
     require(final and final.keys() <= prior.keys(), "lock pruning added or upgraded a package")
+    def dependency_keys(package, inventory):
+        result = set()
+        dependencies = package.get("dependencies", [])
+        for dep in dependencies:
+            parts = dep.split(" ", 2)
+            matching = [key for key in inventory if key[0] == parts[0] and (len(parts) < 2 or key[1] == parts[1]) and (len(parts) < 3 or key[2] == parts[2].strip("()"))]
+            require(len(matching) == 1, "lock pruning removed a referenced package or left an ambiguous dependency")
+            result.add(matching[0])
+        require(len(result) == len(dependencies), "duplicate lock dependency")
+        return result
     for key, item in final.items():
         require({k: v for k, v in item.items() if k != "dependencies"} == {k: v for k, v in prior[key].items() if k != "dependencies"}, "retained lock package changed")
-        old_edges = prior[key].get("dependencies", [])
-        edges = item.get("dependencies", [])
-        require(len(edges) == len(set(edges)) and set(edges) <= set(old_edges), "lock pruning added a dependency edge")
+        # Cargo shortens version-qualified edges when pruning removes the other
+        # version. Compare resolved package identities, never their spelling.
+        old_edges = dependency_keys(prior[key], prior)
+        edges = dependency_keys(item, final)
+        require(edges <= old_edges, "lock pruning added a dependency edge")
     removed = prior.keys() - final.keys()
-    for package in final.values():
-        for dep in package.get("dependencies", []):
-            parts = dep.split(" ", 2)
-            matching = [key for key in prior if key[0] == parts[0] and (len(parts) < 2 or key[1] == parts[1]) and (len(parts) < 3 or key[2] == parts[2].strip("()"))]
-            require(len(matching) == 1 and matching[0] not in removed, "lock pruning removed a referenced package")
     return [list(key) for key in sorted(removed)]
 
 

@@ -36,6 +36,15 @@ class SelectedWheelTests(unittest.TestCase):
             _, details = a.inspect_file(path, "wheel", "0.9.0", "x86_64-unknown-linux-gnu", "cp314t")
             self.assertEqual((details["python"], details["abi"]), ("cp314", "cp314t"))
 
+    def test_standard_314_wheel_is_admitted_without_admitting_free_threaded_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.wheel(Path(directory), abi="cp314")
+            _, details = a.inspect_file(path, "wheel", "0.9.0", "x86_64-unknown-linux-gnu", "cp314")
+            self.assertEqual((details["python"], details["abi"]), ("cp314", "cp314"))
+            with self.assertRaises(a.Invalid):
+                a.inspect_file(path, "wheel", "0.9.0", "x86_64-unknown-linux-gnu", "cp313")
+        self.assertNotIn(("wheel", "x86_64-unknown-linux-gnu", "cp314t"), a.expected_tuples("python"))
+
     def test_wrong_free_threaded_abi_and_unselected_platform_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.wheel(Path(directory), abi="cp314")
@@ -46,8 +55,8 @@ class SelectedWheelTests(unittest.TestCase):
                 a.inspect_file(path, "wheel", "0.9.0", "aarch64-unknown-linux-gnu", "cp314t")
 
     def test_selected_cells_do_not_expand_release_inventory(self):
-        self.assertEqual(a.PYTHONS, ("cp311", "cp312", "cp313"))
-        self.assertEqual(len(a.expected_tuples("python")), 13)
+        self.assertEqual(a.PYTHONS, ("cp311", "cp312", "cp313", "cp314"))
+        self.assertEqual(len(a.expected_tuples("python")), 17)
 
     def test_archived_bytecode_is_rejected_before_installation(self):
         with tempfile.TemporaryDirectory() as directory:
