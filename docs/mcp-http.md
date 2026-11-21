@@ -1,7 +1,7 @@
 # Read-only MCP over local Streamable HTTP
 
 The optional `http` feature of `rusty-haystack-mcp` serves the existing
-`haystack_query` and `haystack_read` tools through official `rmcp = 3.8.0` and MCP
+`haystack_query` and `haystack_read` tools through official `rmcp = 3.9.0` and MCP
 `2026-07-28`. The CLI selects it with `mcp-http`. HTTP-only builds do not enable
 stdio, PostgreSQL, Python bindings, tasks, or new read/write capabilities. Select
 `mcp,mcp-http` to install both independent CLI commands.

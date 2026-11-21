@@ -7,7 +7,7 @@ core, application and CLI builds do not activate MCP. PostgreSQL, Python binding
 and an HTTP listener are unnecessary for this profile. The independent
 [authenticated HTTP profile](mcp-http.md) uses the `http`/CLI `mcp-http` feature.
 
-The adapter uses official `rmcp = 3.8.0`, with default features disabled and only
+The adapter uses official `rmcp = 3.9.0`, with default features disabled and only
 its server support selected in production. It supports exactly MCP `2026-07-28`
 discovery and `2025-11-25` initialization. Client metadata negotiates protocol
 behavior; it cannot select a principal, scope, dataset, path, URL or command.
