@@ -317,6 +317,10 @@ what each one is and is not qualified for.
 - The `Dockerfile` copied neither `haystack-mcp/` nor `haystack-analytics/`, so Cargo could
   not load the workspace and the image did not build. It copies both now; neither is
   compiled into the image.
+- A Windows checkout with `core.autocrlf` rewrote the embedded Xeto profile sources to
+  CRLF, their pinned digests stopped matching and the catalog refused to load, so every
+  `rusty-haystack-app` service failed to construct in a Windows build. `.gitattributes`
+  now checks all text files out with LF on every platform.
 
 ## 0.9.0
 
