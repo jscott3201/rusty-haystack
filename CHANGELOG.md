@@ -10,9 +10,12 @@ for what the release contains.
 
 ### Fixed
 
-- The release workflow passed its cross-build matrix flag as `CROSS_BUILD`, which the
-  archive builder rejects as an unrecorded `CROSS_*` build override, so the aarch64 Linux
-  CLI archive could not be built. The flag is renamed.
+- The aarch64 Linux CLI archive could not be built. The release workflow passed its
+  cross-build matrix flag as `CROSS_BUILD`, which the archive builder rejects as an
+  unrecorded `CROSS_*` build override; behind that, the pinned `cross` 0.2.5 could not
+  read this workspace's metadata and fell back to a host cargo it could not drive. The
+  archive is now built natively on an ARM runner, like the aarch64 wheels, and links
+  against that runner's glibc as the x86_64 archive does on its runner.
 
 ### Changed
 

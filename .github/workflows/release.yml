@@ -57,8 +57,9 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             output: cli_linux_aarch64
-            runner: ubuntu-latest
-            cross: true
+            # Native ARM runner: the pinned cross 0.2.5 can no longer read this
+            # workspace's metadata and fell back to a host cargo it cannot drive.
+            runner: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             output: cli_macos_x86_64
             runner: macos-latest
@@ -80,24 +81,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install pinned cross builder
-        if: matrix.cross
-        run: |
-          cargo install cross --version 0.2.5 --locked
-          docker pull ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
       - name: Build and seal one archive
         shell: bash
         env:
           SOURCE: ${{ github.sha }}
           TARGET: ${{ matrix.target }}
-          # Not CROSS_*: build.py rejects that prefix as an unrecorded build override.
-          USE_CROSS_IMAGE: ${{ matrix.cross }}
-        run: |
-          extra=()
-          if [ "$USE_CROSS_IMAGE" = "true" ]; then
-            extra=(--cross-image ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5)
-          fi
-          python scripts/release/build.py cli --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work" "${extra[@]}"
+        run: python scripts/release/build.py cli --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work"
       - uses: actions/upload-artifact@v7
         id: candidate
         with:
