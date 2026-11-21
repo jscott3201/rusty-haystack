@@ -1,6 +1,17 @@
 name: Python Release
 
 on:
+  # Build and qualify candidates before release; publication remains tag-only.
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/python.yml'
+      - 'rusty-haystack/**'
+      - 'scripts/release/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -16,7 +27,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE" --tag "$GITHUB_REF_NAME"
+      - run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE"
+      - if: startsWith(github.ref, 'refs/tags/v')
+        run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE" --tag "$GITHUB_REF_NAME"
 
   build-wheels:
     name: Build wheel (${{ matrix.target }}, ${{ matrix.python.tag }})
@@ -26,15 +39,19 @@ jobs:
       wheel_linux_x86_64_cp311: ${{ steps.identity.outputs.wheel_linux_x86_64_cp311 }}
       wheel_linux_x86_64_cp312: ${{ steps.identity.outputs.wheel_linux_x86_64_cp312 }}
       wheel_linux_x86_64_cp313: ${{ steps.identity.outputs.wheel_linux_x86_64_cp313 }}
+      wheel_linux_x86_64_cp314: ${{ steps.identity.outputs.wheel_linux_x86_64_cp314 }}
       wheel_linux_aarch64_cp311: ${{ steps.identity.outputs.wheel_linux_aarch64_cp311 }}
       wheel_linux_aarch64_cp312: ${{ steps.identity.outputs.wheel_linux_aarch64_cp312 }}
       wheel_linux_aarch64_cp313: ${{ steps.identity.outputs.wheel_linux_aarch64_cp313 }}
+      wheel_linux_aarch64_cp314: ${{ steps.identity.outputs.wheel_linux_aarch64_cp314 }}
       wheel_macos_x86_64_cp311: ${{ steps.identity.outputs.wheel_macos_x86_64_cp311 }}
       wheel_macos_x86_64_cp312: ${{ steps.identity.outputs.wheel_macos_x86_64_cp312 }}
       wheel_macos_x86_64_cp313: ${{ steps.identity.outputs.wheel_macos_x86_64_cp313 }}
+      wheel_macos_x86_64_cp314: ${{ steps.identity.outputs.wheel_macos_x86_64_cp314 }}
       wheel_macos_aarch64_cp311: ${{ steps.identity.outputs.wheel_macos_aarch64_cp311 }}
       wheel_macos_aarch64_cp312: ${{ steps.identity.outputs.wheel_macos_aarch64_cp312 }}
       wheel_macos_aarch64_cp313: ${{ steps.identity.outputs.wheel_macos_aarch64_cp313 }}
+      wheel_macos_aarch64_cp314: ${{ steps.identity.outputs.wheel_macos_aarch64_cp314 }}
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +65,9 @@ jobs:
           - version: "3.13"
             tag: cp313
             directory: cp313-cp313
+          - version: "3.14"
+            tag: cp314
+            directory: cp314-cp314
         platform: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64]
         include:
           - platform: linux-x86_64

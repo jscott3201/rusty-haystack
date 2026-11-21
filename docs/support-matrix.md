@@ -18,7 +18,7 @@ policy in `scripts/ci/policy.py` rejects an unknown event, target branch, or pro
 | Rustfmt and MSRV Clippy | Ubuntu | Ubuntu | Formatting; workspace all-target lint excluding PyO3; separate core `chrono-tz` lint |
 | Core minimal and default | Ubuntu | Ubuntu | Package-only Clippy and tests, separately with and without `--no-default-features` |
 | Current stable Rust 1.99.1 | Ubuntu | Ubuntu | Separate named lane with the workspace and `chrono-tz` Clippy/test selections |
-| Python bindings | Ubuntu, CPython 3.12 | Ubuntu, CPython 3.12 | PyO3 Clippy, locked release-mode `maturin develop` with Maturin 1.16.0, then pytest |
+| Python bindings | Ubuntu, CPython 3.11–3.14 | Ubuntu, CPython 3.11–3.14 | PyO3 Clippy, locked release-mode `maturin develop` with Maturin 1.16.0, import and pytest; wheel metadata validation and full pytest in a clean wheel environment |
 | Schema and generated HTTP client | Ubuntu, Python 3.12 | Ubuntu, Python 3.12 | Locked OpenAPI/JSON Schema validators and unedited openapi-python-client output against a real local fixture; part of the existing Python job |
 | MCP pipe profile | Ubuntu | Ubuntu, macOS adapter tests; Ubuntu installed fixture | Explicit `stdio`/CLI `mcp` feature tests and Ubuntu Clippy; fresh installed default H4 and opt-in Jeto discovery, independent boxed schemas/selected-value decoder, scope, EOF/signals and pipe backpressure; no Windows stdio claim |
 | MCP local HTTP profile | Ubuntu | Ubuntu, macOS adapter tests; Ubuntu installed fixture | Explicit `http`/CLI `mcp-http` and combined feature tests; default H4 and opt-in Jeto, offline RS256 fixture issuer, SDK/raw HTTP, independent boxed schemas/selected-value decoder, caller scope, cancellation and socket backpressure; local JSON-response profile only, no production TLS/IdP or external host claim |
@@ -114,7 +114,7 @@ Release publication remains a separate operation from PR validation.
 
 | Artifact | Configured inventory | Current qualification boundary |
 |---|---|---|
-| Python wheels | CPython 3.11, 3.12, 3.13 × Linux/macOS × x86_64/aarch64: 12 combinations | The release workflow verifies every wheel's metadata/provenance and requires an installed Linux x86_64/CPython 3.12 consumer before staging; the other eleven tuples require separate runtime evidence |
+| Python wheels | CPython 3.11, 3.12, 3.13, 3.14 × Linux/macOS × x86_64/aarch64: 16 combinations | The release workflow verifies every wheel's metadata/provenance and requires an installed Linux x86_64/CPython 3.12 consumer before staging; the other fifteen tuples require separate runtime evidence. Pull requests touching Python packaging also build and qualify this inventory without publication; the bindings CI separately installs and tests Linux x86_64 wheels for all four interpreters |
 | Python source distribution | One archive built with Maturin 1.16.0 | The final archive contains a checked pruned lock; qualification requires full offline locked metadata and a fresh PEP 517 installation outside the checkout before staging |
 | CLI archives | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` | All five archives require metadata/provenance checks; the release workflow executes the downloaded Linux x86_64 archive before staging. Other targets require separate runtime evidence |
 | Rust crates | Core, client, server and CLI | Publication waits for CLI qualification, but cargo publish packages source separately; the tested CLI archive does not qualify the exact crate upload bytes |

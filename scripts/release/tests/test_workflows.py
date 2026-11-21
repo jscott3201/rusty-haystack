@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 GUARD = "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
 BINARY_KEYS = ('cli_linux_x86_64','cli_linux_aarch64','cli_macos_x86_64','cli_macos_aarch64','cli_windows_x86_64')
-WHEEL_KEYS = tuple('wheel_'+platform+'_'+py for platform in ('linux_x86_64','linux_aarch64','macos_x86_64','macos_aarch64') for py in ('cp311','cp312','cp313'))
+WHEEL_KEYS = tuple('wheel_'+platform+'_'+py for platform in ('linux_x86_64','linux_aarch64','macos_x86_64','macos_aarch64') for py in ('cp311','cp312','cp313','cp314'))
 
 
 def jobs(workflow):
@@ -95,6 +95,18 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn('\non:\n  workflow_dispatch:\n',manual)
         self.assertNotRegex(manual,r'(?m)^  (push|pull_request|workflow_call):')
         self.assertNotRegex(manual,r'(secrets\.|id-token:|contents: write|gh-action-pypi-publish|action-gh-release|cargo publish)')
+
+    def test_python_314_candidates_run_before_tagged_publication(self):
+        workflow = self.workflows['python.yml']
+        self.assertIn('  pull_request:', workflow)
+        self.assertIn('  workflow_dispatch:', workflow)
+        build = jobs(workflow)['build-wheels']
+        self.assertIn('      fail-fast: false', build)
+        for tag in ('cp311', 'cp312', 'cp313', 'cp314'):
+            self.assertIn(f'            tag: {tag}', build)
+            self.assertIn(f'            directory: {tag}-{tag}', build)
+        self.assertIn('manylinux: auto', build)
+        self.assertIn('--locked --release', build)
 
     def test_crate_publication_order_includes_application_dependency(self):
         publication=steps(jobs(self.workflows['release.yml'])['publish-crates'])

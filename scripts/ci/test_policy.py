@@ -235,5 +235,20 @@ class WorkflowContractTests(unittest.TestCase):
                     self.check_contract(changed_ci, changed_codeql)
 
 
+class PythonCompatibilityTests(unittest.TestCase):
+    def test_all_interpreters_build_and_test_development_and_wheel_installs(self):
+        ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        python = ci.split('\n  python:\n', 1)[1].split('\n  deny:\n', 1)[0]
+        self.assertIn('python: ["3.11", "3.12", "3.13", "3.14"]', python)
+        self.assertIn('      fail-fast: false', python)
+        self.assertNotIn('continue-on-error:', python)
+        self.assertIn('uv python install ${{ matrix.python }}', python)
+        self.assertIn('maturin develop --locked --release', python)
+        self.assertIn('maturin build --locked --release', python)
+        self.assertIn('python -m twine check target/python-wheels/*.whl', python)
+        self.assertIn('target/wheel-venv/bin/python -I -c', python)
+        self.assertIn('target/wheel-venv/bin/python -I -m pytest --import-mode=importlib rusty-haystack/tests -q', python)
+
+
 if __name__ == "__main__":
     unittest.main()
