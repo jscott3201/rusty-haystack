@@ -509,7 +509,7 @@ def download_ids(profile, needs):
         "selected-wheels": {"build": ("cli", "wheel", "sdist"), "build-ft": ("wheel_ft",)},
         "binaries": {"build-binaries": tuple("cli_" + platform for platform in (*platforms, "windows_x86_64"))},
         "python": {"build-wheels": wheel_keys, "build-sdist": ("sdist",)},
-        "publish-binaries": {"validate": (), "qualify-binaries": ("packages", "proof")},
+        "publish-binaries": {"validate": (), "qualify-binaries": ("packages", "proof"), "publish-crates": ()},
         "publish-python": {"qualify-python": ("packages", "proof")},
     }
     expected = profiles[profile]
