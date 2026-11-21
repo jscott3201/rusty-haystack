@@ -110,6 +110,11 @@ class WorkflowContracts(unittest.TestCase):
         mac = next(step for step in steps(build) if 'name: Build with the bound macOS compiler' in step)
         self.assertIn("if: runner.os == 'macOS'", mac)
         self.assertIn('maturin build --locked --release --target "$TARGET"', mac)
+        smoke = next(step for step in steps(build) if 'name: Test the sealed cp314 wheel' in step)
+        self.assertIn("matrix.python.tag == 'cp314'", smoke)
+        self.assertIn('runner.arch', smoke)
+        self.assertIn('target/release-candidate/files/*.whl pytest', smoke)
+        self.assertIn('-I -m pytest --import-mode=importlib rusty-haystack/tests -q', smoke)
         self.assertIn('manylinux: auto', build)
         self.assertIn('--locked --release', build)
 

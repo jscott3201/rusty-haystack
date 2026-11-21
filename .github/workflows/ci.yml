@@ -251,19 +251,19 @@ jobs:
       - name: Build and validate wheel metadata
         run: |
           source .venv/bin/activate
-          maturin build --locked --release -m rusty-haystack/Cargo.toml --out target/python-wheels -i python
+          maturin build --locked --release -m rusty-haystack/Cargo.toml --out "$RUNNER_TEMP/python-wheels" -i python
           uv pip install twine
-          python -m twine check target/python-wheels/*.whl
+          python -m twine check "$RUNNER_TEMP"/python-wheels/*.whl
       - name: Test wheel in a clean environment
         run: |
-          uv venv --python ${{ matrix.python }} target/wheel-venv
-          uv pip install --python target/wheel-venv/bin/python target/python-wheels/*.whl pytest
-          target/wheel-venv/bin/python -I -c "import rusty_haystack; print(rusty_haystack.__file__)"
-          target/wheel-venv/bin/python -I -m pytest --import-mode=importlib rusty-haystack/tests -q
+          uv venv --python ${{ matrix.python }} "$RUNNER_TEMP/wheel-venv"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" "$RUNNER_TEMP"/python-wheels/*.whl pytest
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I -c "import rusty_haystack; print(rusty_haystack.__file__)"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I -m pytest --import-mode=importlib rusty-haystack/tests -q
       - uses: actions/upload-artifact@v7
         with:
           name: python-wheel-${{ matrix.python }}
-          path: target/python-wheels/*.whl
+          path: ${{ runner.temp }}/python-wheels/*.whl
           if-no-files-found: error
       # Isolated locked tooling; no product PyO3 environment or generated code is reused.
       - name: Validate schemas and generated client over loopback HTTP

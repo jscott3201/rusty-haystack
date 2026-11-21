@@ -141,14 +141,22 @@ jobs:
         if: runner.os == 'macOS'
         env:
           TARGET: ${{ matrix.target }}
-          PYTHON: ${{ matrix.python.version }}
-        run: maturin build --locked --release --target "$TARGET" --out target/release-candidate/files -m rusty-haystack/Cargo.toml -i "$PYTHON"
+        run: maturin build --locked --release --target "$TARGET" --out target/release-candidate/files -m rusty-haystack/Cargo.toml -i "$(command -v python)"
       - name: Seal final wheel bytes
         env:
           SOURCE: ${{ github.sha }}
           TARGET: ${{ matrix.target }}
           PYTHON_TAG: ${{ matrix.python.tag }}
         run: python scripts/release/artifacts.py seal --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --bundle target/release-candidate --kind wheel --tools target/builder.json --target "$TARGET" --python-tag "$PYTHON_TAG"
+      - uses: astral-sh/setup-uv@v10.3.3
+        if: matrix.python.tag == 'cp314' && ((runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')))
+      - name: Test the sealed cp314 wheel on its native host
+        if: matrix.python.tag == 'cp314' && ((runner.arch == 'X64' && startsWith(matrix.target, 'x86_64-')) || (runner.arch == 'ARM64' && startsWith(matrix.target, 'aarch64-')))
+        run: |
+          uv venv --python "$(command -v python)" "$RUNNER_TEMP/cp314-wheel-test"
+          uv pip install --python "$RUNNER_TEMP/cp314-wheel-test/bin/python" target/release-candidate/files/*.whl pytest
+          "$RUNNER_TEMP/cp314-wheel-test/bin/python" -I -c "import rusty_haystack; print(rusty_haystack.__file__)"
+          "$RUNNER_TEMP/cp314-wheel-test/bin/python" -I -m pytest --import-mode=importlib rusty-haystack/tests -q
       - uses: actions/upload-artifact@v7
         id: candidate
         with:

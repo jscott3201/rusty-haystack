@@ -245,9 +245,12 @@ class PythonCompatibilityTests(unittest.TestCase):
         self.assertIn('uv python install ${{ matrix.python }}', python)
         self.assertIn('maturin develop --locked --release', python)
         self.assertIn('maturin build --locked --release', python)
-        self.assertIn('python -m twine check target/python-wheels/*.whl', python)
-        self.assertIn('target/wheel-venv/bin/python -I -c', python)
-        self.assertIn('target/wheel-venv/bin/python -I -m pytest --import-mode=importlib rusty-haystack/tests -q', python)
+        self.assertNotIn('target/wheel-venv', python)
+        self.assertNotIn('target/python-wheels', python)
+        self.assertIn('uv venv --python ${{ matrix.python }} "$RUNNER_TEMP/wheel-venv"', python)
+        self.assertIn('python -m twine check "$RUNNER_TEMP"/python-wheels/*.whl', python)
+        self.assertIn('"$RUNNER_TEMP/wheel-venv/bin/python" -I -c', python)
+        self.assertIn('"$RUNNER_TEMP/wheel-venv/bin/python" -I -m pytest --import-mode=importlib rusty-haystack/tests -q', python)
 
 
 if __name__ == "__main__":
