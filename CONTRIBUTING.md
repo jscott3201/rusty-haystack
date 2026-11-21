@@ -180,12 +180,15 @@ Two traps, both of which CI works around explicitly:
 
 ```
 haystack-core          types, codecs, graph, filter, ontology, xeto, auth
-haystack-app           authorized bounded reads         (depends on core)
 haystack-client        async HTTP/WebSocket client      (depends on core)
+haystack-app           application owner: authorized reads, mutations, history,
+                       subscriptions; optional PostgreSQL/SQLite (depends on core)
+haystack-mcp           read-only MCP stdio/HTTP adapter (depends on core/app)
 haystack-analytics     Parquet history captures, optional snapshot SQL (depends on core/client)
 haystack-server        Axum HTTP API, WebSocket watches (depends on core/app/client)
-haystack-cli           the `haystack` binary            (depends on core/client/server)
-rusty-haystack         PyO3 bindings, cdylib            (depends on core/client/server)
+haystack-cli           the `haystack` binary            (depends on core/app/client/server;
+                                                         mcp with the mcp/mcp-http features)
+rusty-haystack         PyO3 bindings, cdylib            (depends on core/app/client/server)
 ```
 
 Directory names are unprefixed; crates.io names are not. `haystack-core/` publishes as

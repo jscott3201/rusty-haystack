@@ -156,8 +156,8 @@ behavior checks, not production authorization-policy certification or artifact
 publication qualification. See [shared read contracts](shared-reads.md).
 
 The CLI container copies `haystack-app` as a workspace member. Crates.io publication
-orders core, client, app, server, then CLI, with the existing index wait between
-packages. The CLI/wheel/sdist artifact matrix and receipt identity remain separate
+orders core, client, app, MCP, analytics, server, then CLI, with the existing index
+wait between packages. The CLI/wheel/sdist artifact matrix and receipt identity remain separate
 from this source-package ordering.
 
 ## Entity mutation and feed qualification
