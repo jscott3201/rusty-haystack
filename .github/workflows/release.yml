@@ -1,6 +1,13 @@
 name: Release
 
 on:
+  # Build and qualify the CLI archives before release; publication remains tag-only.
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/release/**'
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -24,7 +31,10 @@ jobs:
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
+      - name: Parse package version
+        run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE"
       - name: Check parsed package version against tag
+        if: startsWith(github.ref, 'refs/tags/v')
         run: python scripts/release/artifacts.py version --repo "$GITHUB_WORKSPACE" --tag "$GITHUB_REF_NAME"
       - run: cargo test --locked --workspace --exclude rusty-haystack
 
@@ -80,10 +90,11 @@ jobs:
         env:
           SOURCE: ${{ github.sha }}
           TARGET: ${{ matrix.target }}
-          CROSS_BUILD: ${{ matrix.cross }}
+          # Not CROSS_*: build.py rejects that prefix as an unrecorded build override.
+          USE_CROSS_IMAGE: ${{ matrix.cross }}
         run: |
           extra=()
-          if [ "$CROSS_BUILD" = "true" ]; then
+          if [ "$USE_CROSS_IMAGE" = "true" ]; then
             extra=(--cross-image ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5)
           fi
           python scripts/release/build.py cli --repo "$GITHUB_WORKSPACE" --source "$SOURCE" --target "$TARGET" --bundle "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/build-work" "${extra[@]}"
