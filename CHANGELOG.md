@@ -2,6 +2,47 @@
 
 ## 0.10.0
 
+0.10.0 adds an application layer, `rusty-haystack-app`, that owns authorization, resource
+budgets and lifecycle for embedded Rust, a scoped HTTP profile, Python and a new MCP
+adapter, `rusty-haystack-mcp`. Built on it are optional PostgreSQL and SQLite durability,
+a pinned, partial Haystack 5 typed HTTP profile with contextual Jeto, Python async and
+synchronous clients, and Parquet history capture with optional snapshot SQL
+(`rusty-haystack-analytics`). `HaystackServer::new` and `haystack serve` without
+`--postgres-config` keep the legacy HTTP profile. SCRAM moves to the published
+three-request exchange, which does not interoperate with 0.9.0 and earlier, and the MSRV
+rises to 1.99. Most new profiles are explicit subsets; `docs/support-matrix.md` states
+what each one is and is not qualified for.
+
+### Breaking
+
+- SCRAM authentication follows the published Haystack exchange: `HELLO`, client-first and
+  client-final as three GET requests, unpadded base64url outer fields and response-scoped
+  handshake tokens. It replaces the earlier two-request form, so SCRAM between 0.10.0 and
+  0.9.0-or-earlier clients or servers fails; stored credentials stay valid. Signatures
+  change for `haystack_core::auth::{server_first_message, client_final_message,
+  format_www_authenticate}`, `AuthManager::{handle_hello, handle_scram}` and the Python
+  `client_final_message` and `format_www_authenticate`. (#68) See `docs/server-api.md`.
+- MSRV rises from 1.97 to 1.99 (0.8.1 on crates.io declared 1.94), and the workspace uses
+  resolver 3. The repository pins Rust 1.99.1. (#65, #127)
+- `Kind` gains `None`, `Int`, `Float`, `Buf` and `Nominal` for exact typed values, so
+  exhaustive matches need new arms. H4 codecs and Xeto source export refuse these values
+  unless they are explicitly projected, and `xeto::export::{export_spec, export_lib}` now
+  return `Result<String, CodecError>`. (#73) See `docs/typed-values.md`.
+- `GraphError` gains `ImmutableId` and `RevisionExhausted`. An update that removes,
+  retypes or renames an entity's `id` now fails with `ImmutableId` before changing the
+  graph; previously the stored `id` changed while the graph kept the old identity. (#66)
+- History providers moved from `haystack_server::{his_provider, his_store}` to
+  `haystack_app`. `HistoryProvider` reads through bounded sessions (`open`) that end
+  Complete, Limited, Interrupted or Failed, replacing `his_read`, and
+  `HaystackServer::with_history_provider` takes `Box<dyn haystack_app::HistoryProvider>`.
+  (#77) See `docs/history-reads.md`.
+- `haystack_server::ws::WatchManager` is removed; watches use the application's shared
+  subscription owner. `AppState` changes shape: `graph` is a `GraphView`, `namespace` is a
+  method, `his` is optional, application services are new fields, and `ws::ws_handler`
+  takes different extractors. (#74, #79) See `docs/state-subscriptions.md`.
+- The Rust HTTP client no longer follows redirects, and reqwest retries are off, so an
+  operation whose outcome is uncertain is never replayed. (#67) See `docs/client.md`.
+
 ### Security
 
 - Bump `rmcp` from 3.8.0 to 3.9.0 for
@@ -48,9 +89,78 @@
     changes what `haystack-mcp` does: it never issues server-to-client requests, and
     its HTTP wrapper already rejects client result/error envelopes with
     400/`-32600` before the SDK sees them.
+- An unregistered username with an empty password could complete SCRAM against the
+  server's decoy credentials and receive a bearer token, with no permissions. Issuing a
+  token now requires a registered user. Affects 0.9.0 and earlier, including 0.8.1. (#68)
+- The `rustls` floor rises to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349
+  (#112), and the lockfile moves past RUSTSEC-2026-0381, -0382, -0383, -0385 and -0386
+  in `webpki-roots`, `rustls-webpki`, `webpki-root-certs`, `ctutils` and `tokio` (#122).
 
 ### Added
 
+- `rusty-haystack-app`, a new crate. `ApplicationBuilder` produces one `ApplicationOwner`
+  and borrowed `ApplicationHandle`s that share startup, admission and close across
+  embedded Rust, HTTP listeners and WebSocket tasks. `ReadService` serves authorized,
+  bounded reads with policy masking, reference traversal and cursors bound to principal
+  and snapshot. Servers opt in with `HaystackServer::with_scoped_reads` or
+  `with_application`. Features `postgres` and `sqlite`; none by default. (#74, #75) See
+  `docs/shared-reads.md` and `docs/application-lifecycle.md`.
+- Selectable application services, in process memory unless a durable backend is chosen:
+  atomic entity batches with operation receipts and a revision change feed
+  (`entityBatch`, `entityReceipt`, `changes`; #76); bounded history reads (#77) and
+  authorized one-point history writes with receipts (#78); session-bound state
+  subscriptions shared by native, HTTP and WebSocket callers (#79); and a local
+  point-write simulator with no equipment authority (#94). See `docs/entity-mutations.md`,
+  `docs/history-reads.md`, `docs/history-mutations.md` and `docs/state-subscriptions.md`.
+- PostgreSQL durability (app and CLI feature `postgres`). Entity batches, history,
+  receipts and the change feed survive restart over verified TLS, and several application
+  processes can share one dataset (#98, #100). `haystack serve --postgres-config FILE
+  --users FILE` runs it standalone (#101), and `haystack storage` exports, verifies,
+  imports, activates, cancels and reconciles a backup restore (#102). Qualified against
+  PostgreSQL 18.6 only; other versions, replication and power loss are not. See
+  `docs/postgres-durability.md`, `docs/standalone-postgres.md` and
+  `docs/postgres-recovery.md`.
+- SQLite durability (app feature `sqlite`): `sqlite::application` keeps entities, the
+  change feed and bounded history in one local file with a single owner. There is no CLI
+  selector and Python wheels do not include it; power loss, network filesystems and
+  multiple owners are not qualified. (#119, #120) See `docs/sqlite-durability.md`.
+- A typed HTTP profile, a partial Haystack 5 preview, on servers with an attached
+  application. It serves pinned `sys.api` functions (`readById`, `readByIds`, `read`,
+  `readAll`, `about`, `close`, `ops`, `libs`, `filetypes`) and `ph.api` functions (`nav`,
+  `hisRead`, `hisWrite`, `watchSub`, `watchPoll`, `watchUnsub`, `pointWrite`), selected
+  by `Xeto-Version: 5` or the qualified name. Signatures are pinned to Xeto `873b9224`;
+  library admission is partial and full Haystack 5 is not claimed. (#80, #81, #83–#85,
+  #90, #91, #93, #94) See `docs/typed-http-read.md`.
+- Contextual Jeto in core, preserving integer/float distinction, Number bits and units,
+  Ref display, buffers and nominal provenance; the typed HTTP profile requires exact
+  output or answers 406. A project-owned typed payload carries the same values, and
+  explicit H4 projection reports exact, lossy or unsupported. (#73, #82) See
+  `docs/jeto.md` and `docs/typed-values.md`.
+- `GET /api/rusty-haystack/openapi.json` exports OpenAPI 3.1 and JSON Schema 2020-12 for
+  the operations the caller may use on a scoped server. (#95) See `docs/schema-export.md`.
+- Xeto repositories: the client lists versions and fetches an exact `.xetolib` with
+  SHA-256 provenance (`repoPing`, `repoSearch`, `repoVersions`, `repoFetch`; #96), and an
+  embedding can serve a read-only `/repo/` and admit downloaded packages before activating
+  a new catalog revision (#97). See `docs/repository-client.md` and
+  `docs/repository-serving-admission.md`.
+- `rusty-haystack-mcp`, a new crate: read-only MCP tools `haystack_query`,
+  `haystack_read` and optional `haystack_history`, plus authorized H4 definition and
+  library resources. Features `stdio` and `http`, none by default. The CLI builds them
+  with `--features mcp` (`haystack mcp stdio --config FILE`) and `--features mcp-http`
+  (`haystack mcp http --config FILE`). HTTP is loopback-only with offline RS256 token
+  verification; production identity providers and TLS deployment are not qualified.
+  Output is `haystack-h4-json-v1` by default, `haystack-jeto-v1` by opt-in. (#103,
+  #107, #109–#112) See `docs/mcp-stdio.md` and `docs/mcp-http.md`.
+- `HaystackClient<HttpTransport>::his_read_stream` consumes a finite `bounded-history-v1`
+  Zinc response in bounded batches as bytes arrive and validates completion at EOF.
+  (#121) See `docs/history-reads.md`.
+- Python: `Int`, `Float`, `NoneValue`, `Buf` and `Nominal` value types with typed payload
+  codecs, and complete installed stubs with `py.typed` (#104); `AsyncHaystackClient` (#105)
+  with bounded async watches (#113) and opt-in Haystack 5 `read_by_id`/`read_by_ids`
+  through `H5Config` (#116); `SyncHaystackClient` (#117); embedded in-memory applications
+  through `ApplicationBuilder`, `ApplicationOwner` and `ApplicationHandle` (#106); and
+  `tls_verify=False` for lab HTTPS with self-signed certificates (#115). See
+  `rusty-haystack/README.md`.
 - CPython 3.14. CI now tests the bindings on CPython 3.11–3.14 (Linux x86_64), for each
   interpreter both in place and as a wheel installed into a clean environment, and release
   wheels add `cp314` for Linux and macOS on x86_64 and aarch64: 16 wheels plus the
@@ -79,7 +189,8 @@
   and `Dataset::manifest_sha256` identifies the dataset. Only a fully consumed reader
   reports semantic completeness. Captures are owner-only (`0o700`/`0o600`) on Unix. There
   is no atomic source snapshot, power-loss qualification, overwrite/append/resume, object
-  store, CLI, Python, MCP or DataFusion surface, and Windows durability is not qualified.
+  store, CLI, Python or MCP surface (SQL is the optional `sql` feature below), and Windows
+  durability is not qualified.
   `arrow-array`, `arrow-schema` and `parquet` are new dependencies, pinned exactly. See
   `docs/parquet-history.md`.
 - Snapshot SQL: the optional `sql` feature of `rusty-haystack-analytics` adds
@@ -157,9 +268,27 @@
 - The GitHub release now waits for crates.io publication, so a failed crate upload no
   longer produces a GitHub release; crates uploaded before the failure stay published.
   PyPI publication is a separate workflow and does not wait for it. (#61)
+- Release artifacts are built once and their exact files promoted: each carries a
+  source, lockfile and toolchain receipt, and staged bytes are rechecked before
+  publication. The Linux x86_64 CLI, a CPython 3.12 wheel and the sdist are installed and
+  run before staging; other targets get metadata checks only. Wheels and the sdist now
+  carry the `.pyi` stubs and `py.typed`, and the sdist a consistent pruned lockfile. A
+  release ships five CLI archives, 16 wheels, the sdist and seven crates. (#72, #118) See
+  `docs/artifact-validation.md`.
+- JSON v4 decoding rejects a Number whose `unit` is present but not a string, instead of
+  dropping it. (#77)
+- Project-authored Rust is compiled under `unsafe_code = "forbid"`. (#63)
 
 ### Fixed
 
+- Graph queries could omit valid matches through candidate indexes, indexes registered
+  after entities were added were not backfilled, stale Ref adjacency was retained, and
+  `SharedGraph::write` did not notify subscribers; a changed write batch now notifies once.
+  (#66)
+- The Rust client lost a configured private CA or client identity after authentication, so
+  later requests on fresh connections failed certificate validation. (#67)
+- The Rust WebSocket client could not complete the server's watch protocol, and the JSON
+  v3 decoder could panic on a non-ASCII string by slicing inside a UTF-8 character. (#69)
 - The Zinc parser panicked on input with a non-ASCII char where it expected a fixed-width
   ASCII field — `2024-06-01T00:00:00+0é:00`, for example — because it advanced its byte
   offset by a fixed count and then sliced the string inside a multi-byte char. The server
