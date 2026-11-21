@@ -4,6 +4,33 @@
 
 ### Security
 
+- Bump `rmcp` from 3.8.0 to 3.9.0 for
+  [RUSTSEC-2026-0462](https://rustsec.org/advisories/RUSTSEC-2026-0462.html)
+  (GHSA-c9f9-cp8h-jcj5): the SDK's built-in Streamable HTTP clients buffered response
+  bodies without limit, so a malicious MCP server could exhaust the client's memory.
+  `haystack-mcp` ships only the server side; the affected reqwest client is enabled
+  only in its dev-dependencies, for its own tests against its own server, and no
+  published binary or library build compiles it. The bump clears the advisory for
+  `cargo deny`. Nothing observable through `haystack-mcp` changes:
+  - 3.9.0 adds the Skills extension (`skills/list`, `skills/get`,
+    `resources/directory/read`). `haystack-mcp` does not declare it, and both
+    transports still answer those methods as unavailable (`-32601`; 404 on HTTP)
+    from their own method allowlists, before the SDK's handler.
+  - The SDK's Streamable HTTP server now parses every `Accept` field with quality
+    values and matches media types case-insensitively. The HTTP wrapper keeps its
+    own stricter `Accept`/`Content-Type` checks and still hands the SDK canonical
+    values, so its 406/415 decisions are unchanged.
+  - The remaining server-side fixes concern stateful sessions, server-to-client
+    requests, `x-mcp-header` parameter headers, the SDK's own stdio transport and
+    generated output schemas; `haystack-mcp` uses none of them (stateless HTTP, no
+    outbound requests, its own bounded stdio transport and fixed schemas).
+- `chrono` and `chrono-tz` were declared unmaintained
+  ([RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543.html),
+  [RUSTSEC-2026-0555](https://rustsec.org/advisories/RUSTSEC-2026-0555.html)); no
+  patched version exists and neither notice reports a vulnerability. Both are ignored
+  in `deny.toml` while the migration is tracked in
+  [#134](https://github.com/jscott3201/rusty-haystack/issues/134). Date and time kinds
+  carry chrono types in the public API, so that migration will be a breaking change.
 - Bump `rmcp` from 3.5.1 to 3.8.0 for
   [GHSA-4432-vg92-fqh6](https://github.com/advisories/GHSA-4432-vg92-fqh6) (high): the
   SDK's `StreamableHttpService` cached tool schemas without bound, so a remote client
